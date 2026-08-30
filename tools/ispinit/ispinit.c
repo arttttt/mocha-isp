@@ -298,21 +298,33 @@ int main(int argc, char **argv)
      * one run.
      */
 
-    /* [10] one page of memory through AllocAttr(r0=dev, attrs[32], &out);
-       the stock dummy's attrs[1]=3, size in attrs[4] (impl-2). No free
-       yet: the first submission's state is unknown, an extra release
-       would add variables to the experiment. */
+    /* [10] one page of memory through AllocAttr. No free yet: the first
+       submission's state is unknown, an extra release would add
+       variables to the experiment.
+
+       ARGUMENT SHAPE, read twice before changing: NvIspOpen receives the
+       device handle VALUE (its NvRmChannelOpen never reads param_1, so
+       the value 1 is passed straight through), while AllocAttr receives
+       a POINTER to the device word -- the tagged path reads [param_1]
+       to get the descriptor for the ioctl. Same device word, two
+       different argument shapes, one call apart; do not "fix" either
+       towards the other. */
     {
-        unsigned attrs[32] = {0};
+        /* attrs[0] points at the tag list; the list is one zero word,
+           outside 1..6, so the tag loop stops immediately and the
+           allocation runs tagless on defaults -- what the stock does. */
+        static unsigned tags = 0;
+        /* attrs[1]=3: the tagged path (a flat 0 would take the plain
+           ioctl with a hard alignment check). attrs[3]=1: memory type
+           from a live surface -- the one non-stock value in the recipe
+           (the stock has 0, which is an undefined pick in the
+           dispatcher). */
+        unsigned attrs[8] = { (unsigned)&tags, 3, 0, 1, 0, 0, 0, 0 };
         void *memh = 0;
         unsigned desc[44] = {0}; /* 0xb0 bytes, the stock record size */
 
-        attrs[1] = 3;
-        attrs[4] = 4096; /* one page: stride 256 x height 8 = 2048, with headroom */
-
-        printf("[10] NvRmMemHandleAllocAttr(dev=%p, attrs[32], &memh) -> ",
-               dev);
-        rc = nvRmMemHandleAllocAttr(dev, attrs, &memh);
+        printf("[10] NvRmMemHandleAllocAttr(&dev, attrs[8], &memh) -> ");
+        rc = nvRmMemHandleAllocAttr(&dev, attrs, &memh);
         printf("rc=0x%x memh=%p\n", rc, memh);
 
         if (rc != 0 || memh == 0) {

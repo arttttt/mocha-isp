@@ -151,4 +151,68 @@ if [ "$GOOD" = "0" ]; then
 fi
 
 echo
+
+# 7. Each stub must load its function pointer from its OWN slot.
+#    The stub computes the slot address pc-relatively, and the bias in that
+#    literal is easy to get wrong by a constant: every stub then reads a
+#    neighbouring slot and forwards to a different function, or reads past
+#    the start of .data into .got and jumps into nothing. Nothing else here
+#    notices -- the symbols, the relocations and the epilogues are all
+#    perfectly well formed. It cost a deployment.
+echo "7. each stub addresses its own slot"
+
+python3 - "$SO" <<'PY'
+import sys, struct
+from elftools.elf.elffile import ELFFile
+
+path = sys.argv[1]
+with open(path, 'rb') as fh:
+    elf = ELFFile(fh)
+    symtab = elf.get_section_by_name('.symtab')
+    syms = {s.name: s['st_value'] for s in symtab.iter_symbols() if s.name}
+    text = elf.get_section_by_name('.text')
+    tbase, tdata = text['sh_addr'], text.data()
+
+# The stub form this check understands, as emitted for Thumb:
+#   ldr.w r12, [pc, #8] / add r12, pc / ldr.w r12, [r12] / bx r12 / .word
+STUB = bytes.fromhex('dff808c0') + bytes.fromhex('fc44') \
+     + bytes.fromhex('dcf800c0') + bytes.fromhex('6047')
+ADD_OFF, LIT_OFF = 4, 12          # offsets of `add r12, pc` and of the literal
+
+stubs = [(n[len('shim_slot_'):], v) for n, v in syms.items()
+         if n.startswith('shim_slot_')]
+bad, unknown = [], []
+for name, slot in sorted(stubs):
+    addr = syms.get(name)
+    if addr is None:
+        unknown.append(f"{name}: no stub symbol")
+        continue
+    off = (addr & ~1) - tbase
+    body = tdata[off:off + len(STUB)]
+    if body != STUB:
+        unknown.append(f"{name}: unrecognised stub form")
+        continue
+    lit = struct.unpack_from('<i', tdata, off + LIT_OFF)[0]
+    target = lit + (addr & ~1) + ADD_OFF + 4     # Thumb: pc = insn + 4
+    if target != slot:
+        bad.append((name, target, slot))
+
+print(f"   stubs examined: {len(stubs)}")
+if unknown:
+    print(f"   FORM CHANGED ({len(unknown)}): {unknown[:4]}")
+    print("\nFAIL: this check no longer recognises the stub it is meant to")
+    print("      verify. A check that cannot see is not a check that passed.")
+    sys.exit(1)
+if bad:
+    for name, target, slot in bad[:6]:
+        print(f"   {name}: reads 0x{target:05x}, own slot is 0x{slot:05x}"
+              f"  (off by {slot - target:+d})")
+    print(f"\nFAIL: {len(bad)} stub(s) address the wrong slot.")
+    sys.exit(1)
+print("   every stub reads its own slot")
+PY
+STUBS=$?
+[ "$STUBS" = 0 ] || exit 1
+
+echo
 echo "All invariants hold."

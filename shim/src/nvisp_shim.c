@@ -63,6 +63,34 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 static void *real_handle;
 
 /*
+ * Logging via liblog, loaded the same way as the real library -- dlopen +
+ * dlsym -- so DT_NEEDED stays exactly libdl.so and nothing new is pulled
+ * into mediaserver. The logger is optional: if liblog is unavailable the
+ * shim keeps working silently (stage 1 must not depend on the log channel).
+ */
+static const char log_path[] = "liblog.so";
+static const char log_sym[] = "__android_log_print";
+static int (*log_print)(int prio, const char *tag, const char *text);
+
+#define SHIM_LOG_PRIO_INFO 4
+#define SHIM_LOG_PRIO_ERROR 6
+static const char log_tag[] = "NVISP_SHIM";
+
+static void shim_log(int prio, const char *text)
+{
+    if (log_print == 0) {
+        void *h = dlopen(log_path, SHIM_DLOPEN_FLAGS);
+        if (h != 0) {
+            log_print = (int (*)(int, const char *, const char *))dlsym(h, log_sym);
+        }
+        if (log_print == 0) {
+            return; /* log channel unavailable -- stay silent, keep working */
+        }
+    }
+    log_print(prio, log_tag, text);
+}
+
+/*
  * shim_trap is referenced only from C (shim_resolve below), so a plain
  * static definition is safe: the compiler sees the use and keeps it.
  * shim_resolve is a different case -- see the attribute on its definition.
@@ -89,17 +117,64 @@ void *shim_resolve(unsigned idx)
 {
     const struct shim_binding *b = &shim_bindings[idx];
     void *t;
+    char msg[112];
+    char *q;
 
     if (real_handle == 0) {
         real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
     }
     if (real_handle == 0) {
+        shim_log(SHIM_LOG_PRIO_ERROR,
+                 "resolve: real library load failed, slot -> trap");
+        *(b->slot) = (void *)shim_trap;
         return (void *)shim_trap;
     }
     t = dlsym(real_handle, b->name);
     if (t == 0) {
-        t = (void *)shim_trap;
+        shim_log(SHIM_LOG_PRIO_ERROR,
+                 "resolve: dlsym FAILED, slot -> trap");
+        *(b->slot) = (void *)shim_trap;
+        return (void *)shim_trap;
     }
     *b->slot = t;
+
+    /*
+     * Log the resolution: "resolve [Name] -> 0xABCD". The name is a fixed
+     * literal from the bindings table (longest is 46 characters), so a
+     * 112-byte buffer cannot overflow.
+     */
+    {
+        const char *p = "resolve [";
+        char *w = msg;
+        while (*p != 0) {
+            *w++ = *p++;
+        }
+        p = b->name;
+        while (*p != 0 && w < msg + 100) {
+            *w++ = *p++;
+        }
+        *w++ = ']';
+        *w = 0;
+    }
+    {
+        /* " -> 0xABCD" -- адрес реальной функции */
+        const char *hex = "0123456789abcdef";
+        char *w = msg;
+        while (*w != 0) {
+            w++;
+        }
+        *w++ = ' ';
+        *w++ = '-';
+        *w++ = '>';
+        *w++ = ' ';
+        *w++ = '0';
+        *w++ = 'x';
+        unsigned long v = (unsigned long)t;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            *w++ = hex[(v >> shift) & 0xf];
+        }
+        *w = 0;
+    }
+    shim_log(SHIM_LOG_PRIO_INFO, msg);
     return t;
 }

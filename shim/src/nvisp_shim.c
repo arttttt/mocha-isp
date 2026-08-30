@@ -116,6 +116,7 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_SETSTATS_BUDGET 8
 static unsigned pf_odd_logged;
 static unsigned pf_dumped;
+static unsigned pf_ctx_logged;
 
 /*
  * --- the intervention gate -------------------------------------------------
@@ -639,6 +640,88 @@ void *shim_log_call(unsigned idx, unsigned *saved)
             }
             *dw = 0;
             shim_log(SHIM_LOG_PRIO_INFO, dmsg);
+        }
+
+        /*
+         * Shared-stage context state, first two logged calls. Stages 3
+         * and 4 do NOT branch by mode, so the stock's live values here
+         * are lawful samples for our memory-mode run: the stage-3
+         * relocation handle (+0x123c), the frame counter (+0x1254), the
+         * clocks (+0x1258/+0x125c), the gate object pointer and its
+         * +0x1660 window (48 words) -- the write-channel configuration.
+         * Reads follow pointers the library dereferences itself, null
+         * checks at every level, fixed offsets only.
+         */
+        if (pf_ctx_logged < 2 && saved[0] != 0) {
+            static const char pre[] = "[ctxst]";
+            static const char ctxlbl[] = " ctx+0x123c=0x";
+            static const char cntlbl[] = " ctx+0x1254=";
+            static const char clk1[] = " +0x1258=";
+            static const char clk2[] = " +0x125c=";
+            unsigned c123c = *(const unsigned *)((unsigned)saved[0] + 0x123c);
+            unsigned c1254 = *(const unsigned *)((unsigned)saved[0] + 0x1254);
+            unsigned c1258 = *(const unsigned *)((unsigned)saved[0] + 0x1258);
+            unsigned c125c = *(const unsigned *)((unsigned)saved[0] + 0x125c);
+            unsigned objp = *(const unsigned *)((unsigned)saved[0] + 0x1318);
+            unsigned obj0 = objp != 0 ? *(const unsigned *)objp : 0;
+            char lb[320];
+            char *t = lb;
+            const char *q;
+            int q3;
+
+            pf_ctx_logged++;
+
+            t = lb;
+            q = pre; while (*q) *t++ = *q++;
+            q = ctxlbl; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(c123c >> i) & 0xf];
+            q = cntlbl; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(c1254 >> i) & 0xf];
+            q = clk1; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(c1258 >> i) & 0xf];
+            q = clk2; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(c125c >> i) & 0xf];
+            *t = 0;
+            shim_log(SHIM_LOG_PRIO_INFO, lb);
+
+            t = lb;
+            q = pre; while (*q) *t++ = *q++;
+            q = " obj@0x"; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(objp >> i) & 0xf];
+            q = " obj0=0x"; while (*q) *t++ = *q++;
+            for (i = 28; i >= 0; i -= 4)
+                *t++ = hexdig[(obj0 >> i) & 0xf];
+            *t = 0;
+            shim_log(SHIM_LOG_PRIO_INFO, lb);
+
+            if (objp != 0) {
+                for (q3 = 0; q3 < 3; q3++) {
+                    int k4;
+                    t = lb;
+                    q = pre; while (*q) *t++ = *q++;
+                    q = " obj+0x1660:"; while (*q) *t++ = *q++;
+                    for (k4 = 0; k4 < 16; k4++) {
+                        unsigned w = *(const unsigned *)(objp + 0x1660 +
+                                                         (q3 * 16 + k4) * 4);
+                        int j;
+                        if (k4 != 0)
+                            *t++ = ',';
+                        *t++ = '+';
+                        *t++ = hexdig[(((q3 * 16 + k4) * 4) >> 4) & 0xf];
+                        *t++ = hexdig[((q3 * 16 + k4) * 4) & 0xf];
+                        *t++ = ':';
+                        for (j = 28; j >= 0; j -= 4)
+                            *t++ = hexdig[(w >> j) & 0xf];
+                    }
+                    *t = 0;
+                    shim_log(SHIM_LOG_PRIO_INFO, lb);
+                }
+            }
         }
     }
 

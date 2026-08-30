@@ -157,6 +157,11 @@ check "a10=20:0x3f800000"      1 4194303 rggb slot10=params a10=20:0x3f800000
 check "fill=0x3f800000"        1 4194303 rggb slot14=params fill=0x3f800000
 check "params junk rejected"   0 4194303 rggb a14=junk
 
+echo "-- output-surface relocation write (objout=)"
+check "objout=on"              1 4194303 rggb objout=on
+check "objout=0xdead"          1 4194303 rggb objout=0xdead
+check "objout junk rejected"   0 4194303 rggb objout=junk
+
 echo "-- settings-handle source (hset=)"
 check "hset=p1"                1 4194303 rggb hset=p1
 check "hset=p2a"               1 4194303 rggb hset=p2a

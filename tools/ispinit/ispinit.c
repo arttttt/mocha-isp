@@ -720,6 +720,13 @@ int main(int argc, char **argv)
                                              post-submit output read */
     int obj0_set = 0;
     unsigned obj0_val = 0;
+    /* objout: write the OUTPUT surface handle into the frame-record
+       relocation field -- the only path a surface address can reach
+       the hardware through (libnvisp_v3 has no physical-address
+       imports at all, impl-2) */
+    int objout_on = 0;
+    int objout_manual = 0;
+    unsigned objout_val = 0;
     unsigned final_s = 0;   /* final=<sec>: settle-wait, then re-read
                                syncpoints -- timeouts land late */
 
@@ -1372,6 +1379,26 @@ int main(int argc, char **argv)
                 return 1;
             }
             retry_n = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "objout=", 7) == 0) {
+            /* objout=on -- write the output nvmap handle into the
+               frame-record relocation field; objout=<hex> -- write an
+               arbitrary value there instead. Default off. */
+            if (strcmp(tok + 7, "on") == 0) {
+                objout_on = 1;
+            } else {
+                char *e22 = 0;
+                long v = strtol(tok + 7, &e22, 0);
+                if (e22 == tok + 7 || *e22 != '\0' || v <= 0) {
+                    printf("[0] bad objout '%s', use objout=on|<hex>\n",
+                           argv[ai]);
+                    return 1;
+                }
+                objout_on = 1;
+                objout_manual = 1;
+                objout_val = (unsigned)v;
+            }
             continue;
         }
         if (strncmp(tok, "wait=", 5) == 0) {
@@ -2618,6 +2645,38 @@ round_trip_end:;
                            "to write\n");
                 }
                 print_gate("[11c] after obj0 write", hIsp);
+            }
+
+            /* the output-surface relocation: stage 3 reads its target
+               handle from [obj + 0x250*n + 0x24c], obj = [ctx+0x1318],
+               n = the frame counter at obj+0x0c. No instruction in the
+               whole binary writes that field -- nothing outside the
+               decoded paths does -- so it stays zero and the memory
+               job is never ordered. This key writes OUR output handle
+               there (or an arbitrary value for probing). Null checks
+               at every level; the counter is sanity-capped at 16. */
+            if (objout_on && memh_out != 0 && hIsp != 0) {
+                unsigned objp = *(unsigned *)((unsigned)hIsp + 0x1318);
+                if (objp == 0) {
+                    printf("[11c] objout: [hIsp+0x1318] is null -- "
+                           "skipped\n");
+                } else {
+                    unsigned n = *(unsigned *)(objp + 0x0c);
+                    if (n > 16) {
+                        printf("[11c] objout: frame counter %u > 16 -- "
+                               "skipped\n", n);
+                    } else {
+                        unsigned field = objp + 0x250 * n + 0x24c;
+                        unsigned was = *(unsigned *)field;
+                        unsigned val = objout_manual
+                                           ? objout_val
+                                           : (unsigned)memh_out;
+                        *(unsigned *)field = val;
+                        printf("[11c] objout: obj=0x%x n=%u field=0x%x "
+                               "was=0x%x new=0x%x (out memh=0x%x)\n",
+                               objp, n, field, was, val, memh_out);
+                    }
+                }
             }
 
             printf("[12] aux slots:");

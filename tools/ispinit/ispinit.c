@@ -212,21 +212,21 @@ static void *stage_pre(unsigned slot, unsigned *saved)
 }
 
 /* the shared continuation: the original returned here with its code
-   in r0; print it and return to the parked caller lr */
-__attribute__((used, noinline, naked))
-static void stage_cont(void)
-{
-    __asm__(
-        ".text\n"
-        ".thumb\n"
-        ".thumb_func\n"
-        "stage_cont:\n"
-        "  push {r0, lr}\n"
-        "  bl   stage_post\n"
-        "  ldr  r0, [sp]\n"
-        "  add  sp, #8\n"
-        "  ldr.w pc, [sp, #-4]\n");
-}
+   in r0; print it and return to the parked caller lr. A pure-asm
+   symbol -- a naked C function would define the same label twice. */
+__attribute__((used))
+__asm__(
+    ".text\n"
+    ".thumb\n"
+    ".thumb_func\n"
+    ".hidden stage_cont\n"
+    "stage_cont:\n"
+    "  push {r0, r1}\n"
+    "  bl   stage_post\n"
+    "  ldr  r0, [sp]\n"
+    "  add  sp, #8\n"
+    "  ldr  r1, [sp, #-4]\n"
+    "  bx   r1\n");
 
 __attribute__((used, noinline))
 static void stage_post(unsigned rc)
@@ -1517,8 +1517,8 @@ round_trip_end:;
 /*
  * Hook frame discipline (mirrors the verified shim trampolines).
  * Entry: sp = S (8-aligned), args r0-r3, the library's own stack args
- * at [S..] -- untouched by us. Frame after push (24 bytes):
- *   sp+0..12 = r0..r3, sp+16 = caller lr, sp+20 = scratch.
+ * at [S..] -- untouched by us. Frame after push {r0-r3, r12, lr}
+ * (24 bytes): sp+0..12 = r0..r3, sp+16 = scratch, sp+20 = caller lr.
  * stage_pre prints and returns the original; caller lr parks in the
  * scratch slot; the continuation goes into lr via movw/movt (no
  * literal pool); args reload from the frame; sp returns to S; bx
@@ -1538,13 +1538,13 @@ __asm__(
         ".thumb_func\n" \
         ".hidden stage_hook_" #N "\n" \
         "stage_hook_" #N ":\n" \
-        "  push {r0-r3, lr, r12}\n" \
+        "  push {r0-r3, r12, lr}\n" \
         "  mov  r0, #" #N "\n" \
         "  add  r1, sp, #0\n" \
         "  bl   stage_pre\n" \
         "  mov  r12, r0\n" \
-        "  ldr  r0, [sp, #16]\n" \
-        "  str  r0, [sp, #20]\n" \
+        "  ldr  r0, [sp, #20]\n" \
+        "  str  r0, [sp, #16]\n" \
         "  movw lr, #:lower16:stage_cont\n" \
         "  movt lr, #:upper16:stage_cont\n" \
         "  ldr  r0, [sp, #0]\n" \

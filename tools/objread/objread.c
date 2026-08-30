@@ -10,6 +10,11 @@
  *   size in bytes, default 0x4000 (lead's 16 KiB with slack).
  */
 #include <fcntl.h>
+/* addresses above 2 GiB: off_t must be 64-bit and open needs
+   O_LARGEFILE, otherwise pread goes negative and returns EINVAL */
+#ifndef O_LARGEFILE
+#define O_LARGEFILE 0400000
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +48,7 @@ int main(int argc, char **argv)
         }
     }
 
-    mf = open(mpath, O_RDONLY);
+    mf = open(mpath, O_RDONLY | O_LARGEFILE);
     if (mf < 0) {
         perror("open /proc/pid/mem");
         return 1;
@@ -60,7 +65,7 @@ int main(int argc, char **argv)
     }
     while (done < size) {
         long now = size - done < chunk ? (long)(size - done) : chunk;
-        long r = pread(mf, buf, now, (off_t)(addr + done));
+        long r = pread64(mf, buf, now, (off64_t)((unsigned long long)addr + done));
         if (r <= 0) {
             printf("read stopped at +0x%lx (%s)\n", done,
                    r < 0 ? "error" : "eof");

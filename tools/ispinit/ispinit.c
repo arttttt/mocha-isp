@@ -735,6 +735,8 @@ int main(int argc, char **argv)
     unsigned objlen = 0x1000; /* start small; 0x4000 is the full dump */
     int objdump_on = 0;
     const char *objdump_path = "/data/local/tmp/our_obj.bin";
+    int objdump0_on = 0;
+    const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
     unsigned objset_off[16], objset_val[16];
     int objset_n = 0;
     unsigned final_s = 0;   /* final=<sec>: settle-wait, then re-read
@@ -1415,6 +1417,14 @@ int main(int argc, char **argv)
             objdump_on = 1;
             continue;
         }
+        if (strncmp(tok, "objdump0=", 9) == 0) {
+            /* objdump0=<path> -- EARLY dump, right after Open/load,
+               before the init chain: the state BEFORE statistics and
+               the frame. The mail-1028 companion of objdump=. */
+            objdump0_path = tok + 9;
+            objdump0_on = 1;
+            continue;
+        }
         if (strncmp(tok, "objset=", 7) == 0) {
             /* objset=<off>:<val> -- write one word into our object at
                byte offset <off>; bounds-checked, word-aligned */
@@ -1984,16 +1994,17 @@ round_trip_end:;
                            objset_off[k5], was, objset_val[k5]);
                 }
             }
-            if (objdump_on) {
-                FILE *f = fopen(objdump_path, "wb");
+            if (objdump0_on) {
+                FILE *f = fopen(objdump0_path, "wb");
                 if (f == 0) {
-                    printf("[5d] objdump: cannot open %s\n",
-                           objdump_path);
+                    printf("[5d] objdump0: cannot open %s\n",
+                           objdump0_path);
                 } else {
                     fwrite((void *)objp, 1, objlen, f);
                     fclose(f);
-                    printf("[5d] objdump: %u bytes from obj@0x%x -> "
-                           "%s\n", objlen, objp, objdump_path);
+                    printf("[5d] objdump0: %u bytes from obj@0x%x -> "
+                           "%s (EARLY: before init chain)\n",
+                           objlen, objp, objdump0_path);
                 }
             }
             printf("[5d] obj[0]=0x%x\n", *(unsigned *)objp);
@@ -2993,6 +3004,41 @@ round_trip_end:;
                 printf("[sp verdict]: %d of %d fences reached; deltas "
                        "above -- zeros everywhere means converged\n",
                        reached, fences);
+                /* [12c] LATE object ops: after the submission (and
+                   therefore after the init chain's SetStats/Apply, which
+                   overwrite our writes). objset re-applied here, then
+                   the late dump -- the same point the stock capture is
+                   taken at. */
+                if (objset_n != 0 || objdump_on) {
+                    unsigned objp2 =
+                        *(unsigned *)((unsigned)hIsp + 0x1318);
+                    int k5;
+                    if (objp2 == 0) {
+                        printf("[12c] obj null -- late ops skipped\n");
+                    } else {
+                        for (k5 = 0; k5 < objset_n; k5++) {
+                            unsigned was = *(unsigned *)(objp2 +
+                                objset_off[k5]);
+                            *(unsigned *)(objp2 + objset_off[k5]) =
+                                objset_val[k5];
+                            printf("[12c] objset +0x%x: 0x%x -> 0x%x\n",
+                                   objset_off[k5], was, objset_val[k5]);
+                        }
+                        if (objdump_on) {
+                            FILE *f = fopen(objdump_path, "wb");
+                            if (f == 0) {
+                                printf("[12c] objdump: cannot open "
+                                       "%s\n", objdump_path);
+                            } else {
+                                fwrite((void *)objp2, 1, objlen, f);
+                                fclose(f);
+                                printf("[12c] objdump: %u bytes from "
+                                       "obj@0x%x -> %s (LATE)\n",
+                                       objlen, objp2, objdump_path);
+                            }
+                        }
+                    }
+                }
 
             /* [12b] read the OUTPUT buffer back whatever the rc was:
                the first submission that works must meet the read side

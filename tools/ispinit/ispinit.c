@@ -99,6 +99,19 @@ typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
 typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
                                         const void *buf, unsigned *size);
 typedef int (*NvIspSetIspClockRate_fn)(unsigned hIsp, unsigned rate);
+typedef int (*NvIspHwSettingsCreate_fn)(unsigned devHandle, void *p1,
+                                        unsigned size, void *p2);
+typedef int (*NvIspHwSettingsSetAttribute_fn)(unsigned hSettings,
+                                              unsigned blockId,
+                                              unsigned index, void *buf);
+typedef int (*NvIspSetStats_fn)(unsigned devHandle, unsigned id,
+                                unsigned index, void *buf);
+typedef int (*NvIspHwSettingsApply_fn)(unsigned hSettings, void *mapped,
+                                       unsigned a3, unsigned flags);
+typedef int (*NvIspHwSettingsDestroy_fn)(unsigned hSettings, unsigned size,
+                                         void *p3, unsigned devHandle);
+typedef int (*NvIspSetAttribute_fn)(unsigned hIsp, unsigned attrId,
+                                    void *inVal, void *inSize);
 typedef int (*NvIspGetStatus_fn)(unsigned hIsp, unsigned statusId,
                                  void *value, unsigned *size);
 typedef int (*NvIspClose_fn)(unsigned hIsp);
@@ -251,6 +264,22 @@ static unsigned stage_cur;
 
 #endif /* HOST_ARGTEST */
 
+/* the stage-3 gate field, printed after every init-chain step */
+static void print_gate(const char *tag, unsigned hIsp)
+{
+    unsigned g;
+
+    if (hIsp == 0)
+        return;
+    g = *(unsigned *)(hIsp + 0x1318);
+    printf("%s: gate ctx1318=0x%x", tag, g);
+    if (g != 0)
+        printf(" obj0=0x%x", *(unsigned *)g);
+    else
+        printf(" obj0=null");
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -264,6 +293,12 @@ int main(int argc, char **argv)
     NvRmMemRW_fn nvRmMemRead;
     NvIspOpen_fn nvIspOpen;
     NvIspSetConfiguration_fn nvIspSetConfiguration;
+    NvIspHwSettingsCreate_fn nvIspHwSettingsCreate;
+    NvIspHwSettingsSetAttribute_fn nvIspHwSettingsSetAttribute;
+    NvIspSetStats_fn nvIspSetStats;
+    NvIspHwSettingsApply_fn nvIspHwSettingsApply;
+    NvIspHwSettingsDestroy_fn nvIspHwSettingsDestroy;
+    NvIspSetAttribute_fn nvIspSetAttribute;
     NvIspProcessFrame_fn nvIspProcessFrame;
     NvIspSetIspClockRate_fn nvIspSetIspClockRate;
     NvIspGetStatus_fn nvIspGetStatus;
@@ -316,6 +351,10 @@ int main(int argc, char **argv)
     unsigned cfg2_val = cfg_mode2;        /* mode-2 word, stock value */
     int cfg2_set = 0;
     unsigned nvisp_base;
+    unsigned hset = 0;   /* settings handle, if Create produces one */
+    /* stock init-chain steps, each toggleable: init=<name>:off */
+    int st_create = 1, st_sattr = 1, st_stats = 1;
+    int st_apply = 1, st_setattr = 1, st_destroy = 1;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
     /* ctx=<off>:<count> -- ISP-context dumps, default none */
     unsigned ctx_off[4], ctx_cnt[4];
@@ -600,6 +639,41 @@ int main(int argc, char **argv)
             ctxp_n++;
             continue;
         }
+        if (strncmp(tok, "init=", 5) == 0) {
+            /* init=<name>:on|off -- toggle a stock init-chain step.
+               Names: create, sattr (14x HwSettingsSetAttribute),
+               stats (4x SetStats), apply, setattr (the debug-flag
+               SetAttribute), destroy. Default all on. */
+            char *colon;
+            char *e9 = 0;
+            int *flag = 0;
+            colon = strchr(tok + 5, ':');
+            if (colon == 0) {
+                printf("[0] bad init '%s', use init=<name>:on|off\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            if (strcmp(tok + 5, "create") == 0) flag = &st_create;
+            else if (strcmp(tok + 5, "sattr") == 0) flag = &st_sattr;
+            else if (strcmp(tok + 5, "stats") == 0) flag = &st_stats;
+            else if (strcmp(tok + 5, "apply") == 0) flag = &st_apply;
+            else if (strcmp(tok + 5, "setattr") == 0) flag = &st_setattr;
+            else if (strcmp(tok + 5, "destroy") == 0) flag = &st_destroy;
+            else {
+                printf("[0] unknown init step '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (strcmp(colon + 1, "on") == 0)
+                *flag = 1;
+            else if (strcmp(colon + 1, "off") == 0)
+                *flag = 0;
+            else {
+                printf("[0] bad init state '%s'\n", colon + 1);
+                return 1;
+            }
+            continue;
+        }
         if (strncmp(tok, "wait=", 5) == 0) {
             /* wait=<ms> -- delay before the post-submit output read.
                A crutch for the async hypothesis: if the output content
@@ -837,6 +911,16 @@ int main(int argc, char **argv)
         (NvIspSetConfiguration_fn)dlsym(nvisp, "NvIspSetConfiguration");
     nvIspProcessFrame =
         (NvIspProcessFrame_fn)dlsym(nvisp, "NvIspProcessFrame");
+    nvIspHwSettingsCreate =
+        (NvIspHwSettingsCreate_fn)dlsym(nvisp, "NvIspHwSettingsCreate");
+    nvIspHwSettingsSetAttribute = (NvIspHwSettingsSetAttribute_fn)dlsym(
+        nvisp, "NvIspHwSettingsSetAttribute");
+    nvIspSetStats = (NvIspSetStats_fn)dlsym(nvisp, "NvIspSetStats");
+    nvIspHwSettingsApply =
+        (NvIspHwSettingsApply_fn)dlsym(nvisp, "NvIspHwSettingsApply");
+    nvIspHwSettingsDestroy =
+        (NvIspHwSettingsDestroy_fn)dlsym(nvisp, "NvIspHwSettingsDestroy");
+    nvIspSetAttribute = (NvIspSetAttribute_fn)dlsym(nvisp, "NvIspSetAttribute");
     nvIspSetIspClockRate =
         (NvIspSetIspClockRate_fn)dlsym(nvisp, "NvIspSetIspClockRate");
     nvIspGetStatus = (NvIspGetStatus_fn)dlsym(nvisp, "NvIspGetStatus");
@@ -863,7 +947,10 @@ int main(int argc, char **argv)
         nvRmMemHandleAllocAttr == 0 || nvIspOpen == 0 ||
         nvIspSetConfiguration == 0 || nvIspProcessFrame == 0 ||
         nvIspSetIspClockRate == 0 || nvIspGetStatus == 0 ||
-        nvIspClose == 0) {
+        nvIspClose == 0 || nvIspHwSettingsCreate == 0 ||
+        nvIspHwSettingsSetAttribute == 0 || nvIspSetStats == 0 ||
+        nvIspHwSettingsApply == 0 || nvIspHwSettingsDestroy == 0 ||
+        nvIspSetAttribute == 0) {
         printf("    dlerror: %s\n", dlerror());
         return 1;
     }
@@ -1062,6 +1149,23 @@ round_trip_end:;
     rc = nvIspSetConfiguration(hIsp, 2, &cfg2_val, &size);
     printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
 
+    /*
+     * [7b] the stock init chain, the calls we never made. Order and
+     * arities are from the live hook log (out/hook-init-chain.txt),
+     * not derived. After EACH step the stage-3 gate field prints:
+     * if the gate turns non-zero, the step that did it is the answer;
+     * if nothing ever does, the init chain is not the source.
+     */
+    if (st_create) {
+        unsigned cs1[16] = {0}, cs2[16] = {0}; /* opaque, 0x24 region */
+        printf("[7b] NvIspHwSettingsCreate(dev=0x%x, &p1, 0x24, &p2) -> ",
+               (unsigned)dev);
+        rc = nvIspHwSettingsCreate((unsigned)dev, cs1, 0x24, cs2);
+        hset = cs1[0]; /* if r1 is an out-handle, this is it */
+        printf("rc=0x%x p1[0]=0x%x\n", (unsigned)rc, cs1[0]);
+        print_gate("[7b] after HwSettingsCreate", hIsp);
+    }
+
     /* [8] set the requested rate: the zero cache would answer the next
        read with zero and hide whether the ISP is alive at all; the max
        is clipped by the clock tree (600000 of 0x3fffff), and a smaller
@@ -1076,6 +1180,59 @@ round_trip_end:;
     printf("[9] NvIspGetStatus(hIsp=0x%x, id=6, &value, size=4) -> ", hIsp);
     rc = nvIspGetStatus(hIsp, 6, &value, &size);
     printf("rc=0x%x size=%u value=0x%x\n", (unsigned)rc, size, value);
+    print_gate("[9] after GetStatus", hIsp);
+
+    /* [9b2] HwSettingsSetAttribute x14: the stock's block walk. Order
+       and (id,index) pairs from the live hook log (the first four are
+       log-observed, the rest follow the lead's canonical list).
+       Buffers are zeroed 256 bytes -- if the library wants content or
+       a size, rc will say so. */
+    if (st_sattr && hset != 0) {
+        static const unsigned blocks[14][2] = {
+            {5, 0}, {1, 0}, {2, 0}, {2, 1}, {4, 0}, {6, 0}, {7, 0},
+            {8, 0}, {9, 0}, {0xa, 0}, {0xb, 0}, {0xd, 0}, {0xe, 0},
+            {0x10, 0},
+        };
+        unsigned zbuf[64] = {0};
+        int q;
+        for (q = 0; q < 14; q++) {
+            char tag[32];
+            rc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
+                                             blocks[q][1], zbuf);
+            snprintf(tag, sizeof(tag), "[9b2] SetAttr id=%u idx=%u",
+                     blocks[q][0], blocks[q][1]);
+            printf("[9b2] HwSettingsSetAttribute(hset=0x%x, id=%u, idx=%u, "
+                   "zero-buf) -> rc=0x%x\n",
+                   hset, blocks[q][0], blocks[q][1], (unsigned)rc);
+            print_gate(tag, hIsp);
+        }
+    }
+
+    /* [9b3] SetStats x4: (id,index) pairs from the live log */
+    if (st_stats) {
+        static const unsigned stats[4][2] = {
+            {2, 0}, {1, 0}, {1, 1}, {4, 0},
+        };
+        unsigned zbuf[64] = {0};
+        int q;
+        for (q = 0; q < 4; q++) {
+            rc = nvIspSetStats((unsigned)dev, stats[q][0], stats[q][1],
+                               zbuf);
+            printf("[9b3] NvIspSetStats(dev=0x%x, id=%u, idx=%u, zero-buf) "
+                   "-> rc=0x%x\n",
+                   (unsigned)dev, stats[q][0], stats[q][1], (unsigned)rc);
+            print_gate("[9b3] after SetStats", hIsp);
+        }
+    }
+
+    /* [9b4] HwSettingsApply: (hset, mapped?, 5, 0xb61bf1bf) per the
+       live log; the mapped pointer is opaque -- zero for now */
+    if (st_apply && hset != 0) {
+        rc = nvIspHwSettingsApply(hset, 0, 5, 0xb61bf1bfu);
+        printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0xb61bf1bf) -> "
+               "rc=0x%x\n", hset, (unsigned)rc);
+        print_gate("[9b4] after HwSettingsApply", hIsp);
+    }
 
     /* [9b] ISP-context dumps, only where requested (ctx=<off>:<count>).
        The context is ours, valid between Open and Close, read-only.
@@ -1147,6 +1304,17 @@ round_trip_end:;
      * the handle is ours from the allocation -- never copied, it lives
      * one run.
      */
+
+    /* [13b] the debug-flag SetAttribute the stock sends (id 4, value 0,
+       &size): the shim gate showed the stock passes a zero */
+    if (st_setattr) {
+        unsigned flag = 0;
+        unsigned fsize = 4;
+        rc = nvIspSetAttribute(hIsp, 4, &flag, &fsize);
+        printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=4, &flag=0, "
+               "&size=4) -> rc=0x%x\n", hIsp, (unsigned)rc);
+        print_gate("[13b] after SetAttribute", hIsp);
+    }
 
     /*
      * [10] the WORKING ATTRIBUTES -- read from INTERCEPTION, not derived.
@@ -1496,6 +1664,17 @@ round_trip_end:;
                 }
             }
         }
+    }
+
+    /* [14b] HwSettingsDestroy: (hset, 0xf92, ptr, dev) per the live
+       log. The 0xf92 "page minus a word"-looking size is unexplained;
+       passed verbatim. */
+    if (st_destroy && hset != 0) {
+        unsigned dscratch[16] = {0};
+        rc = nvIspHwSettingsDestroy(hset, 0xf92, dscratch, (unsigned)dev);
+        printf("[14b] NvIspHwSettingsDestroy(hset=0x%x, 0xf92, ptr, dev) -> "
+               "rc=0x%x\n", hset, (unsigned)rc);
+        print_gate("[14b] after HwSettingsDestroy", hIsp);
     }
 
     /* [13] hand it back, completely: NvIspClose releases everything

@@ -101,6 +101,12 @@ check "stage junk rejected"    0 4194303 rggb stage=junk
 check "stage no-on rejected"   0 4194303 rggb stage=0x12c8
 check "stage unaligned rejected" 0 4194303 rggb stage=0x12c9:on
 
+echo "-- init-chain steps (init=)"
+check "init=create:off"        1 4194303 rggb init=create:off
+check "init=sattr:off"         1 4194303 rggb init=sattr:off
+check "init=destroy:off"       1 4194303 rggb init=destroy:off
+check "init junk rejected"     0 4194303 rggb init=nonsense:on
+
 echo "-- context dumps (ctx=)"
 check "ctx=0x1200:32"          1 4194303 rggb ctx=0x1200:32
 check "ctx two regions"        1 4194303 rggb ctx=0x1200:64 ctx=0x1300:64

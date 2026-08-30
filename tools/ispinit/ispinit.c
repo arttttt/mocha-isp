@@ -753,8 +753,7 @@ int main(int argc, char **argv)
     unsigned outaddr_off = 0x1674; /* rec0 last word */
     unsigned out_devaddr = 0;
     int out_devaddr_valid = 0;
-    unsigned heap_i = 3, heap_o = 3; /* carveout pair, stock value */
-    int heap_given = 0;
+
     int objdump0_on = 0;
     const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
     unsigned objset_off[16], objset_val[16];
@@ -1477,40 +1476,14 @@ int main(int argc, char **argv)
             continue;
         }
         if (strncmp(tok, "heapi=", 6) == 0 || strncmp(tok, "heapo=", 6) == 0) {
-            /* heap selection per surface: iovmm (heap mask 1<<30, the
-               SMMU space -- stock-like addresses), carveout (mask 3 =
-               GENERIC|IVM, physical 0x8xxxxxxx), or raw mask word.
-               Kernel: struct nvmap_alloc_kind_handle {handle,
-               heap_mask, flags, align, kind} maps to attrs[1..4] --
-               attrs[1] is the HEAP MASK (stock 3 = carveout pair),
-               attrs[2] = align (0x20), attrs[3] = cache flags (2),
-               attrs[4] = size (0x40000). */
-            char *colon3 = strchr(tok + 6, ':');
-            unsigned v3;
-            if (colon3 != 0)
-                *colon3 = '\0';
-            if (strcmp(tok + 6, "iovmm") == 0)
-                v3 = 0x40000000u;
-            else if (strcmp(tok + 6, "carveout") == 0)
-                v3 = 3;
-            else {
-                /* raw mask word, with or without a value part */
-                char *e28 = 0;
-                long lv = strtol(colon3 != 0 ? colon3 + 1 : tok + 6,
-                                 &e28, 0);
-                if (e28 == (colon3 != 0 ? colon3 + 1 : tok + 6) ||
-                    *e28 != (colon3 != 0 ? '\0' : *e28) || lv <= 0) {
-                    printf("[0] bad heap '%s'\n", argv[ai]);
-                    return 1;
-                }
-                v3 = (unsigned)lv;
-            }
-            if (tok[4] == 'i')
-                heap_i = v3;
-            else
-                heap_o = v3;
-            heap_given = 1;
-            continue;
+            /* heap selection per surface is NOT IMPLEMENTED: the attrs
+               layout is unestablished (tag/value pairs vs fixed fields),
+               and a guessed word crashed libnvrm. Kernel heap masks for
+               reference: NVMAP_HEAP_IOVMM = 1<<30, CARVEOUT_GENERIC = 1,
+               CARVEOUT_IVM = 2 (include/linux/nvmap.h). */
+            printf("[0] heap selection not implemented -- see the attrs "
+                   "layout note in the source\n");
+            return 1;
         }
         if (strncmp(tok, "pin=", 4) == 0) {
             /* pin=on -- pin the output buffer via NvRmMemPin. Pinning
@@ -2192,6 +2165,7 @@ round_trip_end:;
             hset = hset_manual;
         printf("rc=0x%x hset=0x%x (mode %s)\n", (unsigned)rc, hset,
                hset_mode);
+        stage_now = 0;
         print_first_words("[7b] p1 first words", (unsigned char *)cs1, 8);
         print_first_words("[7b] p2 first words", (unsigned char *)cs2, 8);
         if (hset != 0)
@@ -2264,6 +2238,7 @@ round_trip_end:;
             wrc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
                                               blocks[q][1], zbuf,
                                               &size_out);
+            stage_now = 0;
             snprintf(tag, sizeof(tag), "[9b2] SetAttr id=%u idx=%u",
                      blocks[q][0], blocks[q][1]);
             printf("[9b2] HwSettingsSetAttribute(hset=0x%x, id=%u, idx=%u, "
@@ -2371,6 +2346,7 @@ round_trip_end:;
                 }
             }
             /* per-type obj state: WHICH type fills the +0x1660 window */
+            stage_now = 0;
             print_obj_state("[9b3] after SetStats", hIsp);
             free(zbuf);
         }
@@ -2391,6 +2367,7 @@ round_trip_end:;
                "rc=0x%x\n", hset, (unsigned)rc);
         /* stage 3 takes its relocation handle from here; zero means it
            falls over before doing any work */
+        stage_now = 0;
         printf("[9b4] ctx+0x123c = 0x%x\n",
                *(unsigned *)((unsigned)hIsp + 0x123c));
         print_gate("[9b4] after HwSettingsApply", hIsp);
@@ -2473,9 +2450,11 @@ round_trip_end:;
         unsigned flag = 0;
         unsigned fsize = 4;
         stage_now = "NvIspSetAttribute(id 4)";
+        stage_now = "NvIspSetAttribute(id 4)";
         rc = nvIspSetAttribute(hIsp, 4, &flag, &fsize);
         printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=4, &flag=0, "
                "&size=4) -> rc=0x%x\n", hIsp, (unsigned)rc);
+        stage_now = 0;
         print_gate("[13b] after SetAttribute", hIsp);
     }
 
@@ -2604,22 +2583,19 @@ round_trip_end:;
             attrs_in[k] = attrs_base[k];
             attrs_out[k] = attrs_base[k];
         }
-        /* heap word = attrs[1]: the kernel struct
-           nvmap_alloc_kind_handle is {handle, heap_mask, flags, align,
-           kind} -- stock attrs[1]=3 = GENERIC|IVM carveout pair, hence
-           our 0x800c0000 physical addresses. IOVMM = 1<<30 gives
-           SMMU-space addresses like the stock's records show. */
-        attrs_in[1] = heap_i;
-        attrs_out[1] = heap_o;
+        /* attrs are the STOCK-CAPTURED values and are not modified by
+           default. heap_i/heap_o keys exist but heap selection is NOT
+           implemented: we do not yet know the attrs array layout
+           (pairs "tag,value" vs fixed fields) -- writing a guessed
+           word crashed libnvrm (mail-1087 report, reverted). The
+           kernel heap masks for reference: NVMAP_HEAP_IOVMM = 1<<30,
+           CARVEOUT_GENERIC = 1, CARVEOUT_IVM = 2. */
         for (k = 0; k < 8; k++) {
             if (attr_set[k]) {
                 attrs_in[k] = attr_val[k];
                 attrs_out[k] = attr_val[k];
             }
         }
-        printf("[10] heap in=0x%x out=0x%x (%s)\n",
-               attrs_in[1], attrs_out[1],
-               attrs_in[1] & 0x40000000u ? "iovmm" : "carveout");
 
         printf("[10] attrs in|out:");
         for (k = 0; k < 8; k++)

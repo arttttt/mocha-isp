@@ -169,6 +169,14 @@ check "objlen=0x40 low bound"  1 4194303 rggb objlen=0x40
 check "objlen=0 rejected"      0 4194303 rggb objlen=0
 check "objlen huge rejected"   0 4194303 rggb objlen=0x8000
 
+echo "-- object dump/set (objdump=/objset=)"
+check "objdump=path"           1 4194303 rggb objdump=/data/local/tmp/our_obj.bin
+check "objset=8:0x40b"         1 4194303 rggb objset=8:0x40b
+check "objset aligned ok"      1 4194303 rggb objset=0x3ffc:1
+check "objset unaligned rejected" 0 4194303 rggb objset=7:1
+check "objset overflow rejected" 0 4194303 rggb objset=0x4000:1
+check "objset junk rejected"   0 4194303 rggb objset=junk
+
 echo "-- settings-handle source (hset=)"
 check "hset=p1"                1 4194303 rggb hset=p1
 check "hset=p2a"               1 4194303 rggb hset=p2a

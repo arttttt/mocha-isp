@@ -733,6 +733,10 @@ int main(int argc, char **argv)
     int objload_on = 0;
     const char *objload_path = "/data/local/tmp/stock_obj.bin";
     unsigned objlen = 0x1000; /* start small; 0x4000 is the full dump */
+    int objdump_on = 0;
+    const char *objdump_path = "/data/local/tmp/our_obj.bin";
+    unsigned objset_off[16], objset_val[16];
+    int objset_n = 0;
     unsigned final_s = 0;   /* final=<sec>: settle-wait, then re-read
                                syncpoints -- timeouts land late */
 
@@ -1403,6 +1407,45 @@ int main(int argc, char **argv)
             objlen = (unsigned)v;
             continue;
         }
+        if (strncmp(tok, "objdump=", 8) == 0) {
+            /* objdump=<path> -- write OUR gate object (objlen bytes)
+               to a file after the load/set operations, for the
+               word-level diff against the stock capture */
+            objdump_path = tok + 8;
+            objdump_on = 1;
+            continue;
+        }
+        if (strncmp(tok, "objset=", 7) == 0) {
+            /* objset=<off>:<val> -- write one word into our object at
+               byte offset <off>; bounds-checked, word-aligned */
+            char *colon;
+            char *e24 = 0;
+            long off, val;
+            colon = strchr(tok + 7, ':');
+            if (colon == 0) {
+                printf("[0] bad objset '%s', use objset=<off>:<val>\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            off = strtol(tok + 7, &e24, 0);
+            if (e24 == tok + 7 || *e24 != '\0' || off < 0 ||
+                (off & 3) != 0 || off > 0x3ffc) {
+                printf("[0] bad objset offset in '%s'\n", argv[ai]);
+                return 1;
+            }
+            val = strtol(colon + 1, &e24, 0);
+            if (e24 == colon + 1 || *e24 != '\0' || val < 0) {
+                printf("[0] bad objset value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (objset_n < 16) {
+                objset_off[objset_n] = (unsigned)off;
+                objset_val[objset_n] = (unsigned)val;
+                objset_n++;
+            }
+            continue;
+        }
         if (strncmp(tok, "objout=", 7) == 0) {
             /* objout=on -- write the output nvmap handle into the
                frame-record relocation field; objout=<hex> -- write an
@@ -1900,35 +1943,67 @@ round_trip_end:;
     printf("[5c] /dev/nvhost-ctrl fd=%d\n", sp_fd);
     print_syncpts("[5c] syncpoints at open", 0);
 
-    /* [5d] clone the stock gate object into ours, from the file the
-       external objread captured. The object lives in OUR address
-       space (hIsp is ours), so this is a plain read+memcpy -- no
-       /proc tricks. The frame counter inside is copied too: it
-       CONTINUES from the stock's value by design, do not reset it. */
-    if (objload_on && hIsp != 0) {
+    /*
+     * [5d] object operations, all on OUR object (hIsp is ours, plain
+     * memory): objload=<path> clones a captured stock object into it
+     * (handles inside are FOREIGN -- per mail-1073 this mode is for
+     * offline comparison only, never for submission); objset=<off>:
+     * <val> writes single words (bounds-checked); objdump=<path>
+     * writes our object out for the word-level diff against the stock
+     * capture. The frame counter, if loaded, CONTINUES from the
+     * stock's value by design -- do not reset it.
+     */
+    if ((objload_on || objdump_on || objset_n != 0) && hIsp != 0) {
         unsigned objp = *(unsigned *)((unsigned)hIsp + 0x1318);
-        FILE *f;
         if (objp == 0) {
-            printf("[5d] objload: [hIsp+0x1318] is null -- skipped\n");
+            printf("[5d] object ops: [hIsp+0x1318] is null -- "
+                   "skipped\n");
         } else {
-            f = fopen(objload_path, "rb");
-            if (f == 0) {
-                printf("[5d] objload: cannot open %s -- skipped\n",
-                       objload_path);
-            } else {
-                unsigned n = fread((void *)objp, 1, objlen, f);
-                fclose(f);
-                printf("[5d] objload: %u bytes -> obj@0x%x from %s\n",
-                       n, objp, objload_path);
-                printf("[5d] obj[0]=0x%x\n", *(unsigned *)objp);
-                {
-                    int i3;
-                    printf("[5d] obj+0x1660:");
-                    for (i3 = 0; i3 < 16; i3++)
-                        printf(" +%x:%08x", 0x1660 + i3 * 4,
-                               *(unsigned *)(objp + 0x1660 + i3 * 4));
-                    printf("\n");
+            if (objload_on) {
+                FILE *f = fopen(objload_path, "rb");
+                if (f == 0) {
+                    printf("[5d] objload: cannot open %s -- "
+                           "skipped\n", objload_path);
+                } else {
+                    unsigned n = fread((void *)objp, 1, objlen, f);
+                    fclose(f);
+                    printf("[5d] objload: %u bytes -> obj@0x%x from "
+                           "%s (FOREIGN HANDLES INSIDE -- do not "
+                           "submit with this)\n",
+                           n, objp, objload_path);
                 }
+            }
+            {
+                int k5;
+                for (k5 = 0; k5 < objset_n; k5++) {
+                    unsigned was =
+                        *(unsigned *)(objp + objset_off[k5]);
+                    *(unsigned *)(objp + objset_off[k5]) =
+                        objset_val[k5];
+                    printf("[5d] objset +0x%x: 0x%x -> 0x%x\n",
+                           objset_off[k5], was, objset_val[k5]);
+                }
+            }
+            if (objdump_on) {
+                FILE *f = fopen(objdump_path, "wb");
+                if (f == 0) {
+                    printf("[5d] objdump: cannot open %s\n",
+                           objdump_path);
+                } else {
+                    fwrite((void *)objp, 1, objlen, f);
+                    fclose(f);
+                    printf("[5d] objdump: %u bytes from obj@0x%x -> "
+                           "%s\n", objlen, objp, objdump_path);
+                }
+            }
+            printf("[5d] obj[0]=0x%x\n", *(unsigned *)objp);
+            {
+                int i3;
+                printf("[5d] obj+0x1660:");
+                for (i3 = 0; i3 < 16; i3++)
+                    printf(" +%x:%08x", 0x1660 + i3 * 4,
+                           *(unsigned *)(objp + 0x1660 + i3 * 4));
+                printf("\n");
             }
         }
     }

@@ -78,6 +78,10 @@ with open(out_path, 'w') as f:
             '    "1: .word shim_slot_%(sym)s\\n");\n'
             'extern void %(sym)s(void);\n' % {'sym': n})
     f.write('\n')
+    f.write('struct shim_binding {\n')
+    f.write('    const char *name;\n')
+    f.write('    void **slot;\n')
+    f.write('};\n\n')
     f.write('static const struct shim_binding shim_bindings[] = {\n')
     for n in names:
         f.write('    { "%(n)s", &shim_slot_%(n)s },\n' % {'n': n})

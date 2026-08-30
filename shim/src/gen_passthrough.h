@@ -424,6 +424,11 @@ __asm__(
     "1: .word shim_slot_IsBayerColorFormat\n");
 extern void IsBayerColorFormat(void);
 
+struct shim_binding {
+    const char *name;
+    void **slot;
+};
+
 static const struct shim_binding shim_bindings[] = {
     { "NvIspCtrlInitialize", &shim_slot_NvIspCtrlInitialize },
     { "NvIspFlush", &shim_slot_NvIspFlush },

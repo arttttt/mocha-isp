@@ -61,35 +61,37 @@ with open(out_path, 'w') as f:
     f.write(' *                 gen_passthrough.h %s\n' % src_bin)
     f.write(' */\n\n')
 
-    # hidden writable slots (not exported: internal state)
-    for n in names:
+    # hidden writable slots (not exported: internal state), initialized to
+    # the per-symbol trampoline; the trampoline resolves the real address on
+    # first call and rewrites the slot -- subsequent calls go direct
+    for i, n in enumerate(names):
         f.write('extern void *shim_slot_%s;\n' % n)
     f.write('\n')
 
-    # stubs: exported functions. Thumb mode; the slot holds the real
-    # address; the literal holds a position-invariant delta
-    # (slot - (9b + 8)), resolved at assembly time -- no DT_TEXTREL.
-    for n in names:
+    for i, n in enumerate(names):
         f.write(
             '__asm__(\n'
             '    ".text\\n"\n'
             '    ".thumb\\n"\n'
             '    ".align 2\\n"\n'
-            '    ".globl ' + n + '\\n"\n'
-            '    ".type ' + n + ', %function\\n"\n'
-            '    "' + n + ':\\n"\n'
-            '    "  ldr  r12, 9f\\n"\n'
-            '    "  add  r12, pc\\n"\n'
-            '    "  ldr  r12, [r12]\\n"\n'
-            '    "  bx   r12\\n"\n'
-            '    "  .align 2\\n"\n'
-            '    "9:  .word shim_slot_' + n + ' - (9b + 8)\\n"\n'
+            '    ".hidden tramp_' + str(i) + '\\n"\n'
+            '    "tramp_' + str(i) + ':\\n"\n'
+            '    "  push {r0-r3, r12, lr}\\n"\n'
+            '    "  mov  r0, #' + str(i) + '\\n"\n'
+            '    "  bl   shim_resolve\\n"\n'
+            '    "  mov  r12, r0\\n"\n'
+            '    "  pop  {r0-r3}\\n"\n'
+            '    "  add  sp, #4\\n"\n'
+            '    "  pop  {lr}\\n"\n'
+            '    "  bx   r12\\n");\n')
+        f.write(
+            '__asm__(\n'
             '    ".data\\n"\n'
             '    ".align 2\\n"\n'
             '    ".hidden shim_slot_' + n + '\\n"\n'
-            '    "shim_slot_' + n + ': .word 0\\n");\n')
+            '    "shim_slot_' + n + ': .word tramp_' + str(i) + '\\n");\n')
 
-    # name/slot table consumed by the constructor
+    # name/slot table consumed by shim_resolve
     f.write('\n')
     f.write('struct shim_binding {\n')
     f.write('    const char *name;\n')

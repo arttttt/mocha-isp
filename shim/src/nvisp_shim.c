@@ -2,29 +2,38 @@
  * nvisp_shim.c -- stage 1 passthrough wrapper for libnvisp_v3.
  *
  * This library impersonates libnvisp_v3.so: it is placed on the device under
- * the original path, loads the real library (renamed to
- * /system/vendor/lib/libnvisp_v3.real.so) and forwards every call to it.
+ * the original path and forwards every call to the real library, which is
+ * loaded lazily on the first forwarded call.
  *
- * Stage 1 discipline: forward only. No logging, no argument touch-up, no
- * intervention. The gate for stage 1 is that the camera works exactly as
- * before AND that the deployment control proves both libraries are mapped
- * (see impl-1-shim-step1.md).
+ * Why lazy, not from a constructor: the wrapper is loaded as a DT_NEEDED
+ * dependency of libnvmm_camera_v3, so a dlopen in our constructor ran the
+ * loader re-entrantly (inside its own lock). The real library got mapped,
+ * but its own constructors ran out of order and its state came up broken
+ * (NvIspFlush crash, 30.08 session). Resolution now happens on the first
+ * forwarded call, outside loader context.
  *
- * How the blind forwarding works (ARM32 / AAPCS):
- *   - the first four arguments travel in r0-r3, the rest on the stack;
- *   - each exported symbol is a tiny stub that loads the real address from
- *     its slot and does a tail jump (`bx r12`). It clobbers nothing but r12
- *     (scratch under AAPCS) and leaves lr pointing at our caller, so the
- *     real function returns straight to it. Argument stack is untouched.
- *   - dlsym returns Thumb addresses with bit0 set; `bx` performs the
- *     mode switch, so the real function (Thumb) is entered correctly.
+ * Call path:
+ *   call -> stub -> slot = tramp_N -> trampoline: saves r0-r3/r12/lr,
+ *          calls shim_resolve(N) -> real address, restores registers and
+ *          sp byte for byte, rewrites the slot with the real address,
+ *          enters the real function.
+ *   Subsequent calls: stub -> slot -> real directly. Zero per-frame
+ *   overhead after the first call.
  *
- * No libc is linked (-nostdlib). The only external symbols are dlopen and
- * dlsym, satisfied by libdl.so on the device (see shim/stubs/stub_dl.c).
+ * Transparency contract of the trampoline (verified line by line):
+ *   - sp at `bx r12` equals sp at trampoline entry, byte for byte --
+ *     stack-passed arguments land where the callee expects them;
+ *   - r0-r3 restored (the first four arguments);
+ *   - lr restored (the real function returns to the original caller);
+ *   - the only clobbered register is r12 (AAPCS scratch).
  *
- * The slots are filled by the constructor, which runs when the wrapper is
- * loaded as a DT_NEEDED dependency -- before the framework ever calls into
- * the camera stack.
+ * Thread safety, cheap variant: bionic serializes dlopen internally, and
+ * two threads racing on the same slot both compute the same dlsym result
+ * and store the same pointer -- the double store is idempotent.
+ *
+ * No libc is linked (-nostdlib). External symbols: dlopen and dlsym
+ * (libdl.so on the device). shim_resolve and shim_trap are static: used
+ * inside this object, never exported.
  */
 
 #include "gen_passthrough.h"
@@ -42,42 +51,42 @@ void *dlsym(void *handle, const char *symbol);
  * RTLD_NOW. Do NOT copy glibc values (NOW=2, GLOBAL=1) -- on bionic that
  * combination reads as RTLD_LAZY | RTLD_GLOBAL.
  *
- * We want NOW (everything resolved at load, no late failures) and LOCAL
- * (the real library exports the same names as this wrapper; keeping them
- * private makes it impossible for anyone to bind past the wrapper).
- * Both are zero, so the flags argument is 0.
+ * We want NOW (everything binds at load of the real library, no late
+ * failures) and LOCAL (the real library exports the same names as this
+ * wrapper; keeping them private makes it impossible for anyone to bind
+ * past the wrapper). Both are zero, so the flags argument is 0.
  */
 #define SHIM_DLOPEN_FLAGS 0
 
-/* The real library, renamed once at deployment (see the step 1 note). */
 static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
 static void *real_handle;
 
-/*
- * Any call that the constructor could not resolve lands here: a deliberate
- * SIGILL. A crash with a tombstone is diagnosable; a silent wrong return is
- * not. Unresolved slots must never be silently ignored.
- */
-void shim_trap(void)
+static void shim_trap(void)
 {
     __builtin_trap();
 }
 
-__attribute__((constructor))
-static void shim_init(void)
+/*
+ * Resolve binding idx: load the real library once, look the name up,
+ * rewrite the slot with the real address (or the trap on failure).
+ * Returns the address the slot now holds.
+ */
+static void *shim_resolve(int idx)
 {
-    const struct shim_binding *b;
+    const struct shim_binding *b = &shim_bindings[idx];
+    void *t;
 
-    real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
-
-    for (b = shim_bindings; b->name != 0; b++) {
-        void *target = real_handle
-            ? dlsym(real_handle, b->name)
-            : (void *)shim_trap;
-        if (target == 0) {
-            target = (void *)shim_trap;
-        }
-        *b->slot = target;
+    if (real_handle == 0) {
+        real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
     }
+    if (real_handle == 0) {
+        return (void *)shim_trap;
+    }
+    t = dlsym(real_handle, b->name);
+    if (t == 0) {
+        t = (void *)shim_trap;
+    }
+    *b->slot = t;
+    return t;
 }

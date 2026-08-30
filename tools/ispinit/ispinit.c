@@ -79,7 +79,10 @@ static const unsigned cfg_mode2 = 2;
 /* --- the five calls --- */
 
 typedef int (*NvRmOpen_fn)(void **out);
-typedef int (*NvRmMemHandleAllocAttr_fn)(void *dev, void *attrs, void **out);
+typedef int (*NvRmMemHandleCreate_fn)(unsigned param0, void **out,
+                                      unsigned size);
+typedef int (*NvRmMemHandleAllocAttr_fn)(void *memHandle, void *attrs,
+                                         void **out);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
 typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
@@ -111,6 +114,7 @@ int main(int argc, char **argv)
     void *nvrm;
     void *nvisp;
     NvRmOpen_fn nvRmOpen;
+    NvRmMemHandleCreate_fn nvRmMemHandleCreate;
     NvRmMemHandleAllocAttr_fn nvRmMemHandleAllocAttr;
     NvIspOpen_fn nvIspOpen;
     NvIspSetConfiguration_fn nvIspSetConfiguration;
@@ -124,6 +128,9 @@ int main(int argc, char **argv)
     unsigned size = 4;
     unsigned rate = 0x003fffffu;
     unsigned order;
+    unsigned mem_size = 4092; /* the stock's value: "page minus word",
+                                 formula not derived -- copied deliberately
+                                 to repeat what works; overridable by CLI */
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     int rc;
@@ -162,9 +169,11 @@ int main(int argc, char **argv)
         }
     }
 
-    /* [attr=]idx:val allocation-attribute overrides, several allowed
-       (hex or decimal; attrs[0] is a pointer -- overriding it from the
-       command line is allowed but almost certainly wrong). */
+    /* [attr=]idx:val allocation-attribute overrides and the buffer SIZE,
+       several overrides allowed (hex or decimal). A token WITH ':' is an
+       attribute override (idx 0..7; attrs[0] is a pointer -- overridable
+       but almost certainly wrong); a token WITHOUT ':' is the buffer
+       size. Unspecified values stay per the recipe. */
     for (int ai = 3; ai < argc; ai++) {
         char *tok = argv[ai];
         char *colon;
@@ -175,8 +184,15 @@ int main(int argc, char **argv)
             tok += 5;
         colon = strchr(tok, ':');
         if (colon == 0) {
-            printf("[0] bad attr '%s', use [attr=]idx:val\n", argv[ai]);
-            return 1;
+            /* no colon: the buffer size */
+            val = strtol(tok, &e2, 0);
+            if (e2 == tok || *e2 != '\0' || val <= 0) {
+                printf("[0] bad size '%s', use a positive number\n",
+                       argv[ai]);
+                return 1;
+            }
+            mem_size = (unsigned)val;
+            continue;
         }
         *colon = '\0';
         idx = strtol(tok, &e1, 0);
@@ -246,6 +262,8 @@ int main(int argc, char **argv)
 
     /* [3] the symbols; a miss here is printed and fatal */
     nvRmOpen = (NvRmOpen_fn)dlsym(nvrm, "NvRmOpen");
+    nvRmMemHandleCreate =
+        (NvRmMemHandleCreate_fn)dlsym(nvrm, "NvRmMemHandleCreate");
     nvRmMemHandleAllocAttr =
         (NvRmMemHandleAllocAttr_fn)dlsym(nvrm, "NvRmMemHandleAllocAttr");
     nvIspOpen = (NvIspOpen_fn)dlsym(nvisp, "NvIspOpen");
@@ -258,13 +276,15 @@ int main(int argc, char **argv)
     nvIspGetStatus = (NvIspGetStatus_fn)dlsym(nvisp, "NvIspGetStatus");
     nvIspClose = (NvIspClose_fn)dlsym(nvisp, "NvIspClose");
 
-    printf("[3] dlsym: NvRmOpen=%p AllocAttr=%p NvIspOpen=%p "
+    printf("[3] dlsym: NvRmOpen=%p HandleCreate=%p AllocAttr=%p NvIspOpen=%p "
            "SetConfiguration=%p ProcessFrame=%p SetIspClockRate=%p "
            "GetStatus=%p Close=%p\n",
-           nvRmOpen, nvRmMemHandleAllocAttr, nvIspOpen, nvIspSetConfiguration,
+           nvRmOpen, nvRmMemHandleCreate, nvRmMemHandleAllocAttr, nvIspOpen,
+           nvIspSetConfiguration,
            nvIspProcessFrame, nvIspSetIspClockRate, nvIspGetStatus,
            nvIspClose);
-    if (nvRmOpen == 0 || nvRmMemHandleAllocAttr == 0 || nvIspOpen == 0 ||
+    if (nvRmOpen == 0 || nvRmMemHandleCreate == 0 ||
+        nvRmMemHandleAllocAttr == 0 || nvIspOpen == 0 ||
         nvIspSetConfiguration == 0 || nvIspProcessFrame == 0 ||
         nvIspSetIspClockRate == 0 || nvIspGetStatus == 0 ||
         nvIspClose == 0) {
@@ -329,17 +349,25 @@ int main(int argc, char **argv)
      * one run.
      */
 
-    /* [10] one page of memory through AllocAttr. No free yet: the first
-       submission's state is unknown, an extra release would add
-       variables to the experiment.
-
-       ARGUMENT SHAPE, read twice before changing: NvIspOpen receives the
-       device handle VALUE (its NvRmChannelOpen never reads param_1, so
-       the value 1 is passed straight through), while AllocAttr receives
-       a POINTER to the device word -- the tagged path reads [param_1]
-       to get the descriptor for the ioctl. Same device word, two
-       different argument shapes, one call apart; do not "fix" either
-       towards the other. */
+    /*
+     * [10] TWO steps, not one. NVMAP_IOC_ALLOC does not create a handle,
+     * it allocates memory for an ALREADY created one; creation is
+     * NvRmMemHandleCreate (NVMAP_IOC_CREATE: size in, handle out).
+     *
+     * FIRST ARGUMENT of AllocAttr is the handle from Create -- the third
+     * answer to this question, and the first one that EXPLAINS what we
+     * saw instead of just matching a code. The chain, three independent
+     * sources: we passed &dev (an address, meaningless as a kernel fd);
+     * nvmap_handle_get_from_fd found no handle -> -EINVAL (kernel
+     * source); libnvrm's errno table maps EINVAL(22) -> 0xb (library
+     * decode); we saw rc=0xb (live run). The ioctl fd itself comes from
+     * a libnvrm global, not from the argument -- which is why &dev had
+     * no effect. (NvIspOpen, one call away, still takes the device
+     * handle VALUE because its NvRmChannelOpen never reads param_1:
+     * different functions, different argument shapes, both correct.)
+     *
+     * No free yet: first a clean submission, then paired teardown.
+     */
     {
         /* attrs[0] points at the tag list; the list is one zero word,
            outside 1..6, so the tag loop stops immediately and the
@@ -349,9 +377,11 @@ int main(int argc, char **argv)
            ioctl with a hard alignment check). attrs[3]=1: memory type
            from a live surface -- the one non-stock value in the recipe
            (the stock has 0, which is an undefined pick in the
-           dispatcher). */
+           dispatcher). attrs[4] is the size switch, consistent with the
+           handle: both describe the same object. */
         unsigned attrs[8] = { (unsigned)&tags, 3, 0, 1, 0, 0, 0, 0 };
         void *memh = 0;
+        void *alloc_out = 0;
         unsigned desc[44] = {0}; /* 0xb0 bytes, the stock record size */
         int k;
 
@@ -368,9 +398,16 @@ int main(int argc, char **argv)
                    attr_set[k] ? "*" : "");
         printf("\n");
 
-        printf("[10] NvRmMemHandleAllocAttr(&dev, attrs[8], &memh) -> ");
-        rc = nvRmMemHandleAllocAttr(&dev, attrs, &memh);
-        printf("rc=0x%x memh=%p\n", rc, memh);
+        printf("[10] NvRmMemHandleCreate(0, &memh, size=%u) -> ", mem_size);
+        rc = nvRmMemHandleCreate(0, &memh, mem_size);
+        printf("rc=0x%x memh=%p\n", (unsigned)rc, memh);
+
+        if (rc == 0 && memh != 0) {
+            printf("[10] NvRmMemHandleAllocAttr(memh=%p, attrs[8], &out) -> ",
+                   memh);
+            rc = nvRmMemHandleAllocAttr(memh, attrs, &alloc_out);
+            printf("rc=0x%x out=%p\n", (unsigned)rc, alloc_out);
+        }
 
         if (rc != 0 || memh == 0) {
             printf("    alloc failed -- skipping submission, closing\n");
@@ -381,7 +418,7 @@ int main(int argc, char **argv)
             desc[2] = 0x105a500cu; /* format constant, as-is from the dummy */
             desc[3] = 1;          /* memory type */
             desc[4] = 256;        /* stride, multiple of 64 */
-            desc[5] = (unsigned)memh; /* OUR handle */
+            desc[5] = (unsigned)memh; /* OUR handle from Create */
             desc[9] = 1;          /* 0x24: plane count */
 
             /* [12] the submission itself. The intent line goes out

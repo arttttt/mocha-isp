@@ -102,6 +102,7 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_DEREF_BINDING_PF "NvIspProcessFrame"
 #define SHIM_DEREF_IDX_PF     5
 static unsigned pf_odd_logged;
+static unsigned pf_dumped;
 
 /*
  * --- the intervention gate -------------------------------------------------
@@ -471,6 +472,57 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     *w = 0;
 
     shim_log(SHIM_LOG_PRIO_INFO, msg);
+
+    /*
+     * Descriptor dump, first two LOGGED ProcessFrame calls only (five
+     * pointers x 16 words is 80 numbers per call; four calls would flood
+     * logcat). Five pointers live at stack offsets +10..+20
+     * (saved[10..14]): the library NULL-checks and dereferences them
+     * immediately after us, so reading 16 words through each non-null
+     * one is exactly what it is about to read. A zero prints as null,
+     * never silently: a null PAIR is legal there ("both or neither"),
+     * and we must see which one is empty. Pointers found INSIDE the
+     * descriptors are not followed -- we do not know they are pointers
+     * yet, and a wrong read would kill mediaserver.
+     */
+    if (idx == SHIM_DEREF_IDX_PF && pf_dumped < 2) {
+        static const char ptr_lbl[5][7] = {
+            "ptr10=", "ptr14=", "ptr18=", "ptr1c=", "ptr20="
+        };
+        int j;
+
+        pf_dumped++;
+        for (j = 0; j < 5; j++) {
+            unsigned ptr = saved[10 + j];
+            char dmsg[320];
+            char *dw = dmsg;
+            const char *q;
+            int k;
+
+            q = ptr_lbl[j];
+            while (*q) *dw++ = *q++;
+            if (ptr == 0) {
+                q = "null";
+                while (*q) *dw++ = *q++;
+            } else {
+                const unsigned *dp = (const unsigned *)ptr;
+                for (k = 0; k < 16; k++) {
+                    unsigned word = dp[k];
+                    unsigned off = (unsigned)k * 4;
+                    if (k != 0)
+                        *dw++ = ',';
+                    *dw++ = '+';
+                    *dw++ = hexdig[(off >> 4) & 0xf];
+                    *dw++ = hexdig[off & 0xf];
+                    *dw++ = ':';
+                    for (i = 28; i >= 0; i -= 4)
+                        *dw++ = hexdig[(word >> i) & 0xf];
+                }
+            }
+            *dw = 0;
+            shim_log(SHIM_LOG_PRIO_INFO, dmsg);
+        }
+    }
 
     /* return the real address from the cache */
     return hook_real_cache[idx];

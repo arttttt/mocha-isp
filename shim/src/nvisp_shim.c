@@ -336,7 +336,12 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * why the binding is pinned by name and index above.
      */
     if (idx == SHIM_DEREF_IDX && saved[2] != 0) {
+        /* print what we READ, before any write: "val=<as found>" then
+           the arrow marks our write. Printing the post-write value (as
+           this code once did) makes "was 0, we set 1" indistinguishable
+           from "was 1, untouched" -- the print must precede the action. */
         unsigned v = *(const unsigned *)saved[2];
+        unsigned as_read = v;
         int wrote = 0;
 
         /*
@@ -349,7 +354,6 @@ void *shim_log_call(unsigned idx, unsigned *saved)
          */
         if (intervention_enabled() && saved[1] == 4 && v == 0) {
             *(unsigned *)saved[2] = 1;
-            v = 1;
             wrote = 1;
         }
         p = " val=0x";

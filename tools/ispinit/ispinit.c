@@ -753,6 +753,14 @@ int main(int argc, char **argv)
     unsigned outaddr_off = 0x1674; /* rec0 last word */
     unsigned out_devaddr = 0;
     int out_devaddr_valid = 0;
+    /* outblock=on: arm /proc/isp_patch_override with the missing
+       INCR(0xE04,3) output-plane block. Requires kernel tracing ON
+       (isp_patch counts submits inside the trace hook). */
+    int outblock_on = 0;
+    unsigned outblock_submit = 6;   /* our frame is submit #6 */
+    unsigned outblock_off = 0x1674; /* rec0 last word: device address */
+    unsigned outblock_addr = 0;     /* override the pinned address */
+    int outblock_addr_set = 0;
 
     int objdump0_on = 0;
     const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
@@ -1536,6 +1544,26 @@ int main(int argc, char **argv)
             if (e30 == tok + 8 || *e30 != '\0' || v < 0) goto bad;
             setattr_id = (unsigned)v; continue;
         }
+        if (strncmp(tok, "objout=", 7) == 0) {
+            /* objout=on -- write the output nvmap handle into the
+               frame-record relocation field; objout=<hex> -- write an
+               arbitrary value there instead. Default off. */
+            if (strcmp(tok + 7, "on") == 0) {
+                objout_on = 1;
+            } else {
+                char *e32 = 0;
+                long v = strtol(tok + 7, &e32, 0);
+                if (e32 == tok + 7 || *e32 != '\0' || v <= 0) {
+                    printf("[0] bad objout '%s', use objout=on|<hex>\n",
+                           argv[ai]);
+                    return 1;
+                }
+                objout_on = 1;
+                objout_manual = 1;
+                objout_val = (unsigned)v;
+            }
+            continue;
+        }
         if (strncmp(tok, "pin=", 4) == 0) {
             /* pin=on -- pin the output buffer via NvRmMemPin. Pinning
                may be required on its own: unpinned memory has no
@@ -1597,7 +1625,28 @@ int main(int argc, char **argv)
             inst = (unsigned)v;
             continue;
         }
-        if (strncmp(tok, "objout=", 7) == 0) {
+        if (strncmp(tok, "outblock=", 9) == 0) {
+            if (strcmp(tok + 9, "on") == 0)
+                outblock_on = 1;
+            else if (strcmp(tok + 9, "off") == 0)
+                outblock_on = 0;
+            else {
+                printf("[0] bad outblock '%s', use on|off\n", argv[ai]);
+                return 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "outsubmit=", 10) == 0) {
+            char *e31 = 0;
+            long v = strtol(tok + 10, &e31, 0);
+            if (e31 == tok + 10 || *e31 != '\0' || v < 0) {
+                printf("[0] bad outsubmit '%s'\n", argv[ai]);
+                return 1;
+            }
+            outblock_submit = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "outaddr=", 8) == 0) {
             /* objout=on -- write the output nvmap handle into the
                frame-record relocation field; objout=<hex> -- write an
                arbitrary value there instead. Default off. */
@@ -2962,6 +3011,99 @@ round_trip_end:;
                    "+18=%s(0x%x)\n",
                    slot_kind[0], s08, slot_kind[1], s10,
                    slot_kind[2], s14, slot_kind[3], s18);
+            /*
+             * outblock=on: arm /proc/isp_patch_override with the
+             * output-control block the library never pushes
+             * (INCR(0xE04,3) = plane address, 0, stride).
+             * Base form: the stock's own working frame gather
+             * (trace submit#16 G0, 40 words), hardcoded -- its stale
+             * addresses are fine because runtime RELOCs patch them
+             * after the override. Word[10] (the E04 plane address) is
+             * replaced with OUR pinned output address.
+             * Requires kernel tracing ON: the submit counter lives in
+             * the trace hook.
+             */
+            if (outblock_on) {
+                static const unsigned base[40] = {
+                    0x00000d00, 0x1e000001, 0x00070000,
+                    0x1e010001, 0x00070000,
+                    0x1e020001, 0x010000c9,
+                    0x1e030001, 0x00000000,
+                    0x1e040003, 0x811a0000, 0x00000000, 0x00000100,
+                    0x15000006, 0x00000003, 0x00000ca4,
+                    0x14400000, 0x0f300000, 0x00000000, 0x00080008,
+                    0x00000d00, 0x10150001, 0x04040007,
+                    0x00000d00, 0x11000004, 0x81e40000,
+                    0x00000000, 0x00000000, 0x00000000,
+                    0x00000d00, 0x00000d00,
+                    0x20000001, 0x00000424,
+                    0x20000001, 0x00000525,
+                    0x20000001, 0x00000627,
+                    0x00000d00, 0x200c0001, 0x00000005,
+                };
+                unsigned words[40];
+                unsigned addr = outblock_addr_set ? outblock_addr
+                                                  : out_devaddr;
+                unsigned q6;
+                FILE *po;
+                char tline[64];
+
+                for (q6 = 0; q6 < 40; q6++)
+                    words[q6] = base[q6];
+                if (out_devaddr_valid != 0 || outblock_addr_set != 0)
+                    words[10] = addr; /* E04 plane address: OURS */
+                printf("[11c] outblock: %u words, E04 addr=0x%x "
+                       "(submit=%u gather=0)\n",
+                       40u, words[10], outblock_submit);
+                for (q6 = 0; q6 < 40; q6 += 8) {
+                    unsigned j;
+                    printf("[11c]   ");
+                    for (j = 0; j < 8 && q6 + j < 40; j++)
+                        printf(" %08x", words[q6 + j]);
+                    printf("\n");
+                }
+
+                FILE *tf = fopen("/proc/isp_trace/enable", "r");
+                if (tf == 0) {
+                    printf("[11c] WARNING: cannot read "
+                           "/proc/isp_trace/enable -- override may not "
+                           "fire\n");
+                } else {
+                    char tb[16] = {0};
+                    if (fgets(tb, sizeof(tb), tf) != 0 && tb[0] == '0')
+                        printf("[11c] WARNING: /proc/isp_trace/enable "
+                               "is 0 -- override will NOT fire\n");
+                    fclose(tf);
+                }
+
+                po = fopen("/proc/isp_patch_override", "w");
+                if (po == 0) {
+                    printf("[11c] outblock: cannot open "
+                           "/proc/isp_patch_override\n");
+                } else {
+                    fprintf(po, "reset_counter\n");
+                    fclose(po);
+                    po = fopen("/proc/isp_patch_override", "w");
+                    if (po != 0) {
+                        fprintf(po, "data");
+                        for (q6 = 0; q6 < 40; q6++)
+                            fprintf(po, " %08x", words[q6]);
+                        fprintf(po, "\n");
+                        fclose(po);
+                    }
+                    po = fopen("/proc/isp_patch_override", "w");
+                    if (po != 0) {
+                        fprintf(po, "submit=%u gather=0\n",
+                                outblock_submit);
+                        fclose(po);
+                    }
+                    printf("[11c] outblock: reset_counter, data(40), "
+                           "submit=%u gather=0 written\n",
+                           outblock_submit);
+                }
+                (void)tline;
+            }
+
             /* manual gate write, only when obj0=<val> is given */
             if (obj0_set && hIsp != 0) {
                 unsigned gptr = *(unsigned *)((unsigned)hIsp + 0x1318);

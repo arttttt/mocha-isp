@@ -266,4 +266,52 @@ HELPERS=$?
 [ "$HELPERS" = 0 ] || exit 1
 
 echo
+
+# 9. Every hook must be wired to a slot.
+#    Check 8 proves a hook calls the logger. It does not prove anything calls
+#    the hook. A build can define forty-one hooks, have the logger called from
+#    each of them, and still route every slot to a trampoline -- so the hooks
+#    are dead code and the feature is absent at runtime while every check
+#    above is green. That shipped once; it is checked here now.
+echo "9. hooks are reachable from the slot table"
+
+python3 - "$SO" <<'PY'
+import sys, struct
+from elftools.elf.elffile import ELFFile
+
+with open(sys.argv[1], 'rb') as fh:
+    elf = ELFFile(fh)
+    symtab = elf.get_section_by_name('.symtab')
+    sym = {s.name: s['st_value'] for s in symtab.iter_symbols() if s.name}
+    hooks = {n: v for n, v in sym.items()
+             if n.startswith('hook_')
+             and any(s.name == n and s['st_info']['type'] == 'STT_FUNC'
+                     for s in symtab.iter_symbols())}
+    data_sec = elf.get_section_by_name('.data')
+    base, data = data_sec['sh_addr'], data_sec.data()
+
+if not hooks:
+    print("   no hooks in this artifact -- skipped")
+    sys.exit(0)
+
+wired = set()
+for name, addr in sym.items():
+    if not name.startswith('shim_slot_'):
+        continue
+    wired.add(struct.unpack_from('<I', data, addr - base)[0])
+
+unreached = sorted(n for n, v in hooks.items() if v not in wired)
+print(f"   hooks defined: {len(hooks)}; slots pointing at a hook: "
+      f"{len(wired & set(hooks.values()))}")
+if unreached:
+    print(f"   UNREACHED ({len(unreached)}): {unreached[:6]}")
+    print("\nFAIL: these hooks are defined but no slot points at them, so")
+    print("      nothing ever enters them. The feature is dead code.")
+    sys.exit(1)
+print("   every hook is the target of a slot")
+PY
+HOOKS=$?
+[ "$HOOKS" = 0 ] || exit 1
+
+echo
 echo "All invariants hold."

@@ -314,4 +314,60 @@ HOOKS=$?
 [ "$HOOKS" = 0 ] || exit 1
 
 echo
+
+# 10. A dereference must name the binding it belongs to, and the index must
+#     agree with the table.
+#     Arguments are only safe to dereference where that binding's arity says
+#     the register is a pointer. Pick the wrong binding and the same register
+#     is an index: reading it takes the address 0 or 1 and kills the process
+#     the shim lives in. That was written once, aimed at the wrong function
+#     of a similar name, and no check here noticed -- the code was correct in
+#     every way except which function it pointed at.
+#
+#     So the source must declare both, and they must match:
+#         #define SHIM_DEREF_BINDING "NvIspSetAttribute"
+#         #define SHIM_DEREF_IDX     6
+echo "10. dereference targets the binding it names"
+
+python3 - "$(dirname "$0")/../shim/src" <<'PY'
+import sys, os, re
+
+src_dir = sys.argv[1]
+src = open(os.path.join(src_dir, 'nvisp_shim.c')).read()
+hdr = open(os.path.join(src_dir, 'gen_passthrough.h')).read()
+
+name = re.search(r'#define\s+SHIM_DEREF_BINDING\s+"([A-Za-z0-9_]+)"', src)
+idx = re.search(r'#define\s+SHIM_DEREF_IDX\s+(\d+)', src)
+
+if not name and not idx:
+    print("   no dereference declared -- skipped")
+    sys.exit(0)
+if not (name and idx):
+    print("\nFAIL: a dereference must declare BOTH SHIM_DEREF_BINDING and")
+    print("      SHIM_DEREF_IDX. One without the other cannot be checked.")
+    sys.exit(1)
+
+order = []
+for m in re.finditer(r'shim_slot_([A-Za-z0-9_]+):', hdr):
+    if m.group(1) not in order:
+        order.append(m.group(1))
+
+want, i = name.group(1), int(idx.group(1))
+print(f"   declared: {want} at index {i}")
+if i >= len(order):
+    print(f"\nFAIL: index {i} is past the end of the {len(order)}-entry table.")
+    sys.exit(1)
+if order[i] != want:
+    print(f"   index {i} is actually {order[i]}")
+    print(f"   {want} is at index {order.index(want) if want in order else '(absent)'}")
+    print(f"\nFAIL: the dereference is aimed at {order[i]}, not at {want}.")
+    print("      A register that is a pointer in one binding is an index in")
+    print("      another; reading it there takes address 0 or 1.")
+    sys.exit(1)
+print(f"   index {i} is {order[i]} -- they agree")
+PY
+DEREF=$?
+[ "$DEREF" = 0 ] || exit 1
+
+echo
 echo "All invariants hold."

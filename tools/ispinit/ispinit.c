@@ -1737,6 +1737,7 @@ round_trip_end:;
         unsigned snap_aux[7][16];
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
+        unsigned sv[7];   /* stack slot values, +00..+20 in slot order */
         int i, k;
         static const char aux_names[7][3] = {
             "00", "04", "08", "0c", "18", "1c", "20"
@@ -1786,7 +1787,6 @@ round_trip_end:;
            then pointer, then defaults (+08 = width number, +0c =
            height number, +00/+04 = zero). */
         {
-            unsigned sv[7];
             unsigned gw_r = din_set[1] ? din_val[1] : 8;
             unsigned gh_r = din_set[0] ? din_val[0] : 8;
             for (i = 0; i < 4; i++) {
@@ -2038,16 +2038,44 @@ round_trip_end:;
                    local's value; st.4 takes the fifth argument on the
                    stack (C handles it with a 5-param prototype). A
                    nonzero rc stops the chain where the library would. */
-                unsigned pkt[3] = { pf_mode, pkt2, pkt3 };
+                /*
+                 * The packet is NOT three words: the library reads the
+                 * block [packet .. caller args] as one array -- 0x3386
+                 * dereferences pkt+0x14, which is caller arg +0x08 (the
+                 * geometry pointer). Layout, frame-arithmetic verified:
+                 *   +00 mode, +04 r2, +08 r3, +0c..+2c = the nine
+                 *   caller stack slots (+00..+20). Sixteen words with a
+                 *   zeroed tail so a slight overread stays in our
+                 *   memory. desc_in ALSO travels as the third register
+                 *   argument, as before.
+                 */
+                unsigned pkt[16] = {0};
                 unsigned local_var = 0;
                 unsigned counter = *(unsigned *)((unsigned)hIsp + 0x1254) + 1;
                 int q, stop = 0;
                 static const char sn2[5][4] = { "st1", "st2", "st3",
                                                 "st4" };
 
-                printf("[12] per-stage run: stages=%s pkt={0x%x,0x%x,0x%x} "
-                       "counter=%u\n",
-                       stages_spec, pkt[0], pkt[1], pkt[2], counter);
+                pkt[0] = pf_mode;
+                pkt[1] = pkt2;
+                pkt[2] = pkt3;
+                pkt[3] = sv[0];
+                pkt[4] = sv[1];
+                pkt[5] = sv[2];
+                pkt[6] = sv[3];
+                pkt[7] = (unsigned)desc_in;
+                pkt[8] = slot14_aux ? (unsigned)slot14_buf
+                                    : (unsigned)desc_out;
+                pkt[9] = sv[4];
+                pkt[10] = sv[5];
+                pkt[11] = sv[6];
+                printf("[12] per-stage run: stages=%s counter=%u\n",
+                       stages_spec, counter);
+                printf("[12] packet: mode=0x%x r2=0x%x r3=0x%x "
+                       "+00=0x%x +04=0x%x +08=0x%x +0c=0x%x "
+                       "+10=0x%x +14=0x%x +18=0x%x +1c=0x%x +20=0x%x\n",
+                       pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5],
+                       pkt[6], pkt[7], pkt[8], pkt[9], pkt[10], pkt[11]);
                 for (q = 0; q < (int)strlen(stages_spec) && !stop; q++) {
                     int stg = stages_spec[q] - '0';
                     switch (stg) {

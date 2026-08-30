@@ -89,6 +89,7 @@ int main(int argc, char **argv)
     void *nvisp;
     NvRmOpen_fn nvRmOpen;
     NvIspOpen_fn nvIspOpen;
+    NvIspSetConfiguration_fn nvIspSetConfiguration;
     NvIspSetIspClockRate_fn nvIspSetIspClockRate;
     NvIspGetStatus_fn nvIspGetStatus;
     NvIspClose_fn nvIspClose;

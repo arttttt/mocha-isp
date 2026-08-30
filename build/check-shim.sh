@@ -87,10 +87,10 @@ if extra:
 #    this toolchain emits them as ARM (`.code 32`), so their addresses are
 #    correctly even -- checking them would fail on correct code.
 sym = elf_symtab(shim_path)
-asm_funcs = {n: v for n, v in sym.items() if n.startswith('tramp_')} 
+asm_funcs = {n: v for n, v in sym.items() if n.startswith(('tramp_', 'hook_'))}
 exported  = {n: v for n, v in sym.items() if n in sf}
 not_thumb = sorted([n for n, v in {**asm_funcs, **exported}.items() if v and not (v & 1)])
-print(f"5. Thumb bit: {len(asm_funcs)} trampolines + {len(exported)} exported stubs")
+print(f"5. Thumb bit: {len(asm_funcs)} trampolines/hooks + {len(exported)} exported stubs")
 if not asm_funcs or not exported:
     fails.append("no trampolines or no exported stubs found -- this check saw nothing")
 elif not_thumb:

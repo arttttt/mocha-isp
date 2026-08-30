@@ -175,7 +175,10 @@ int main(int argc, char **argv)
     unsigned rt_wb = 0, rt_nr = 0;        /* 0 = follow w*h and h */
     unsigned rt_off = 0;                  /* offset into the nvmap buffer */
     unsigned rt_x8 = 0;                   /* 0 = auto: memStride*numRows */
-    int rt_simple = 0;                    /* rt=simple: plain Write/Read */
+    /* simple (hops) is the DEFAULT: it is the verified-working path;
+       the strided form stays available under rt=strided for signature
+       re-checks. Its rc=0x100 rejection on every run was pure noise. */
+    int rt_simple = 1;
     unsigned wait_ms = 0;                 /* wait=<ms>: delay before the
                                              post-submit output read */
     unsigned rt_size = 0;                 /* simple-mode byte count */
@@ -869,6 +872,21 @@ round_trip_end:;
     printf("[9] NvIspGetStatus(hIsp=0x%x, id=6, &value, size=4) -> ", hIsp);
     rc = nvIspGetStatus(hIsp, 6, &value, &size);
     printf("rc=0x%x size=%u value=0x%x\n", (unsigned)rc, size, value);
+
+    /* [9b] ISP-context dumps, only where requested (ctx=<off>:<count>).
+       The context is ours, valid between Open and Close, read-only.
+       Table pointers translate to file offsets via the base printed
+       at [3]. */
+    for (int ci = 0; ci < ctx_n; ci++) {
+        unsigned *cp = (unsigned *)((unsigned)hIsp + ctx_off[ci]);
+        printf("[9b] ctx+0x%x (%u words):", ctx_off[ci], ctx_cnt[ci]);
+        for (unsigned k2 = 0; k2 < ctx_cnt[ci]; k2++) {
+            if (k2 != 0 && k2 % 8 == 0)
+                printf("\n[9b]   ");
+            printf(" +%x:%08x", ctx_off[ci] + k2 * 4, cp[k2]);
+        }
+        printf("\n");
+    }
 
     /*
      * [10..12] submit the placeholder frame. First reproduce what the

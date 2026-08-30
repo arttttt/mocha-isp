@@ -114,6 +114,8 @@ while IFS= read -r tag; do
 done <<'TAGS'
 [0] requested rate
 [1] dlopen
+[3] libnvisp_v3 base
+[9b] ctx+0x%x
 [4] NvRmOpen
 [5] round trip
 [5] ROUND TRIP

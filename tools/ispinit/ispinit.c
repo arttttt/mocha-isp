@@ -121,6 +121,15 @@ typedef int (*NvIspHwSettingsDestroy_fn)(unsigned hSettings, unsigned size,
                                          void *p3, unsigned devHandle);
 typedef int (*NvIspSetAttribute_fn)(unsigned hIsp, unsigned attrId,
                                     void *inVal, void *inSize);
+typedef unsigned (*NvRmMemGetAddress_fn)(unsigned hMem, unsigned offset);
+typedef int (*NvRmMemPin_fn)(unsigned hMem, unsigned *physAddr);
+/* pinning / device address: exports VERIFIED in libnvrm.so
+   (NvRmMemPin 0x6459 sz26, NvRmMemGetAddress 0x66b9 sz16,
+   NvRmMemPinMult 0x6449 sz16). Arity of GetAddress is (hMem, offset)
+   returning the device address; Pin is (hMem, &physAddr) returning
+   NvError -- both called and PRINTED, a wrong guess shows in print. */
+typedef unsigned (*NvRmMemGetAddress_fn)(unsigned hMem, unsigned offset);
+typedef int (*NvRmMemPin_fn)(unsigned hMem, unsigned *physAddr);
 /* the four stages, per the 0x1784 frame read (lead + impl-2):
    st.4 takes a FIFTH argument on the stack (+0x1c) */
 typedef int (*Stage1_fn)(unsigned hIsp, void *pkt, unsigned inDesc);
@@ -683,6 +692,8 @@ int main(int argc, char **argv)
     NvIspHwSettingsApply_fn nvIspHwSettingsApply;
     NvIspHwSettingsDestroy_fn nvIspHwSettingsDestroy;
     NvIspSetAttribute_fn nvIspSetAttribute;
+    NvRmMemGetAddress_fn nvRmMemGetAddress;
+    NvRmMemPin_fn nvRmMemPin;
     NvIspProcessFrame_fn nvIspProcessFrame;
     NvIspSetIspClockRate_fn nvIspSetIspClockRate;
     NvIspGetStatus_fn nvIspGetStatus;
@@ -735,6 +746,13 @@ int main(int argc, char **argv)
     unsigned objlen = 0x1000; /* start small; 0x4000 is the full dump */
     int objdump_on = 0;
     const char *objdump_path = "/data/local/tmp/our_obj.bin";
+    int pin_on = 0;        /* pin=on: pin the output buffer */
+    int outaddr_on = 0;    /* outaddr=on|<off>:on|<hex> */
+    int outaddr_manual = 0;
+    unsigned outaddr_val = 0;
+    unsigned outaddr_off = 0x1674; /* rec0 last word */
+    unsigned out_devaddr = 0;
+    int out_devaddr_valid = 0;
     int objdump0_on = 0;
     const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
     unsigned objset_off[16], objset_val[16];
@@ -1456,6 +1474,54 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strncmp(tok, "pin=", 4) == 0) {
+            /* pin=on -- pin the output buffer via NvRmMemPin. Pinning
+               may be required on its own: unpinned memory has no
+               device address at all. */
+            if (strcmp(tok + 4, "on") == 0)
+                pin_on = 1;
+            else {
+                printf("[0] bad pin '%s', use pin=on\n", argv[ai]);
+                return 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "outaddr=", 8) == 0) {
+            /* outaddr=on -- write the device address of our output
+               buffer into the channel-record last word (rec0, +0x1674);
+               outaddr=<off>:on -- same at an explicit offset (rec
+               enumeration); outaddr=<hex> -- arbitrary value. */
+            if (strcmp(tok + 8, "on") == 0) {
+                outaddr_on = 1;
+            } else {
+                char *colon2 = strchr(tok + 8, ':');
+                if (colon2 != 0 && strcmp(colon2 + 1, "on") == 0) {
+                    char *e25 = 0;
+                    long o2;
+                    *colon2 = '\0';
+                    o2 = strtol(tok + 8, &e25, 0);
+                    if (e25 == tok + 8 || *e25 != '\0' || o2 < 0x400 ||
+                        o2 > 0x3ffc || (o2 & 3) != 0) {
+                        printf("[0] bad outaddr offset '%s'\n", argv[ai]);
+                        return 1;
+                    }
+                    outaddr_off = (unsigned)o2;
+                    outaddr_on = 1;
+                } else {
+                    char *e26 = 0;
+                    long v2 = strtol(tok + 8, &e26, 0);
+                    if (e26 == tok + 8 || *e26 != '\0' || v2 <= 0) {
+                        printf("[0] bad outaddr '%s', use on|<off>:on|"
+                               "<hex>\n", argv[ai]);
+                        return 1;
+                    }
+                    outaddr_on = 1;
+                    outaddr_manual = 1;
+                    outaddr_val = (unsigned)v2;
+                }
+            }
+            continue;
+        }
         if (strncmp(tok, "objout=", 7) == 0) {
             /* objout=on -- write the output nvmap handle into the
                frame-record relocation field; objout=<hex> -- write an
@@ -1727,6 +1793,9 @@ int main(int argc, char **argv)
     nvIspHwSettingsDestroy =
         (NvIspHwSettingsDestroy_fn)dlsym(nvisp, "NvIspHwSettingsDestroy");
     nvIspSetAttribute = (NvIspSetAttribute_fn)dlsym(nvisp, "NvIspSetAttribute");
+    nvRmMemGetAddress =
+        (NvRmMemGetAddress_fn)dlsym(nvrm, "NvRmMemGetAddress");
+    nvRmMemPin = (NvRmMemPin_fn)dlsym(nvrm, "NvRmMemPin");
     nvIspSetIspClockRate =
         (NvIspSetIspClockRate_fn)dlsym(nvisp, "NvIspSetIspClockRate");
     nvIspGetStatus = (NvIspGetStatus_fn)dlsym(nvisp, "NvIspGetStatus");
@@ -2526,6 +2595,34 @@ round_trip_end:;
         if (rc != 0 || memh_in == 0 || memh_out == 0) {
             printf("    alloc failed -- skipping submission, closing\n");
         } else {
+            /* pin the output buffer and read its device address
+               (exports verified in libnvrm.so; both calls PRINT their
+               results -- a wrong arity shows in print, not in a crash) */
+            if (pin_on && memh_out != 0 && nvRmMemPin != 0) {
+                unsigned pa = 0;
+                unsigned prc;
+                stage_now = "NvRmMemPin";
+                prc = nvRmMemPin((unsigned)memh_out, &pa);
+                stage_now = 0;
+                printf("[11a] NvRmMemPin(memh_out=0x%x, &pa) -> rc=0x%x "
+                       "pa=0x%x\n",
+                       (unsigned)memh_out, (unsigned)prc, pa);
+                if (prc == 0) {
+                    out_devaddr = pa;
+                    out_devaddr_valid = 1;
+                }
+            }
+            if (nvRmMemGetAddress != 0 && memh_out != 0) {
+                unsigned ga = nvRmMemGetAddress((unsigned)memh_out, 0);
+                printf("[11a] NvRmMemGetAddress(memh_out=0x%x, 0) -> "
+                       "0x%x\n",
+                       (unsigned)memh_out, ga);
+                if (out_devaddr_valid == 0) {
+                    out_devaddr = ga;
+                    out_devaddr_valid = 1;
+                }
+            }
+
             /* [11] two descriptors, stock dummy layout with seven live
                words. Geometry/format fields are CLI-overridable
                (din=/dout=); the geometry drives the pattern fill and
@@ -3023,6 +3120,44 @@ round_trip_end:;
                                 objset_val[k5];
                             printf("[12c] objset +0x%x: 0x%x -> 0x%x\n",
                                    objset_off[k5], was, objset_val[k5]);
+                        }
+                        if (outaddr_on != 0) {
+                            /* the channel-record write: rec0/rec1/rec2
+                               are 6-word records at +0x1660/78/90; the
+                               last word is the device address. Print
+                               the whole record before and after. */
+                            unsigned q6;
+                            int rci;
+                            if (out_devaddr_valid == 0 &&
+                                nvRmMemGetAddress != 0) {
+                                out_devaddr = nvRmMemGetAddress(
+                                    (unsigned)memh_out, 0);
+                                out_devaddr_valid = 1;
+                            }
+                            printf("[12c] outaddr: rec before:");
+                            for (q6 = 5; (int)q6 >= 0; q6--)
+                                printf(" +%x:%08x",
+                                       outaddr_off - q6 * 4,
+                                       *(unsigned *)(objp2 + outaddr_off -
+                                                    q6 * 4));
+                            printf("\n");
+                            rci = outaddr_manual
+                                      ? 0
+                                      : (out_devaddr_valid != 0);
+                            *(unsigned *)(objp2 + outaddr_off) =
+                                outaddr_manual ? outaddr_val
+                                               : out_devaddr;
+                            printf("[12c] outaddr: wrote 0x%x at +0x%x "
+                                   "(rc-sim %d)\n",
+                                   *(unsigned *)(objp2 + outaddr_off),
+                                   outaddr_off, rci);
+                            printf("[12c] outaddr: rec after:");
+                            for (q6 = 5; (int)q6 >= 0; q6--)
+                                printf(" +%x:%08x",
+                                       outaddr_off - q6 * 4,
+                                       *(unsigned *)(objp2 + outaddr_off -
+                                                    q6 * 4));
+                            printf("\n");
                         }
                         if (objdump_on) {
                             FILE *f = fopen(objdump_path, "wb");

@@ -172,6 +172,12 @@ check "objlen huge rejected"   0 4194303 rggb objlen=0x8000
 echo "-- object dump/set (objdump=/objset=)"
 check "objdump=path"           1 4194303 rggb objdump=/data/local/tmp/our_obj.bin
 check "objdump0=path"          1 4194303 rggb objdump0=/data/local/tmp/early.bin
+check "pin=on"                 1 4194303 rggb pin=on
+check "outaddr=on"             1 4194303 rggb outaddr=on
+check "outaddr=0x1678:on"      1 4194303 rggb outaddr=0x1678:on
+check "outaddr=0xdead"         1 4194303 rggb outaddr=0xdead
+check "outaddr junk rejected"  0 4194303 rggb outaddr=junk
+check "pin junk rejected"      0 4194303 rggb pin=yes
 check "objset=8:0x40b"         1 4194303 rggb objset=8:0x40b
 check "objset aligned ok"      1 4194303 rggb objset=0x3ffc:1
 check "objset unaligned rejected" 0 4194303 rggb objset=7:1

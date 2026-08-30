@@ -141,6 +141,30 @@ static void print_first_words(const char *tag, const unsigned char *b,
     printf("\n");
 }
 
+/*
+ * Post-call state: the words themselves plus WHICH words changed.
+ * A library answer written into one word of one buffer is easy to miss
+ * in sixteen lines -- the diff makes it unmissable.
+ */
+static void print_state_diff(const char *tag, const unsigned *before,
+                             const unsigned *after, int n)
+{
+    int k, c = 0;
+
+    printf("%s:", tag);
+    for (k = 0; k < n; k++)
+        printf(" +%02x:%08x", k * 4, after[k]);
+    printf(" | changed:");
+    for (k = 0; k < n; k++)
+        if (before[k] != after[k]) {
+            printf(" +%02x", k * 4);
+            c++;
+        }
+    if (c == 0)
+        printf(" none");
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -1012,6 +1036,9 @@ round_trip_end:;
         unsigned gh, gw, gf, gt, gs, gp;
         unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
         unsigned slot14_buf[44] = {0}; /* +0x14 in slot14=aux mode */
+        /* pre-call snapshots for the post-call diff */
+        unsigned snap_in[16], snap_out[16], snap14[16];
+        unsigned snap_aux[7][16];
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
         int i, k;
@@ -1223,6 +1250,15 @@ round_trip_end:;
                 free(chk);
             }
 
+            for (i = 0; i < 7; i++)
+                for (k = 0; k < 16; k++)
+                    snap_aux[i][k] = bufs[i][k];
+            for (k = 0; k < 16; k++) {
+                snap_in[k] = desc_in[k];
+                snap_out[k] = desc_out[k];
+                snap14[k] = slot14_buf[k];
+            }
+
             printf("[12] aux slots:");
             for (i = 0; i < 7; i++)
                 printf(" +%s=%p(%s)", aux_names[i],
@@ -1246,6 +1282,24 @@ round_trip_end:;
                                    aux_on[5] ? (unsigned)bufs[5] : 0,
                                    aux_on[6] ? (unsigned)bufs[6] : 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
+
+            /* post-call state of EVERY buffer we hand over, with the
+               changed-word list: a "fix-and-repeat" answer (rc=10
+               protocol) would be exactly one written word somewhere,
+               invisible across sixteen lines of values. */
+            print_state_diff("[12b] post desc_in ", snap_in, desc_in, 16);
+            print_state_diff("[12b] post desc_out", snap_out, desc_out, 16);
+            for (i = 0; i < 7; i++) {
+                char tag[40];
+                if (!aux_on[i])
+                    continue;
+                snprintf(tag, sizeof(tag), "[12b] post aux%s ",
+                         aux_names[i]);
+                print_state_diff(tag, snap_aux[i], bufs[i], 16);
+            }
+            if (slot14_aux)
+                print_state_diff("[12b] post slot14 ", snap14,
+                                 slot14_buf, 16);
 
             /* [12b] read the OUTPUT buffer back whatever the rc was:
                the first submission that works must meet the read side

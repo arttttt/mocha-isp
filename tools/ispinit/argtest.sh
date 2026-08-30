@@ -90,6 +90,10 @@ check "slot14=aux"         1 4194303 rggb slot14=aux
 check "slot14=desc"        1 4194303 rggb slot14=desc
 check "slot14 junk rejected" 0 4194303 rggb slot14=junk
 
+echo "-- pointer-following context dumps (ctxp=)"
+check "ctxp=0x1318:16"         1 4194303 rggb ctxp=0x1318:16
+check "ctxp junk rejected"     0 4194303 rggb ctxp=junk
+
 echo "-- context dumps (ctx=)"
 check "ctx=0x1200:32"          1 4194303 rggb ctx=0x1200:32
 check "ctx two regions"        1 4194303 rggb ctx=0x1200:64 ctx=0x1300:64
@@ -124,6 +128,7 @@ done <<'TAGS'
 [1] dlopen
 [3] libnvisp_v3 base
 [9b] ctx+0x%x
+[9b] ctxp+0x%x
 [4] NvRmOpen
 [5] round trip
 [5] ROUND TRIP

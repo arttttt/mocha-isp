@@ -210,6 +210,8 @@ int main(int argc, char **argv)
     /* ctx=<off>:<count> -- ISP-context dumps, default none */
     unsigned ctx_off[4], ctx_cnt[4];
     int ctx_n = 0;
+    unsigned ctxp_off[4], ctxp_cnt[4];
+    int ctxp_n = 0;
     unsigned char din_set[44] = {{0}};
     unsigned char dout_set[44] = {{0}};
     int rc;
@@ -422,6 +424,39 @@ int main(int argc, char **argv)
             ctx_off[ctx_n] = (unsigned)off;
             ctx_cnt[ctx_n] = (unsigned)cnt;
             ctx_n++;
+            continue;
+        }
+        if (strncmp(tok, "ctxp=", 5) == 0) {
+            /* ctxp=<off>:<count> -- take the WORD at ctx+<off>, treat
+               it as an address, print <count> words from there. One
+               level of dereference only; a null pointer prints as null
+               instead of crashing. The pointer comes from our own
+               context, valid between Open and Close. */
+            char *colon;
+            char *e7 = 0;
+            long off, cnt;
+            colon = strchr(tok + 5, ':');
+            if (colon == 0) {
+                printf("[0] bad ctxp '%s', use ctxp=<off>:<count>\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            off = strtol(tok + 5, &e7, 0);
+            cnt = strtol(colon + 1, &e7, 0);
+            if (e7 == colon + 1 || *e7 != '\0' || off < 0 || cnt <= 0 ||
+                cnt > 256) {
+                printf("[0] bad ctxp region in '%s' (count 1..256)\n",
+                       argv[ai]);
+                return 1;
+            }
+            if (ctxp_n == 4) {
+                printf("[0] too many ctxp regions (max 4)\n");
+                return 1;
+            }
+            ctxp_off[ctxp_n] = (unsigned)off;
+            ctxp_cnt[ctxp_n] = (unsigned)cnt;
+            ctxp_n++;
             continue;
         }
         if (strncmp(tok, "wait=", 5) == 0) {
@@ -914,6 +949,26 @@ round_trip_end:;
             printf(" +%x:%08x", ctx_off[ci] + k2 * 4, cp[k2]);
         }
         printf("\n");
+    }
+
+    /* [9b] pointer-following dumps: one level deep, null-safe */
+    for (int cj = 0; cj < ctxp_n; cj++) {
+        unsigned ptr = *(unsigned *)((unsigned)hIsp + ctxp_off[cj]);
+        printf("[9b] ctxp+0x%x -> 0x%x", ctxp_off[cj], ptr);
+        if (ptr == 0) {
+            printf(" (null)\n");
+            continue;
+        }
+        {
+            unsigned *cp = (unsigned *)ptr;
+            printf(" (%u words):", ctxp_cnt[cj]);
+            for (unsigned k2 = 0; k2 < ctxp_cnt[cj]; k2++) {
+                if (k2 != 0 && k2 % 8 == 0)
+                    printf("\n[9b]   ");
+                printf(" +%x:%08x", k2 * 4, cp[k2]);
+            }
+            printf("\n");
+        }
     }
 
     /*

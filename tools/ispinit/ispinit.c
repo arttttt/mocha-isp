@@ -2369,6 +2369,8 @@ round_trip_end:;
     return 0;
 }
 
+} /* main */
+
 /*
  * Hook frame discipline (mirrors the verified shim trampolines).
  * Entry: sp = S (8-aligned), args r0-r3, the library's own stack args
@@ -2416,4 +2418,3 @@ STAGE_HOOK(5)
 STAGE_HOOK(6)
 STAGE_HOOK(7)
 #endif /* HOST_ARGTEST */
-}

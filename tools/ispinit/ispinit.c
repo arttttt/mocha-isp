@@ -324,8 +324,10 @@ int main(int argc, char **argv)
        the strided form stays available under rt=strided for signature
        re-checks. Its rc=0x100 rejection on every run was pure noise. */
     int rt_simple = 1;
-    unsigned pf_mode = 1;   /* ProcessFrame's 2nd arg: mode=<val>; the
-                               mode=2 run is the control we never ran */
+    unsigned pf_mode = 1;   /* ProcessFrame's 2nd arg: mode=<val>.
+                               Default 1 -- the memory path is the goal;
+                               2 is the stock's sensor mode. The mode=2
+                               control run returned 0xa: modes differ. */
     int slot14_aux = 0;     /* slot14=aux: put a plain aux buffer into
                                +0x14 instead of the output descriptor
                                (impl-2 once called it a Flush token --
@@ -363,6 +365,12 @@ int main(int argc, char **argv)
     int ctxp_n = 0;
     unsigned stage_off[STAGE_SLOTS];
     int stage_n = 0;
+    /* n<slot>=<val> -- put the NUMBER itself into stack slot +00/+04/
+       +08/+0c (the live log shows the stock passes sensor geometry
+       there as numbers: 3280/2460). Defaults for +08/+0c follow the
+       frame geometry; +00/+04 default to zero. */
+    unsigned n_val[4];
+    int n_set[4] = {0, 0, 0, 0};
     unsigned char din_set[44] = {{0}};
     unsigned char dout_set[44] = {{0}};
     int rc;
@@ -575,6 +583,23 @@ int main(int argc, char **argv)
             ctx_off[ctx_n] = (unsigned)off;
             ctx_cnt[ctx_n] = (unsigned)cnt;
             ctx_n++;
+            continue;
+        }
+        if (strncmp(tok, "n08=", 4) == 0 || strncmp(tok, "n0c=", 4) == 0 ||
+            strncmp(tok, "n00=", 4) == 0 || strncmp(tok, "n04=", 4) == 0) {
+            /* numeric slot value, see n_val above */
+            char *e10 = 0;
+            long v;
+            int which = (tok[1] == '0') ? (tok[2] == '0' ? 0 : tok[2] == '4' ? 1 : 2)
+                                        : 3;
+            v = strtol(tok + 4, &e10, 0);
+            if (e10 == tok + 4 || *e10 != '\0' || v < 0) {
+                printf("[0] bad n-slot '%s', use n<slot>=<number>\n",
+                       argv[ai]);
+                return 1;
+            }
+            n_val[which] = (unsigned)v;
+            n_set[which] = 1;
             continue;
         }
         if (strncmp(tok, "stage=", 6) == 0) {
@@ -1158,11 +1183,13 @@ round_trip_end:;
      */
     if (st_create) {
         unsigned cs1[16] = {0}, cs2[16] = {0}; /* opaque, 0x24 region */
-        printf("[7b] NvIspHwSettingsCreate(dev=0x%x, &p1, 0x24, &p2) -> ",
-               (unsigned)dev);
-        rc = nvIspHwSettingsCreate((unsigned)dev, cs1, 0x24, cs2);
-        hset = cs1[0]; /* if r1 is an out-handle, this is it */
-        printf("rc=0x%x p1[0]=0x%x\n", (unsigned)rc, cs1[0]);
+        printf("[7b] NvIspHwSettingsCreate(hIsp=0x%x, &p1, 0x24, &p2) -> ",
+               (unsigned)hIsp);
+        rc = nvIspHwSettingsCreate((unsigned)hIsp, cs1, 0x24, cs2);
+        /* the live log: the settings handle lands at p2+4 -- the stock's
+           SetAttribute receives r3+4 */
+        hset = cs2[1];
+        printf("rc=0x%x hset=0x%x\n", (unsigned)rc, hset);
         print_gate("[7b] after HwSettingsCreate", hIsp);
     }
 
@@ -1216,11 +1243,11 @@ round_trip_end:;
         unsigned zbuf[64] = {0};
         int q;
         for (q = 0; q < 4; q++) {
-            rc = nvIspSetStats((unsigned)dev, stats[q][0], stats[q][1],
+            rc = nvIspSetStats((unsigned)hIsp, stats[q][0], stats[q][1],
                                zbuf);
-            printf("[9b3] NvIspSetStats(dev=0x%x, id=%u, idx=%u, zero-buf) "
+            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, zero-buf) "
                    "-> rc=0x%x\n",
-                   (unsigned)dev, stats[q][0], stats[q][1], (unsigned)rc);
+                   (unsigned)hIsp, stats[q][0], stats[q][1], (unsigned)rc);
             print_gate("[9b3] after SetStats", hIsp);
         }
     }
@@ -1228,8 +1255,11 @@ round_trip_end:;
     /* [9b4] HwSettingsApply: (hset, mapped?, 5, 0xb61bf1bf) per the
        live log; the mapped pointer is opaque -- zero for now */
     if (st_apply && hset != 0) {
-        rc = nvIspHwSettingsApply(hset, 0, 5, 0xb61bf1bfu);
-        printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0xb61bf1bf) -> "
+        /* the live log's r3 (0xb61bf1bf etc.) is a SESSION POINTER that
+           moves between runs -- never a constant; zero until we know
+           what it points at */
+        rc = nvIspHwSettingsApply(hset, 0, 5, 0);
+        printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0) -> "
                "rc=0x%x\n", hset, (unsigned)rc);
         print_gate("[9b4] after HwSettingsApply", hIsp);
     }
@@ -1357,6 +1387,26 @@ round_trip_end:;
             "00", "04", "08", "0c", "18", "1c", "20"
         };
 
+        /* stock-shape defaults for the two structured slots, built
+           from OUR session values (the stock's 3280/2460 were its
+           sensor geometry; ours are the frame's), then the a<slot>=
+           word overrides land on top:
+           +14 (slot14=aux): +1c mode, +30 width, +34 height,
+              +38.. 0x3f000000 (float 0.5) to the end;
+           +1c: 3, width, height, 1, 0, hIsp at +14, 2 at +38. */
+        bufs[5][0] = 3;
+        bufs[5][1] = din_set[1] ? din_val[1] : 8;
+        bufs[5][2] = din_set[0] ? din_val[0] : 8;
+        bufs[5][3] = 1;
+        bufs[5][4] = 0;
+        bufs[5][5] = (unsigned)hIsp;
+        bufs[5][14] = 2;
+        slot14_buf[7] = pf_mode;
+        slot14_buf[12] = din_set[1] ? din_val[1] : 8;
+        slot14_buf[13] = din_set[0] ? din_val[0] : 8;
+        for (k = 14; k < 44; k++)
+            slot14_buf[k] = 0x3f000000u;
+
         for (i = 0; i < 7; i++) {
             for (k = 0; k < 44; k++) {
                 if (aux_isptr[i][k])
@@ -1364,6 +1414,40 @@ round_trip_end:;
                 else if (aux_set[i][k])
                     bufs[i][k] = aux_val[i][k];
             }
+        }
+
+        /* +00..+0c: each slot takes a NUMBER (n<slot>=<val>) or a
+           POINTER (aux=<slot>:on -> zeroed buffer), CLI-switchable --
+           the stock's +08/+0c = 3280/2460 numbers were read in mode 2,
+           and mode 1 may treat the same slots differently, so both
+           readings stay enumerable. Precedence: explicit number wins,
+           then pointer, then defaults (+08 = width number, +0c =
+           height number, +00/+04 = zero). */
+        {
+            unsigned sv[7];
+            unsigned gw_r = din_set[1] ? din_val[1] : 8;
+            unsigned gh_r = din_set[0] ? din_val[0] : 8;
+            for (i = 0; i < 4; i++) {
+                if (n_set[i])
+                    sv[i] = n_val[i];
+                else if (aux_on[i])
+                    sv[i] = (unsigned)bufs[i];
+                else
+                    sv[i] = (i == 2) ? gw_r : (i == 3) ? gh_r : 0;
+            }
+            sv[4] = aux_on[4] ? (unsigned)bufs[4] : 0;
+            sv[5] = aux_on[5] ? (unsigned)bufs[5] : 0;
+            sv[6] = aux_on[6] ? (unsigned)bufs[6] : 0;
+            printf("[12] slot values:");
+            for (i = 0; i < 7; i++)
+                printf(" +%s=%s0x%x", aux_names[i],
+                       (i < 4 && n_set[i]) ? "num " :
+                       (i < 4 && aux_on[i]) ? "ptr " : "    ", sv[i]);
+            printf("\n");
+            /* числа не снимаются диффом -- дифф только для буферных слотов */
+            for (i = 0; i < 7; i++)
+                for (k = 0; k < 16; k++)
+                    snap_aux[i][k] = bufs[i][k];
         }
 
         for (k = 0; k < 8; k++) {

@@ -94,6 +94,13 @@ echo "-- pointer-following context dumps (ctxp=)"
 check "ctxp=0x1318:16"         1 4194303 rggb ctxp=0x1318:16
 check "ctxp junk rejected"     0 4194303 rggb ctxp=junk
 
+echo "-- numeric slot values (n00/n04/n08/n0c)"
+check "n08=3280"               1 4194303 rggb n08=3280
+check "n0c=2460"               1 4194303 rggb n0c=2460
+check "n00=5 n04=7"            1 4194303 rggb n00=5 n04=7
+check "n08 hex n0c default"    1 4194303 rggb n08=0xcd0
+check "n08 junk rejected"      0 4194303 rggb n08=junk
+
 echo "-- stage hooks (stage=)"
 check "stage=0x12c8:on"        1 4194303 rggb stage=0x12c8:on
 check "stage four"             1 4194303 rggb stage=0x12c8:on stage=0x12cc:on stage=0x12d0:on stage=0x12d4:on

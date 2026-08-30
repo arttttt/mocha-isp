@@ -508,6 +508,31 @@ static void print_syncpts(const char *tag, unsigned *out /* may be 0 */)
     printf("\n");
 }
 
+/* the nested float table for SetStats type 4 (+0x10 field points here):
+   256 words of slack, zeroed -- the real table size is unknown; the
+   first run's goal is only that the +0x10 deref stops faulting */
+static unsigned stat4_floats[256];
+
+/* obj state after a SetStats step: the gate pointer, its first word,
+   and the +0x1660 window that feeds the memory-write configuration */
+static void print_obj_state(const char *tag, unsigned hIsp)
+{
+    unsigned g = *(unsigned *)(hIsp + 0x1318);
+
+    if (hIsp == 0)
+        return;
+    printf("%s: ctx1318=0x%x obj0=0x%x\n", tag, g,
+           g != 0 ? *(unsigned *)g : 0);
+    if (g != 0) {
+        int i;
+        printf("%s: obj+0x1660:", tag);
+        for (i = 0; i < 16; i++)
+            printf(" +%x:%08x", 0x1660 + i * 4,
+                   *(unsigned *)(g + 0x1660 + i * 4));
+        printf("\n");
+    }
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -568,6 +593,8 @@ int main(int argc, char **argv)
                                syncpoints -- timeouts land late */
 
     unsigned retry_n = 1;                 /* submissions per run */
+    unsigned sf_val[256];                 /* sf=<idx>:<val> float words */
+    unsigned char sf_set[256] = {{0}};
     unsigned rt_size = 0;                 /* simple-mode byte count */
     char rt_order[5] = "hops";            /* simple-mode argument order:
         NvRmMemWrite(handle, offset, ptr, size) -- found by enumerating
@@ -1066,6 +1093,32 @@ int main(int argc, char **argv)
             }
             obj0_set = 1;
             obj0_val = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "sf=", 3) == 0) {
+            /* sf=<idx>:<val> -- one word of the SetStats type-4 nested
+               float table; idx 0..255, decimal or hex */
+            char *colon;
+            char *e17 = 0;
+            long idx, val;
+            colon = strchr(tok + 3, ':');
+            if (colon == 0) {
+                printf("[0] bad sf '%s', use sf=<idx>:<val>\n", argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            idx = strtol(tok + 3, &e17, 0);
+            if (e17 == tok + 3 || *e17 != '\0' || idx < 0 || idx > 255) {
+                printf("[0] bad sf index in '%s'\n", argv[ai]);
+                return 1;
+            }
+            val = strtol(colon + 1, &e17, 0);
+            if (e17 == colon + 1 || *e17 != '\0' || val < 0) {
+                printf("[0] bad sf value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            sf_val[idx] = (unsigned)val;
+            sf_set[idx] = 1;
             continue;
         }
         if (strncmp(tok, "retry=", 6) == 0) {
@@ -1751,7 +1804,8 @@ round_trip_end:;
                     free(rbuf);
                 }
             }
-            print_gate("[9b3] after SetStats", hIsp);
+            /* per-type obj state: WHICH type fills the +0x1660 window */
+            print_obj_state("[9b3] after SetStats", hIsp);
             free(zbuf);
         }
         stage_now = 0;
@@ -1769,6 +1823,10 @@ round_trip_end:;
         rc = nvIspHwSettingsApply(hset, 0, 5, 0);
         printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0) -> "
                "rc=0x%x\n", hset, (unsigned)rc);
+        /* stage 3 takes its relocation handle from here; zero means it
+           falls over before doing any work */
+        printf("[9b4] ctx+0x123c = 0x%x\n",
+               *(unsigned *)((unsigned)hIsp + 0x123c));
         print_gate("[9b4] after HwSettingsApply", hIsp);
     }
 

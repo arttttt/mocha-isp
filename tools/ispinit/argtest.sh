@@ -130,6 +130,12 @@ check "ctx=0:1"                1 4194303 rggb ctx=0:1
 check "ctx junk rejected"      0 4194303 rggb ctx=junk
 check "ctx count 0 rejected"   0 4194303 rggb ctx=0x1200:0
 
+echo "-- settings-handle source (hset=)"
+check "hset=p1"                1 4194303 rggb hset=p1
+check "hset=p2a"               1 4194303 rggb hset=p2a
+check "hset=0x12345678"        1 4194303 rggb hset=0x12345678
+check "hset junk rejected"     0 4194303 rggb hset=junk
+
 echo "-- descriptor overrides (din/dout)"
 check "din=2:0x10992007"       1 4194303 rggb din=2:0x10992007
 check "dout=9:2"               1 4194303 rggb dout=9:2

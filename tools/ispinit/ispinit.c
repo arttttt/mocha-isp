@@ -296,16 +296,25 @@ static void print_gate(const char *tag, unsigned hIsp)
    process goes -- the whole point of per-stage calls is knowing WHO
    failed. Unbuffered stdout plus a controlled _exit(70). */
 static const char *stage_now;
-static void stage_segv(int sig)
+static void stage_segv(int sig, siginfo_t *info, void *uc)
 {
     static const char m1[] = "[stage-crash] ";
-    static const char m2[] = " CRASHED (fatal signal) -- controlled exit\n";
+    static const char m2[] = " CRASHED (fatal signal) fault-addr=0x";
+    static const char m3[] = " -- controlled exit\n";
+    static const char dig[] = "0123456789abcdef";
+    unsigned a = info != 0 ? (unsigned)(unsigned long)info->si_addr : 0;
+    int i;
     (void)sig;
-    if (stage_now != 0) {
-        write(1, m1, sizeof(m1) - 1);
+    (void)uc;
+    write(1, m1, sizeof(m1) - 1);
+    if (stage_now != 0)
         write(1, stage_now, strlen(stage_now));
-    }
     write(1, m2, sizeof(m2) - 1);
+    for (i = 28; i >= 0; i -= 4) {
+        char c = dig[(a >> i) & 0xf];
+        write(1, &c, 1);
+    }
+    write(1, m3, sizeof(m3) - 1);
     _exit(70);
 }
 
@@ -383,6 +392,12 @@ int main(int argc, char **argv)
     int cfg2_set = 0;
     unsigned nvisp_base;
     unsigned hset = 0;   /* settings handle, if Create produces one */
+    /* where the handle comes from: p1 = Create's p1[0] VALUE (measured
+       -- the library wrote a heap pointer there); p2a = the address
+       &p2[1], the earlier theory, kept for enumeration; or an explicit
+       hex value */
+    char hset_mode[8] = "p1";
+    unsigned hset_manual = 0;
     /* stock init-chain steps, each toggleable: init=<name>:off */
     int st_create = 1, st_sattr = 1, st_stats = 1;
     int st_apply = 1, st_setattr = 1, st_destroy = 1;
@@ -697,6 +712,24 @@ int main(int argc, char **argv)
             ctxp_off[ctxp_n] = (unsigned)off;
             ctxp_cnt[ctxp_n] = (unsigned)cnt;
             ctxp_n++;
+            continue;
+        }
+        if (strncmp(tok, "hset=", 5) == 0) {
+            if (strcmp(tok + 5, "p1") == 0) {
+                snprintf(hset_mode, sizeof(hset_mode), "p1");
+            } else if (strcmp(tok + 5, "p2a") == 0) {
+                snprintf(hset_mode, sizeof(hset_mode), "p2a");
+            } else {
+                char *e13 = 0;
+                long v = strtol(tok + 5, &e13, 0);
+                if (e13 == tok + 5 || *e13 != '\0' || v <= 0) {
+                    printf("[0] bad hset '%s', use hset=p1|p2a|<hex>\n",
+                           argv[ai]);
+                    return 1;
+                }
+                snprintf(hset_mode, sizeof(hset_mode), "manual");
+                hset_manual = (unsigned)v;
+            }
             continue;
         }
         if (strncmp(tok, "init=", 5) == 0) {
@@ -1248,7 +1281,8 @@ round_trip_end:;
 
     /* crash isolation for the per-stage calls */
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = stage_segv;
+    sa.sa_sigaction = stage_segv;
+    sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, 0);
     sigaction(SIGBUS, &sa, 0);
     sigaction(SIGILL, &sa, 0);
@@ -1302,8 +1336,15 @@ round_trip_end:;
         /* the live chain: SetAttribute/Apply/Destroy receive r0 =
            r3 + 4 -- the settings OBJECT lives inside the p2 buffer at
            offset 4, the handle is that ADDRESS */
-        hset = (unsigned)&cs2[1];
-        printf("rc=0x%x hset=0x%x (p2+4)\n", (unsigned)rc, hset);
+        if (strcmp(hset_mode, "p1") == 0)
+            hset = cs1[0];               /* measured: the library wrote
+                                            a heap pointer here */
+        else if (strcmp(hset_mode, "p2a") == 0)
+            hset = (unsigned)&cs2[1];    /* the p2+4 theory */
+        else
+            hset = hset_manual;
+        printf("rc=0x%x hset=0x%x (mode %s)\n", (unsigned)rc, hset,
+               hset_mode);
         print_first_words("[7b] p1 first words", (unsigned char *)cs1, 8);
         print_first_words("[7b] p2 first words", (unsigned char *)cs2, 8);
         print_gate("[7b] after HwSettingsCreate", hIsp);
@@ -1352,6 +1393,13 @@ round_trip_end:;
             printf("[9b2] HwSettingsSetAttribute(hset=0x%x, id=%u, idx=%u, "
                    "zero-buf) -> rc=0x%x\n",
                    hset, blocks[q][0], blocks[q][1], (unsigned)rc);
+            {
+                char btag[48];
+                snprintf(btag, sizeof(btag),
+                         "[9b2] buf-after id=%u idx=%u", blocks[q][0],
+                         blocks[q][1]);
+                print_first_words(btag, (const unsigned char *)zbuf, 16);
+            }
             print_gate(tag, hIsp);
         }
     }

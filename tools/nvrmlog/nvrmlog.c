@@ -28,6 +28,30 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+
+/* nvhost_submit_args, include/linux/nvhost_ioctl.h of OUR kernel tree:
+   u32 header block, then u64 pointers. On arm32 the pointers are read
+   as the low words of those u64 slots (offsets 72/80/88 per header). */
+struct nvhost_submit_view {
+    unsigned num_cmdbufs;
+    unsigned num_relocs;
+    unsigned num_syncpt_incrs;
+    unsigned cmdbufs;   /* ptr to nvhost_cmdbuf array {mem,off,words} */
+    unsigned relocs;    /* ptr to nvhost_reloc array */
+};
+
+struct nvhost_cmdbuf_view { unsigned mem, offset, words; };
+struct nvhost_reloc_view { unsigned cmdbuf_mem, cmdbuf_offset, target, target_offset; };
+
+static int nvmap_fd = -1;
+static int isp_fd = -1;
+#define MAX_MAPPED 64
+static unsigned map_handle[MAX_MAPPED], map_va[MAX_MAPPED], map_len[MAX_MAPPED];
+static int map_n;
 
 /*
  * dlopen flags, bionic 4.4: RTLD_NOW | RTLD_LOCAL == 0.
@@ -319,4 +343,169 @@ int NvRmStreamPushIncr(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
     rc = real_fn(a1, a2, a3, a4);
     printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
     return rc;
+}
+
+/*
+ * --- channel visibility: open + ioctl interposition --------------------
+ * LD_PRELOAD in the STOCK mediaserver session: record the nvhost-isp
+ * and nvmap fds, then on every SUBMIT ioctl print the command-buffer
+ * words and relocations. Everything is bounded; anything unparsable is
+ * printed as a refusal and skipped. The stock library is NOT replaced.
+ */
+#define NVMAP_IOC_MMAP_RAW   0xC0144E05u  /* _IOWR('N', 5, 20) */
+#define SUBMIT_RAW           0xC078481Au  /* _IOWR('H', 26, 120) */
+#define MAX_WORDS_DUMP       128
+#define MAX_CMDBUFS_DUMP     4
+#define MAX_RELOCS_DUMP      16
+
+static int (*real_open)(const char *, int, ...);
+static int (*real_ioctl)(int, unsigned long, void *);
+static int real_open_ready, real_ioctl_ready;
+
+static int find_map_by_handle(unsigned handle, unsigned *va, unsigned *len)
+{
+    int i;
+    for (i = 0; i < map_n; i++) {
+        if (map_handle[i] == handle) {
+            *va = map_va[i];
+            *len = map_len[i];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int open(const char *path, int flags, ...)
+{
+    if (real_open == 0) {
+        real_open = (int (*)(const char *, int, ...))
+            dlsym(((void *)0xffffffffL), "open");
+        real_open_ready = 1;
+    }
+    {
+        int fd = real_open(path, flags);
+        if (path != 0) {
+            if (strstr(path, "/dev/nvmap") != 0)
+                nvmap_fd = fd;
+            else if (strstr(path, "/dev/nvhost-isp") != 0) {
+                isp_fd = fd;
+                printf("[nvrmlog] isp channel open: fd=%d\n", fd);
+            }
+        }
+        return fd;
+    }
+}
+
+int ioctl(int fd, unsigned long request, void *arg)
+{
+    if (real_ioctl == 0) {
+        real_ioctl = (int (*)(int, unsigned long, void *))
+            dlsym(((void *)0xffffffffL), "ioctl");
+        real_ioctl_ready = 1;
+    }
+
+    /* NVMAP_IOC_MMAP: kernel maps the handle into our space and
+       returns the user VA in the struct -- record handle -> VA */
+    if (fd == nvmap_fd && nvmap_fd >= 0 &&
+        (request & 0xFC00FFFFu) == 0x00004E05u && arg != 0) {
+        unsigned *a = (unsigned *)arg;
+        int rc = real_ioctl(fd, request, arg);
+        if (rc == 0 && map_n < MAX_MAPPED) {
+            map_handle[map_n] = a[0];
+            map_va[map_n] = a[4];
+            map_len[map_n] = a[2];
+            printf("[nvrmlog] nvmap map: handle=%u va=0x%x len=%u\n",
+                   a[0], a[4], a[2]);
+            map_n++;
+        }
+        return rc;
+    }
+
+    /* SUBMIT on the ISP channel: dump command-buffer words and
+       relocations */
+    if (fd == isp_fd && isp_fd >= 0 && request == SUBMIT_RAW &&
+        arg != 0) {
+        unsigned *a = (unsigned *)arg;
+        unsigned num_cmdbufs = a[2];
+        unsigned num_relocs = a[3];
+        unsigned num_incrs = a[1];
+        unsigned cmdbufs_p = a[18];  /* offset 72 per the header */
+        unsigned relocs_p = a[20];   /* offset 80 per the header */
+        struct nvhost_cmdbuf_view *cb =
+            (struct nvhost_cmdbuf_view *)cmdbufs_p;
+        struct nvhost_reloc_view *rl =
+            (struct nvhost_reloc_view *)relocs_p;
+        unsigned q, w, cmdbuf_words = 0;
+
+        printf("[nvrmlog] SUBMIT: incrs=%u cmdbufs=%u relocs=%u\n",
+               num_incrs, num_cmdbufs, num_relocs);
+        if (num_cmdbufs > MAX_CMDBUFS_DUMP) {
+            printf("[nvrmlog]   %u cmdbufs -- showing first %u\n",
+                   num_cmdbufs, (unsigned)MAX_CMDBUFS_DUMP);
+            num_cmdbufs = MAX_CMDBUFS_DUMP;
+        }
+        if (num_relocs > MAX_RELOCS_DUMP) {
+            printf("[nvrmlog]   %u relocs -- showing first %u\n",
+                   num_relocs, (unsigned)MAX_RELOCS_DUMP);
+            num_relocs = MAX_RELOCS_DUMP;
+        }
+        if (cmdbufs_p == 0)
+            num_cmdbufs = 0;
+        if (relocs_p == 0)
+            num_relocs = 0;
+
+        for (q = 0; q < num_cmdbufs; q++) {
+            unsigned handle = cb[q].mem;
+            unsigned off = cb[q].offset;
+            unsigned words = cb[q].words;
+            unsigned va = 0, len = 0;
+            unsigned dumpw;
+            if (find_map_by_handle(handle, &va, &len) == 0) {
+                printf("[nvrmlog]   cmdbuf[%u] handle=%u words=%u -- "
+                       "no mapping recorded, content skipped\n",
+                       q, handle, words);
+                cmdbuf_words += words;
+                continue;
+            }
+            if ((unsigned long)off + words * 4 > len) {
+                printf("[nvrmlog]   cmdbuf[%u] exceeds mapping "
+                       "(off=%u words=%u len=%u) -- clipped\n",
+                       q, off, words, len);
+            }
+            dumpw = words;
+            if (dumpw > MAX_WORDS_DUMP)
+                dumpw = MAX_WORDS_DUMP;
+            if ((unsigned long)off / 4 + (unsigned long)dumpw >
+                len / 4)
+                dumpw = len / 4 - off / 4;
+            printf("[nvrmlog]   cmdbuf[%u] handle=%u off=%u words=%u "
+                   "va=0x%x\n", q, handle, off, words, va);
+            cmdbuf_words += words;
+            for (w = 0; w < dumpw; w++) {
+                unsigned word = *(const unsigned *)
+                    (va + off * 4 + w * 4);
+                if (w % 8 == 0)
+                    printf("[nvrmlog]   +%04x:", w * 4);
+                printf(" %08x", word);
+                if (w % 8 == 7)
+                    printf("\n");
+            }
+            if (dumpw % 8 != 0)
+                printf("\n");
+        }
+
+        for (q = 0; q < num_relocs; q++) {
+            printf("[nvrmlog]   reloc[%u] cmdbuf_off=0x%x target=%u "
+                   "target_off=%u\n",
+                   q, rl[q].cmdbuf_offset, rl[q].target,
+                   rl[q].target_offset);
+        }
+        printf("[nvrmlog]   totals: cmdbuf words=%u relocs=%u incrs=%u\n",
+               cmdbuf_words, num_relocs, num_incrs);
+    }
+
+    if (real_ioctl_ready == 0 && real_ioctl == 0)
+        real_ioctl = (int (*)(int, unsigned long, void *))
+            dlsym(((void *)0xffffffffL), "ioctl");
+    return real_ioctl(fd, request, arg);
 }

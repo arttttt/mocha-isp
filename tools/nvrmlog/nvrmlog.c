@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -359,7 +360,7 @@ int NvRmStreamPushIncr(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
 #define MAX_RELOCS_DUMP      16
 
 static int (*real_open)(const char *, int, ...);
-static int (*real_ioctl)(int, unsigned long, void *);
+static int (*real_ioctl)(int, int, void *);
 static int real_open_ready, real_ioctl_ready;
 
 static int find_map_by_handle(unsigned handle, unsigned *va, unsigned *len)
@@ -396,10 +397,19 @@ int open(const char *path, int flags, ...)
     }
 }
 
-int ioctl(int fd, unsigned long request, void *arg)
+/* signature matches bionic's int ioctl(int, int, ...) -- the third
+   argument is always present at call sites, fetched via va_arg */
+int ioctl(int fd, int request, ...)
 {
+    va_list ap;
+    void *arg = 0;
+
+    va_start(ap, request);
+    arg = va_arg(ap, void *);
+    va_end(ap);
+
     if (real_ioctl == 0) {
-        real_ioctl = (int (*)(int, unsigned long, void *))
+        real_ioctl = (int (*)(int, int, void *))
             dlsym(((void *)0xffffffffL), "ioctl");
         real_ioctl_ready = 1;
     }
@@ -407,7 +417,7 @@ int ioctl(int fd, unsigned long request, void *arg)
     /* NVMAP_IOC_MMAP: kernel maps the handle into our space and
        returns the user VA in the struct -- record handle -> VA */
     if (fd == nvmap_fd && nvmap_fd >= 0 &&
-        (request & 0xFC00FFFFu) == 0x00004E05u && arg != 0) {
+        ((unsigned)request & 0xFC00FFFFu) == 0x00004E05u && arg != 0) {
         unsigned *a = (unsigned *)arg;
         int rc = real_ioctl(fd, request, arg);
         if (rc == 0 && map_n < MAX_MAPPED) {
@@ -423,8 +433,8 @@ int ioctl(int fd, unsigned long request, void *arg)
 
     /* SUBMIT on the ISP channel: dump command-buffer words and
        relocations */
-    if (fd == isp_fd && isp_fd >= 0 && request == SUBMIT_RAW &&
-        arg != 0) {
+    if (fd == isp_fd && isp_fd >= 0 &&
+        (unsigned)request == SUBMIT_RAW && arg != 0) {
         unsigned *a = (unsigned *)arg;
         unsigned num_cmdbufs = a[2];
         unsigned num_relocs = a[3];

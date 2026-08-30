@@ -564,6 +564,9 @@ int main(int argc, char **argv)
                                              post-submit output read */
     int obj0_set = 0;
     unsigned obj0_val = 0;
+    unsigned final_s = 0;   /* final=<sec>: settle-wait, then re-read
+                               syncpoints -- timeouts land late */
+
     unsigned retry_n = 1;                 /* submissions per run */
     unsigned rt_size = 0;                 /* simple-mode byte count */
     char rt_order[5] = "hops";            /* simple-mode argument order:
@@ -1036,6 +1039,17 @@ int main(int argc, char **argv)
                 return 1;
             }
             pkt3 = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "final=", 6) == 0) {
+            char *e16 = 0;
+            long v = strtol(tok + 6, &e16, 0);
+            if (e16 == tok + 6 || *e16 != '\0' || v < 0 || v > 60) {
+                printf("[0] bad final '%s', use final=<seconds 0..60>\n",
+                       argv[ai]);
+                return 1;
+            }
+            final_s = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "obj0=", 5) == 0) {
@@ -2484,6 +2498,15 @@ round_trip_end:;
        if the entry state of run N+1 differs from the exit state of run
        N (or from a fresh boot), the runs are not comparable either */
     print_syncpts("[sp end]", 0);
+    if (final_s != 0) {
+        struct timespec ts;
+        ts.tv_sec = (time_t)final_s;
+        ts.tv_nsec = 0;
+        printf("[sp] settling %u s (kernel timeouts land late)\n",
+               final_s);
+        nanosleep(&ts, 0);
+        print_syncpts("[sp final]", 0);
+    }
 
     printf("done\n");
     return 0;

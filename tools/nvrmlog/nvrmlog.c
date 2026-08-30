@@ -27,6 +27,7 @@
 
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /*
  * dlopen flags, bionic 4.4: RTLD_NOW | RTLD_LOCAL == 0.
@@ -36,19 +37,28 @@
 
 typedef int (*AllocAttr_fn)(unsigned a1, void *attrs, void **out);
 
-static void *real_handle;
+static void *real_handle;        /* libnvrm.so */
+static void *real_graphics;      /* libnvrm_graphics.so */
 
 /*
- * Lazy resolver against the real libnvrm.so. Cached per function; the
- * library handle is opened once process-wide.
+ * Lazy resolver against BOTH libraries: the stream-path functions live
+ * in libnvrm_graphics.so, the memory/API core in libnvrm.so. Cached
+ * per name; handles opened once process-wide.
  */
 static void *resolve_real(const char *name, void **cache)
 {
     if (*cache == 0) {
-        if (real_handle == 0)
-            real_handle = dlopen("libnvrm.so", NVRMLOG_DLOPEN_FLAGS);
-        if (real_handle != 0)
-            *cache = dlsym(real_handle, name);
+        if (real_graphics == 0)
+            real_graphics = dlopen("libnvrm_graphics.so",
+                                   NVRMLOG_DLOPEN_FLAGS);
+        if (real_graphics != 0)
+            *cache = dlsym(real_graphics, name);
+        if (*cache == 0) {
+            if (real_handle == 0)
+                real_handle = dlopen("libnvrm.so", NVRMLOG_DLOPEN_FLAGS);
+            if (real_handle != 0)
+                *cache = dlsym(real_handle, name);
+        }
     }
     return *cache;
 }
@@ -90,9 +100,9 @@ int NvRmMemHandleAllocAttr(unsigned a1, void *attrs, void **out)
     }
 
     if (real_fn == 0) {
-        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb "
-               "without calling (announced deviation)\n");
-        return 0xb;
+        printf("[nvrmlog]   UNRESOLVED in libnvrm_graphics.so and "
+               "libnvrm.so -- refusing to fake a return; exiting 70\n");
+        exit(70);
     }
 
     rc = real_fn(a1, attrs, out);
@@ -119,8 +129,8 @@ int NvRmMemRead(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
            a1, a2, a3, a4);
 
     if (real_fn == 0) {
-        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
-        return 0xb;
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
     }
     rc = real_fn(a1, a2, a3, a4);
     printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
@@ -143,8 +153,8 @@ int NvRmMemHandleFree(unsigned a1)
     printf("[nvrmlog] HandleFree a1=0x%x\n", a1);
 
     if (real_fn == 0) {
-        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
-        return 0xb;
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
     }
     rc = real_fn(a1);
     printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
@@ -181,8 +191,8 @@ static int nvrmlog_4(const char *name, const char *tag,
     printf("[nvrmlog] %s a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
            tag, a1, a2, a3, a4);
     if (fn == 0) {
-        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
-        return 0xb;
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
     }
     rc = fn(a1, a2, a3, a4);
     printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
@@ -223,4 +233,90 @@ int NvRmChannelSyncPointWaitTimeout(unsigned a1, unsigned a2,
 int NvRmFenceWait(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
 {
     return nvrmlog_4("NvRmFenceWait", "FenceWait", a1, a2, a3, a4);
+}
+
+/*
+ * Command-buffer path: what the library actually pushes per frame.
+ * PushReloc is the interesting one -- relocations carry (command
+ * buffer handle, offset, TARGET memory handle, target offset, shift);
+ * counting them per frame tells us whether the output surface address
+ * ever reaches the hardware.
+ */
+typedef int (*PushReloc_fn)(unsigned cmdbuf, unsigned off, unsigned memh,
+                            unsigned toff, unsigned shift);
+
+int NvRmStreamPushReloc(unsigned cmdbuf, unsigned off, unsigned memh,
+                        unsigned toff, unsigned shift)
+{
+    static PushReloc_fn real_fn;
+    int rc;
+
+    real_fn = (PushReloc_fn)resolve_real("NvRmStreamPushReloc",
+                                         (void **)&real_fn);
+    printf("[nvrmlog] PushReloc cmdbuf=0x%x off=%u target-hmem=0x%x "
+           "target-off=%u shift=%u\n",
+           cmdbuf, off, memh, toff, shift);
+    if (real_fn == 0) {
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
+    }
+    rc = real_fn(cmdbuf, off, memh, toff, shift);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
+}
+
+int NvRmStreamPush(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    static Any4_fn real_fn;
+    int rc;
+
+    real_fn = (Any4_fn)resolve_real("NvRmStreamPush", (void **)&real_fn);
+    printf("[nvrmlog] Push a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
+           a1, a2, a3, a4);
+    if (real_fn == 0) {
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
+    }
+    rc = real_fn(a1, a2, a3, a4);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
+}
+
+int NvRmStreamPushSetClass(unsigned a1, unsigned a2, unsigned a3,
+                           unsigned a4)
+{
+    static Any4_fn real_fn;
+    int rc;
+
+    real_fn = (Any4_fn)resolve_real("NvRmStreamPushSetClass",
+                                    (void **)&real_fn);
+    printf("[nvrmlog] PushSetClass a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
+           a1, a2, a3, a4);
+    if (real_fn == 0) {
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
+    }
+    rc = real_fn(a1, a2, a3, a4);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
+}
+
+/* increments may go through Push rather than a dedicated call; if this
+   export does not exist it simply never fires */
+int NvRmStreamPushIncr(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    static Any4_fn real_fn;
+    int rc;
+
+    real_fn = (Any4_fn)resolve_real("NvRmStreamPushIncr",
+                                    (void **)&real_fn);
+    printf("[nvrmlog] PushIncr a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
+           a1, a2, a3, a4);
+    if (real_fn == 0) {
+        printf("[nvrmlog]   UNRESOLVED -- exiting 70\n");
+        exit(70);
+    }
+    rc = real_fn(a1, a2, a3, a4);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
 }

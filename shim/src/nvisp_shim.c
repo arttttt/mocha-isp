@@ -60,6 +60,16 @@ void *dlsym(void *handle, const char *symbol);
 
 static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
+/*
+ * Bindings-table index of NvIspHwSettingsSetAttribute (gen_passthrough.h).
+ * The only binding whose r2 we may dereference: known arity (h, attrId,
+ * in*, &size) and a known-valid input pointer at call time. Keep in sync
+ * with the table order -- check-shim.sh catches a mismatch indirectly (the
+ * log would name another function), but there is no static assert across
+ * the generated asm.
+ */
+#define SHIM_IDX_SETATTRIBUTE 16
+
 static void *real_handle;
 static void *hook_real_cache[41];
 static unsigned call_counter;
@@ -245,20 +255,6 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     }
     shim_budget[idx]++;
 
-    /* build the log message */
-    /* ensure the real library is loaded */
-    if (real_handle == 0) {
-        real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
-    }
-
-    /* resolve: dlsym the real address for this binding, cache it */
-    {
-        void *t = dlsym(real_handle, shim_bindings[idx].name);
-        if (t != 0) {
-            hook_real_cache[idx] = t;
-        }
-    }
-
     /* build: "hook [Name] #<counter> r0=0x... r1=0x... r2=0x... r3=0x... sp0=0x..." */
     p = "hook [";
     while (*p) *w++ = *p++;
@@ -281,6 +277,22 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     while (*p) *w++ = *p++;
     for (i = 28; i >= 0; i -= 4)
         *w++ = hexdig[(saved[2] >> i) & 0xf];
+    /*
+     * The one permitted dereference. r2 of NvIspHwSettingsSetAttribute is
+     * a known-valid input pointer at call time: arity (h, attrId, in*,
+     * &size), and the library reads through it right after us -- we read
+     * exactly what it is about to read. Four bytes, this binding only,
+     * inside the budget (two calls per run), never for any other binding:
+     * for the rest the arity or the pointer guarantee is unestablished,
+     * and a read through a non-pointer would kill mediaserver.
+     */
+    if (idx == SHIM_IDX_SETATTRIBUTE && saved[2] != 0) {
+        unsigned v = *(const unsigned *)saved[2];
+        p = " val=0x";
+        while (*p) *w++ = *p++;
+        for (i = 28; i >= 0; i -= 4)
+            *w++ = hexdig[(v >> i) & 0xf];
+    }
     p = " r3=0x";
     while (*p) *w++ = *p++;
     for (i = 28; i >= 0; i -= 4)

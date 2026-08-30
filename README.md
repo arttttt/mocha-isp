@@ -26,6 +26,20 @@ Method: **from working to ours**, not from nothing to working.
 By the end nothing of the stock library remains, and the camera has been
 working the whole way.
 
+### Where we are
+
+Stage 1 is done. The wrapper is on the device, the camera works through it,
+and the streams are the same ones the stock library produces. Fourteen of
+the forty-one entry points are actually used; the other twenty-seven were
+never called, which the live slot table shows directly -- they still point
+at their own trampolines.
+
+The fourteen: `NvIspOpen`, `NvIspClose`, `NvIspProcessFrame`,
+`NvIspSetAttribute`, `NvIspGetStatus`, `NvIspUpdateEmcClock`,
+`NvIspSetIspClockRate`, `NvIspHwSettingsCreate`, `NvIspHwSettingsDestroy`,
+`NvIspHwSettingsSetAttribute`, `NvIspHwSettingsApply`,
+`NvIspSetConfiguration`, `NvIspGetStats`, `NvIspSetStats`.
+
 ## Why not a memory dump
 
 We tried. The settings live on the heap, are computed at runtime, and the

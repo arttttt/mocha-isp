@@ -562,6 +562,9 @@ int main(int argc, char **argv)
                                never tested) */
     unsigned wait_ms = 0;                 /* wait=<ms>: delay before the
                                              post-submit output read */
+    int obj0_set = 0;
+    unsigned obj0_val = 0;
+    unsigned retry_n = 1;                 /* submissions per run */
     unsigned rt_size = 0;                 /* simple-mode byte count */
     char rt_order[5] = "hops";            /* simple-mode argument order:
         NvRmMemWrite(handle, offset, ptr, size) -- found by enumerating
@@ -1033,6 +1036,35 @@ int main(int argc, char **argv)
                 return 1;
             }
             pkt3 = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "obj0=", 5) == 0) {
+            /* obj0=<val> -- manually write this value into the first
+               word of the object at [hIsp+0x1318] before the submission.
+               Experiment: stage 4 issues the memory PushIncr only when
+               that word is nonzero (the stock has 0x37 there, we 0).
+               No default write -- only by key. */
+            char *e14 = 0;
+            long v = strtol(tok + 5, &e14, 0);
+            if (e14 == tok + 5 || *e14 != '\0' || v < 0) {
+                printf("[0] bad obj0 '%s', use obj0=<value>\n", argv[ai]);
+                return 1;
+            }
+            obj0_set = 1;
+            obj0_val = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "retry=", 6) == 0) {
+            /* retry=<n> -- on rc 0xa, resubmit the frame the same way
+               (fix-and-repeat): the library writes what it wants into
+               the +1c state buffer, and the resubmit hands it back */
+            char *e15 = 0;
+            long v = strtol(tok + 6, &e15, 0);
+            if (e15 == tok + 6 || *e15 != '\0' || v < 1 || v > 10) {
+                printf("[0] bad retry '%s', use retry=<1..10>\n", argv[ai]);
+                return 1;
+            }
+            retry_n = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "wait=", 5) == 0) {
@@ -2167,6 +2199,21 @@ round_trip_end:;
                    "+18=%s(0x%x)\n",
                    slot_kind[0], s08, slot_kind[1], s10,
                    slot_kind[2], s14, slot_kind[3], s18);
+            /* manual gate write, only when obj0=<val> is given */
+            if (obj0_set && hIsp != 0) {
+                unsigned gptr = *(unsigned *)((unsigned)hIsp + 0x1318);
+                if (gptr != 0) {
+                    unsigned was = *(unsigned *)gptr;
+                    *(unsigned *)gptr = obj0_val;
+                    printf("[11c] obj0: wrote 0x%x at [0x%x] (was 0x%x)\n",
+                           obj0_val, gptr, was);
+                } else {
+                    printf("[11c] obj0: [hIsp+0x1318] is null -- nothing "
+                           "to write\n");
+                }
+                print_gate("[11c] after obj0 write", hIsp);
+            }
+
             printf("[12] aux slots:");
             for (i = 0; i < 7; i++)
                 printf(" +%s=%p(%s)", aux_names[i],
@@ -2178,6 +2225,15 @@ round_trip_end:;
                    hIsp, pf_mode, slot_kind[0], slot_kind[1],
                    slot_kind[2], slot_kind[3]);
 
+            unsigned attempt = 0;
+            int stop_all = 0;
+            do {
+                attempt++;
+                if (attempt > 1) {
+                    printf("[12] retry attempt %u of %u: +1c[0] was 0x%x "
+                           "(library-written), resubmitting\n",
+                           attempt, retry_n, bufs[5][0]);
+                }
             if (stages_spec[0] != '0') {
                 /* per-stage submission: call the stages the library
                    would call, in its order, printing each return code.
@@ -2270,6 +2326,13 @@ round_trip_end:;
                 printf("    ProcessFrame returned rc=0x%x\n",
                        (unsigned)rc);
             }
+                if (rc == 0xa && attempt < retry_n) {
+                    stop_all = 0;
+                    printf("[12] rc=0xa -- fix-and-repeat: retrying\n");
+                } else {
+                    stop_all = 1;
+                }
+            } while (!stop_all);
 
             /* post-call state of EVERY buffer we hand over, with the
                changed-word list: a "fix-and-repeat" answer (rc=10
@@ -2309,16 +2372,21 @@ round_trip_end:;
                            (int)post[q] - (int)sp_pre[q]);
                 printf("\n");
 
+                unsigned *fslots[2];
+                fslots[0] = (unsigned *)s14; /* whatever sits in +0x14 */
+                fslots[1] = (unsigned *)s18; /* whatever sits in +0x18 */
                 for (q = 0; q < 2; q++) {
-                    unsigned *fb = q == 0 ? fenceA : fenceB;
-                    unsigned id = fb[0], thresh = fb[1], actual = 0;
-                    if (id == 0)
-                        continue;
+                    unsigned *fb = fslots[q];
+                    unsigned id, thresh, actual = 0;
+                    if (fb == 0 || fb[0] == 0)
+                        continue; /* a zero slot carries no fence */
+                    id = fb[0];
+                    thresh = fb[1];
                     fences++;
                     read_syncpt(id, &actual);
-                    printf("[sp-check] fence%s: id=%u thresh=%u actual=%u "
+                    printf("[sp-check] slot%s: id=%u thresh=%u actual=%u "
                            "%s\n",
-                           q == 0 ? "A" : "B", id, thresh, actual,
+                           q == 0 ? "14" : "18", id, thresh, actual,
                            actual >= thresh ? "REACHED" : "NOT REACHED");
                     if (actual >= thresh)
                         reached++;

@@ -132,6 +132,13 @@ check "ctx=0:1"                1 4194303 rggb ctx=0:1
 check "ctx junk rejected"      0 4194303 rggb ctx=junk
 check "ctx count 0 rejected"   0 4194303 rggb ctx=0x1200:0
 
+echo "-- manual gate write and resubmission (obj0=/retry=)"
+check "obj0=55"                1 4194303 rggb obj0=55
+check "obj0 junk rejected"     0 4194303 rggb obj0=junk
+check "retry=3"                1 4194303 rggb retry=3
+check "retry=0 rejected"       0 4194303 rggb retry=0
+check "retry junk rejected"    0 4194303 rggb retry=junk
+
 echo "-- settings-handle source (hset=)"
 check "hset=p1"                1 4194303 rggb hset=p1
 check "hset=p2a"               1 4194303 rggb hset=p2a

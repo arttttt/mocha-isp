@@ -63,11 +63,11 @@ __asm__(
     ".type NvIspCtrlInitialize, %function\n"
     "NvIspCtrlInitialize:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspCtrlInitialize - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspCtrlInitialize - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -97,11 +97,11 @@ __asm__(
     ".type NvIspFlush, %function\n"
     "NvIspFlush:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspFlush - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspFlush - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -131,11 +131,11 @@ __asm__(
     ".type NvIspCtrlCleanup, %function\n"
     "NvIspCtrlCleanup:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspCtrlCleanup - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspCtrlCleanup - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -165,11 +165,11 @@ __asm__(
     ".type NvIspClose, %function\n"
     "NvIspClose:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspClose - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspClose - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -199,11 +199,11 @@ __asm__(
     ".type NvIspOpen, %function\n"
     "NvIspOpen:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspOpen - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspOpen - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -233,11 +233,11 @@ __asm__(
     ".type NvIspProcessFrame, %function\n"
     "NvIspProcessFrame:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspProcessFrame - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspProcessFrame - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -267,11 +267,11 @@ __asm__(
     ".type NvIspSetAttribute, %function\n"
     "NvIspSetAttribute:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspSetAttribute - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspSetAttribute - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -301,11 +301,11 @@ __asm__(
     ".type NvIspGetAttribute, %function\n"
     "NvIspGetAttribute:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspGetAttribute - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspGetAttribute - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -335,11 +335,11 @@ __asm__(
     ".type NvIspGetStatus, %function\n"
     "NvIspGetStatus:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspGetStatus - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspGetStatus - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -369,11 +369,11 @@ __asm__(
     ".type NvIspSetMemoryBandwidth, %function\n"
     "NvIspSetMemoryBandwidth:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspSetMemoryBandwidth - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspSetMemoryBandwidth - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -403,11 +403,11 @@ __asm__(
     ".type NvIspUpdateEmcClock, %function\n"
     "NvIspUpdateEmcClock:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspUpdateEmcClock - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspUpdateEmcClock - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -437,11 +437,11 @@ __asm__(
     ".type NvIspSetIspClockRate, %function\n"
     "NvIspSetIspClockRate:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspSetIspClockRate - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspSetIspClockRate - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -471,11 +471,11 @@ __asm__(
     ".type NvIspHwSettingsDestroyClientHwSettingsList, %function\n"
     "NvIspHwSettingsDestroyClientHwSettingsList:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsDestroyClientHwSettingsList - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsDestroyClientHwSettingsList - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -505,11 +505,11 @@ __asm__(
     ".type NvIspHwSettingsDestroy, %function\n"
     "NvIspHwSettingsDestroy:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsDestroy - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsDestroy - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -539,11 +539,11 @@ __asm__(
     ".type NvIspHwSettingsCreate, %function\n"
     "NvIspHwSettingsCreate:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCreate - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCreate - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -573,11 +573,11 @@ __asm__(
     ".type NvIspHwSettingsClone, %function\n"
     "NvIspHwSettingsClone:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsClone - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsClone - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -607,11 +607,11 @@ __asm__(
     ".type NvIspHwSettingsSetAttribute, %function\n"
     "NvIspHwSettingsSetAttribute:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsSetAttribute - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsSetAttribute - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -641,11 +641,11 @@ __asm__(
     ".type NvIspGetConfiguration, %function\n"
     "NvIspGetConfiguration:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspGetConfiguration - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspGetConfiguration - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -675,11 +675,11 @@ __asm__(
     ".type NvIspHwSettingsGetAppliedSettings, %function\n"
     "NvIspHwSettingsGetAppliedSettings:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsGetAppliedSettings - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsGetAppliedSettings - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -709,11 +709,11 @@ __asm__(
     ".type NvIspHwSettingsGetAttribute, %function\n"
     "NvIspHwSettingsGetAttribute:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsGetAttribute - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsGetAttribute - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -743,11 +743,11 @@ __asm__(
     ".type NvIspHwSettingsApply, %function\n"
     "NvIspHwSettingsApply:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsApply - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsApply - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -777,11 +777,11 @@ __asm__(
     ".type NvIspSetConfiguration, %function\n"
     "NvIspSetConfiguration:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspSetConfiguration - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspSetConfiguration - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -811,11 +811,11 @@ __asm__(
     ".type NvIspHwSettingsCopyGpp, %function\n"
     "NvIspHwSettingsCopyGpp:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyGpp - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyGpp - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -845,11 +845,11 @@ __asm__(
     ".type NvIspHwSettingsCopyLensShading, %function\n"
     "NvIspHwSettingsCopyLensShading:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyLensShading - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyLensShading - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -879,11 +879,11 @@ __asm__(
     ".type NvIspHwSettingsCopyDemosaic, %function\n"
     "NvIspHwSettingsCopyDemosaic:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyDemosaic - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyDemosaic - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -913,11 +913,11 @@ __asm__(
     ".type NvIspHwSettingsCopyLumaEnhancement, %function\n"
     "NvIspHwSettingsCopyLumaEnhancement:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyLumaEnhancement - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyLumaEnhancement - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -947,11 +947,11 @@ __asm__(
     ".type NvIspHwSettingsCopyOutputDownScaler, %function\n"
     "NvIspHwSettingsCopyOutputDownScaler:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyOutputDownScaler - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyOutputDownScaler - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -981,11 +981,11 @@ __asm__(
     ".type NvIspHwSettingsCopyBitwiseOperation, %function\n"
     "NvIspHwSettingsCopyBitwiseOperation:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspHwSettingsCopyBitwiseOperation - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspHwSettingsCopyBitwiseOperation - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1015,11 +1015,11 @@ __asm__(
     ".type NvIspGetStats, %function\n"
     "NvIspGetStats:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspGetStats - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspGetStats - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1049,11 +1049,11 @@ __asm__(
     ".type NvIspSetStats, %function\n"
     "NvIspSetStats:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvIspSetStats - (9b + 8)\n");
+    "9:  .word shim_slot_NvIspSetStats - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1083,11 +1083,11 @@ __asm__(
     ".type PopulateIspHwFunctions_T12x, %function\n"
     "PopulateIspHwFunctions_T12x:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_PopulateIspHwFunctions_T12x - (9b + 8)\n");
+    "9:  .word shim_slot_PopulateIspHwFunctions_T12x - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1117,11 +1117,11 @@ __asm__(
     ".type NvSFxFloat2Fixed, %function\n"
     "NvSFxFloat2Fixed:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvSFxFloat2Fixed - (9b + 8)\n");
+    "9:  .word shim_slot_NvSFxFloat2Fixed - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1151,11 +1151,11 @@ __asm__(
     ".type NvSFxFixed2Float, %function\n"
     "NvSFxFixed2Float:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvSFxFixed2Float - (9b + 8)\n");
+    "9:  .word shim_slot_NvSFxFixed2Float - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1185,11 +1185,11 @@ __asm__(
     ".type NvCameraHwSettingsApply, %function\n"
     "NvCameraHwSettingsApply:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraHwSettingsApply - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraHwSettingsApply - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1219,11 +1219,11 @@ __asm__(
     ".type NvCameraHwSettingsUpdateDirty, %function\n"
     "NvCameraHwSettingsUpdateDirty:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraHwSettingsUpdateDirty - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraHwSettingsUpdateDirty - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1253,11 +1253,11 @@ __asm__(
     ".type NvCameraConvertDoubleToUFx, %function\n"
     "NvCameraConvertDoubleToUFx:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraConvertDoubleToUFx - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraConvertDoubleToUFx - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1287,11 +1287,11 @@ __asm__(
     ".type NvCameraConvertDoubleToSFx, %function\n"
     "NvCameraConvertDoubleToSFx:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraConvertDoubleToSFx - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraConvertDoubleToSFx - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1321,11 +1321,11 @@ __asm__(
     ".type NvCameraMatMult3x3, %function\n"
     "NvCameraMatMult3x3:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraMatMult3x3 - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraMatMult3x3 - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1355,11 +1355,11 @@ __asm__(
     ".type NvCameraGetBayerComponent, %function\n"
     "NvCameraGetBayerComponent:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraGetBayerComponent - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraGetBayerComponent - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1389,11 +1389,11 @@ __asm__(
     ".type NvCameraConvertRGrGbBToTlTrBlBr, %function\n"
     "NvCameraConvertRGrGbBToTlTrBlBr:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_NvCameraConvertRGrGbBToTlTrBlBr - (9b + 8)\n");
+    "9:  .word shim_slot_NvCameraConvertRGrGbBToTlTrBlBr - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1423,11 +1423,11 @@ __asm__(
     ".type IsBayerColorFormat, %function\n"
     "IsBayerColorFormat:\n"
     "  ldr  r12, 9f\n"
-    "  add  r12, pc\n"
+    "1: add  r12, pc\n"
     "  ldr  r12, [r12]\n"
     "  bx   r12\n"
     "  .align 2\n"
-    "9:  .word shim_slot_IsBayerColorFormat - (9b + 8)\n");
+    "9:  .word shim_slot_IsBayerColorFormat - (1b + 4)\n");
 __asm__(
     ".text\n"
     ".thumb\n"

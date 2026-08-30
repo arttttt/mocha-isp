@@ -1289,14 +1289,23 @@ round_trip_end:;
      * if nothing ever does, the init chain is not the source.
      */
     if (st_create) {
-        unsigned cs1[16] = {0}, cs2[16] = {0}; /* opaque, 0x24 region */
+        /* headroom IN FRONT: Destroy's second buffer is p1-4, so p1
+           must point into our memory with one word before it */
+        unsigned carea1[17] = {0}, carea2[17] = {0};
+        unsigned *cs1 = carea1 + 1; /* 0x24 region, one word of slack */
+        unsigned *cs2 = carea2 + 1;
         printf("[7b] NvIspHwSettingsCreate(hIsp=0x%x, &p1, 0x24, &p2) -> ",
                (unsigned)hIsp);
+        stage_now = "HwSettingsCreate";
         rc = nvIspHwSettingsCreate((unsigned)hIsp, cs1, 0x24, cs2);
-        /* the live log: the settings handle lands at p2+4 -- the stock's
-           SetAttribute receives r3+4 */
-        hset = cs2[1];
-        printf("rc=0x%x hset=0x%x\n", (unsigned)rc, hset);
+        /* the live chain: SetAttribute/Apply/Destroy receive r0 =
+           r3 + 4 -- the settings OBJECT lives inside the p2 buffer at
+           offset 4, the handle is that ADDRESS */
+        hset = (unsigned)&cs2[1];
+        stage_now = "HwSettingsCreate";
+        printf("rc=0x%x hset=0x%x (p2+4)\n", (unsigned)rc, hset);
+        print_first_words("[7b] p1 first words", (unsigned char *)cs1, 8);
+        print_first_words("[7b] p2 first words", (unsigned char *)cs2, 8);
         print_gate("[7b] after HwSettingsCreate", hIsp);
     }
 
@@ -1321,6 +1330,8 @@ round_trip_end:;
        log-observed, the rest follow the lead's canonical list).
        Buffers are zeroed 256 bytes -- if the library wants content or
        a size, rc will say so. */
+    if (st_sattr && hset == 0)
+        printf("[9b2] skipped: hset==0 (Create did not produce one)\n");
     if (st_sattr && hset != 0) {
         static const unsigned blocks[14][2] = {
             {5, 0}, {1, 0}, {2, 0}, {2, 1}, {4, 0}, {6, 0}, {7, 0},
@@ -1331,6 +1342,9 @@ round_trip_end:;
         int q;
         for (q = 0; q < 14; q++) {
             char tag[32];
+            snprintf(tag, sizeof(tag), "HwSettingsSetAttribute id=%u",
+                     blocks[q][0]);
+            stage_now = tag;
             rc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
                                              blocks[q][1], zbuf);
             snprintf(tag, sizeof(tag), "[9b2] SetAttr id=%u idx=%u",
@@ -1342,29 +1356,41 @@ round_trip_end:;
         }
     }
 
-    /* [9b3] SetStats x4: (id,index) pairs from the live log */
+    /* [9b3] SetStats x4: (id,index) pairs from the live log; buffer
+       sizes per impl-2: type 2 -> 0x20, 1 -> 0x68, 4 -> 0x48. The
+       library checks them -- a wrong-size zero buffer is exactly the
+       kind of thing that turns into a fault or a silent rc. */
     if (st_stats) {
-        static const unsigned stats[4][2] = {
-            {2, 0}, {1, 0}, {1, 1}, {4, 0},
+        static const unsigned stats[4][3] = {
+            {2, 0, 0x20}, {1, 0, 0x68}, {1, 1, 0x68}, {4, 0, 0x48},
         };
-        unsigned zbuf[64] = {0};
+        unsigned zbuf[35] = {0}; /* 140 bytes >= 0x68, zeroed per call */
         int q;
         for (q = 0; q < 4; q++) {
+            memset(zbuf, 0, sizeof(zbuf));
+            stage_now = stats[q][0] == 2 ? "SetStats(type 2)"
+                                         : stats[q][0] == 4 ? "SetStats(type 4)"
+                                         : "SetStats(type 1)";
             rc = nvIspSetStats((unsigned)hIsp, stats[q][0], stats[q][1],
                                zbuf);
-            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, zero-buf) "
+            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, buf %uB) "
                    "-> rc=0x%x\n",
-                   (unsigned)hIsp, stats[q][0], stats[q][1], (unsigned)rc);
+                   (unsigned)hIsp, stats[q][0], stats[q][1],
+                   stats[q][2], (unsigned)rc);
             print_gate("[9b3] after SetStats", hIsp);
         }
+        stage_now = 0;
     }
 
     /* [9b4] HwSettingsApply: (hset, mapped?, 5, 0xb61bf1bf) per the
        live log; the mapped pointer is opaque -- zero for now */
+    if (st_apply && hset == 0)
+        printf("[9b4] skipped: hset==0\n");
     if (st_apply && hset != 0) {
         /* the live log's r3 (0xb61bf1bf etc.) is a SESSION POINTER that
            moves between runs -- never a constant; zero until we know
            what it points at */
+        stage_now = "HwSettingsApply";
         rc = nvIspHwSettingsApply(hset, 0, 5, 0);
         printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0) -> "
                "rc=0x%x\n", hset, (unsigned)rc);
@@ -1447,6 +1473,7 @@ round_trip_end:;
     if (st_setattr) {
         unsigned flag = 0;
         unsigned fsize = 4;
+        stage_now = "NvIspSetAttribute(id 4)";
         rc = nvIspSetAttribute(hIsp, 4, &flag, &fsize);
         printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=4, &flag=0, "
                "&size=4) -> rc=0x%x\n", hIsp, (unsigned)rc);
@@ -1932,8 +1959,11 @@ round_trip_end:;
     /* [14b] HwSettingsDestroy: (hset, 0xf92, ptr, dev) per the live
        log. The 0xf92 "page minus a word"-looking size is unexplained;
        passed verbatim. */
+    if (st_destroy && hset == 0)
+        printf("[14b] skipped: hset==0\n");
     if (st_destroy && hset != 0) {
         unsigned dscratch[16] = {0};
+        stage_now = "HwSettingsDestroy";
         rc = nvIspHwSettingsDestroy(hset, 0xf92, dscratch, (unsigned)dev);
         printf("[14b] NvIspHwSettingsDestroy(hset=0x%x, 0xf92, ptr, dev) -> "
                "rc=0x%x\n", hset, (unsigned)rc);

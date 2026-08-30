@@ -122,14 +122,14 @@ typedef int (*NvIspHwSettingsDestroy_fn)(unsigned hSettings, unsigned size,
 typedef int (*NvIspSetAttribute_fn)(unsigned hIsp, unsigned attrId,
                                     void *inVal, void *inSize);
 typedef unsigned (*NvRmMemGetAddress_fn)(unsigned hMem, unsigned offset);
-typedef int (*NvRmMemPin_fn)(unsigned hMem, unsigned *physAddr);
+typedef unsigned (*NvRmMemPin_fn)(unsigned hMem, unsigned flag);
 /* pinning / device address: exports VERIFIED in libnvrm.so
    (NvRmMemPin 0x6459 sz26, NvRmMemGetAddress 0x66b9 sz16,
-   NvRmMemPinMult 0x6449 sz16). Arity of GetAddress is (hMem, offset)
-   returning the device address; Pin is (hMem, &physAddr) returning
-   NvError -- both called and PRINTED, a wrong guess shows in print. */
+   NvRmMemPinMult 0x6449 sz16). GetAddress is (hMem, offset) returning
+   the device address; Pin RETURNS the address too (measured: 0x800c0000
+   in the return slot was an address, not an error code). */
 typedef unsigned (*NvRmMemGetAddress_fn)(unsigned hMem, unsigned offset);
-typedef int (*NvRmMemPin_fn)(unsigned hMem, unsigned *physAddr);
+typedef unsigned (*NvRmMemPin_fn)(unsigned hMem, unsigned flag);
 /* the four stages, per the 0x1784 frame read (lead + impl-2):
    st.4 takes a FIFTH argument on the stack (+0x1c) */
 typedef int (*Stage1_fn)(unsigned hIsp, void *pkt, unsigned inDesc);
@@ -753,6 +753,8 @@ int main(int argc, char **argv)
     unsigned outaddr_off = 0x1674; /* rec0 last word */
     unsigned out_devaddr = 0;
     int out_devaddr_valid = 0;
+    unsigned heap_i = 3, heap_o = 3; /* carveout pair, stock value */
+    int heap_given = 0;
     int objdump0_on = 0;
     const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
     unsigned objset_off[16], objset_val[16];
@@ -1472,6 +1474,42 @@ int main(int argc, char **argv)
                 objset_val[objset_n] = (unsigned)val;
                 objset_n++;
             }
+            continue;
+        }
+        if (strncmp(tok, "heapi=", 6) == 0 || strncmp(tok, "heapo=", 6) == 0) {
+            /* heap selection per surface: iovmm (heap mask 1<<30, the
+               SMMU space -- stock-like addresses), carveout (mask 3 =
+               GENERIC|IVM, physical 0x8xxxxxxx), or raw mask word.
+               Kernel: struct nvmap_alloc_kind_handle {handle,
+               heap_mask, flags, align, kind} maps to attrs[1..4] --
+               attrs[1] is the HEAP MASK (stock 3 = carveout pair),
+               attrs[2] = align (0x20), attrs[3] = cache flags (2),
+               attrs[4] = size (0x40000). */
+            char *colon3 = strchr(tok + 6, ':');
+            unsigned v3;
+            if (colon3 != 0)
+                *colon3 = '\0';
+            if (strcmp(tok + 6, "iovmm") == 0)
+                v3 = 0x40000000u;
+            else if (strcmp(tok + 6, "carveout") == 0)
+                v3 = 3;
+            else {
+                /* raw mask word, with or without a value part */
+                char *e28 = 0;
+                long lv = strtol(colon3 != 0 ? colon3 + 1 : tok + 6,
+                                 &e28, 0);
+                if (e28 == (colon3 != 0 ? colon3 + 1 : tok + 6) ||
+                    *e28 != (colon3 != 0 ? '\0' : *e28) || lv <= 0) {
+                    printf("[0] bad heap '%s'\n", argv[ai]);
+                    return 1;
+                }
+                v3 = (unsigned)lv;
+            }
+            if (tok[4] == 'i')
+                heap_i = v3;
+            else
+                heap_o = v3;
+            heap_given = 1;
             continue;
         }
         if (strncmp(tok, "pin=", 4) == 0) {
@@ -2566,12 +2604,22 @@ round_trip_end:;
             attrs_in[k] = attrs_base[k];
             attrs_out[k] = attrs_base[k];
         }
+        /* heap word = attrs[1]: the kernel struct
+           nvmap_alloc_kind_handle is {handle, heap_mask, flags, align,
+           kind} -- stock attrs[1]=3 = GENERIC|IVM carveout pair, hence
+           our 0x800c0000 physical addresses. IOVMM = 1<<30 gives
+           SMMU-space addresses like the stock's records show. */
+        attrs_in[1] = heap_i;
+        attrs_out[1] = heap_o;
         for (k = 0; k < 8; k++) {
             if (attr_set[k]) {
                 attrs_in[k] = attr_val[k];
                 attrs_out[k] = attr_val[k];
             }
         }
+        printf("[10] heap in=0x%x out=0x%x (%s)\n",
+               attrs_in[1], attrs_out[1],
+               attrs_in[1] & 0x40000000u ? "iovmm" : "carveout");
 
         printf("[10] attrs in|out:");
         for (k = 0; k < 8; k++)
@@ -2599,15 +2647,15 @@ round_trip_end:;
                (exports verified in libnvrm.so; both calls PRINT their
                results -- a wrong arity shows in print, not in a crash) */
             if (pin_on && memh_out != 0 && nvRmMemPin != 0) {
-                unsigned pa = 0;
-                unsigned prc;
+                unsigned pa;
                 stage_now = "NvRmMemPin";
-                prc = nvRmMemPin((unsigned)memh_out, &pa);
+                /* measured: Pin RETURNS the device address (0x800c0000
+                   in the field was an address, not an error code) */
+                pa = nvRmMemPin((unsigned)memh_out, 0);
                 stage_now = 0;
-                printf("[11a] NvRmMemPin(memh_out=0x%x, &pa) -> rc=0x%x "
-                       "pa=0x%x\n",
-                       (unsigned)memh_out, (unsigned)prc, pa);
-                if (prc == 0) {
+                printf("[11a] NvRmMemPin(memh_out=0x%x) -> addr=0x%x\n",
+                       (unsigned)memh_out, pa);
+                if (pa != 0) {
                     out_devaddr = pa;
                     out_devaddr_valid = 1;
                 }
@@ -3106,7 +3154,7 @@ round_trip_end:;
                    overwrite our writes). objset re-applied here, then
                    the late dump -- the same point the stock capture is
                    taken at. */
-                if (objset_n != 0 || objdump_on) {
+                if (objset_n != 0 || objdump_on || outaddr_on) {
                     unsigned objp2 =
                         *(unsigned *)((unsigned)hIsp + 0x1318);
                     int k5;

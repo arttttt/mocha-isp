@@ -178,6 +178,10 @@ check "outaddr=0x1678:on"      1 4194303 rggb outaddr=0x1678:on
 check "outaddr=0xdead"         1 4194303 rggb outaddr=0xdead
 check "outaddr junk rejected"  0 4194303 rggb outaddr=junk
 check "pin junk rejected"      0 4194303 rggb pin=yes
+check "heapi=iovmm"            1 4194303 rggb heapi=iovmm
+check "heapo=carveout"         1 4194303 rggb heapo=carveout
+check "heapi=0x40000000"       1 4194303 rggb heapi=0x40000000
+check "heap junk rejected"     0 4194303 rggb heapi=junk
 check "objset=8:0x40b"         1 4194303 rggb objset=8:0x40b
 check "objset aligned ok"      1 4194303 rggb objset=0x3ffc:1
 check "objset unaligned rejected" 0 4194303 rggb objset=7:1

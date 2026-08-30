@@ -128,9 +128,10 @@ int main(int argc, char **argv)
     unsigned size = 4;
     unsigned rate = 0x003fffffu;
     unsigned order;
-    unsigned mem_size = 4092; /* the stock's value: "page minus word",
-                                 formula not derived -- copied deliberately
-                                 to repeat what works; overridable by CLI */
+    unsigned a1_val;         /* AllocAttr's first argument override; the
+                                 working value is the device VALUE (1 in
+                                 our runs), used when unset */
+    int a1_set = 0;
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     int rc;
@@ -184,14 +185,15 @@ int main(int argc, char **argv)
             tok += 5;
         colon = strchr(tok, ':');
         if (colon == 0) {
-            /* no colon: the buffer size */
+            /* no colon: override of AllocAttr's first argument */
             val = strtol(tok, &e2, 0);
             if (e2 == tok || *e2 != '\0' || val <= 0) {
-                printf("[0] bad size '%s', use a positive number\n",
+                printf("[0] bad value '%s', use a positive number\n",
                        argv[ai]);
                 return 1;
             }
-            mem_size = (unsigned)val;
+            a1_val = (unsigned)val;
+            a1_set = 1;
             continue;
         }
         *colon = '\0';
@@ -350,104 +352,103 @@ int main(int argc, char **argv)
      */
 
     /*
-     * [10] ONE call, like the stock: libnvisp imports exactly three
-     * memory functions -- AllocAttr, Free, Read. Neither Create nor
-     * Alloc. AllocAttr is "create with attributes":
+     * [10] the WORKING ATTRIBUTES -- read from INTERCEPTION, not derived.
+     * nvrmlog caught the stock's live calls in our own process (ten
+     * CREATE/ALLOC/MMAP triples, rc=0, identical attrs every time):
      *
-     *   NvRmMemHandleAllocAttr(SIZE, attrs, &memh)
+     *   arg1      = 0x1      the device VALUE. Three derived answers --
+     *                        pointer, Create handle, bare size -- were
+     *                        all wrong; this one reproduced rc=0 first try.
+     *   attrs[0]  = 0        no tag list at all
+     *   attrs[1]  = 0        not the tagged path
+     *   attrs[2]  = 0x20     alignment
+     *   attrs[3]  = 2        memory type (2, not 1)
+     *   attrs[4]  = 0x40000  256 KiB -- the size DOES live in attrs[4]
      *
-     * first argument SIZE, third the handle out. strace confirms the
-     * shape: AllocAttr sends NVMAP_IOC_CREATE, whose struct carries the
-     * size at offset 0 and returns the handle at offset 4.
-     *
-     * This also explains the 0xb runs without any fd story: our first
-     * arguments were &dev, then a Create handle -- both meaningless AS
-     * SIZES, and nvmap answers -EINVAL to a bogus size, which libnvrm's
-     * errno table maps EINVAL(22) -> 0xb, what we saw. Three sizes tried
-     * in attrs[4] (0x800/0xffc/0x1000) changed nothing because the size
-     * never lived there.
-     *
-     * The TWO-STEP variant (NvRmMemHandleCreate then AllocAttr with the
-     * handle) is kept below under ISPINIT_TWO_STEP_CREATE: it is the
-     * only verified-working allocation code we have in this area, and
-     * the kernel does have the two-command path -- the stock simply does
-     * not walk it.
-     *
-     * No free yet: first a clean submission, then paired teardown.
+     * CLI overrides still land on top of these defaults; they exist for
+     * exactly this kind of one-run experiment. (The two-step Create+Alloc
+     * experiment lives in git history, commit be257b4.)
      */
     {
-        /* attrs[0] points at the tag list; the list is one zero word,
-           outside 1..6, so the tag loop stops immediately and the
-           allocation runs tagless on defaults -- what the stock does. */
-        static unsigned tags = 0;
-        /* attrs[1]=3: the tagged path (a flat 0 would take the plain
-           ioctl with a hard alignment check). attrs[3]=1: memory type
-           from a live surface -- the one non-stock value in the recipe
-           (the stock has 0, which is an undefined pick in the
-           dispatcher). attrs[4] is the size switch, consistent with the
-           handle: both describe the same object. */
-        unsigned attrs[8] = { (unsigned)&tags, 3, 0, 1, 0, 0, 0, 0 };
-        void *memh = 0;
-        void *alloc_out = 0;
-        unsigned desc[44] = {0}; /* 0xb0 bytes, the stock record size */
+        unsigned attrs_base[8] = { 0, 0, 0x20, 2, 0x40000u, 0, 0, 0 };
+        unsigned attrs_in[8];
+        unsigned attrs_out[8];
+        void *memh_in = 0;
+        void *memh_out = 0;
+        unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
+                                        record size */
+        unsigned desc_out[44] = {0};
+        unsigned a1;
         int k;
 
-        /* command-line overrides land on top of the recipe */
-        for (k = 0; k < 8; k++)
-            if (attr_set[k])
-                attrs[k] = attr_val[k];
+        for (k = 0; k < 8; k++) {
+            attrs_in[k] = attrs_base[k];
+            attrs_out[k] = attrs_base[k];
+        }
+        for (k = 0; k < 8; k++) {
+            if (attr_set[k]) {
+                attrs_in[k] = attr_val[k];
+                attrs_out[k] = attr_val[k];
+            }
+        }
 
-        /* the whole array, every run: each attempt documents itself,
-           overrides marked with * */
-        printf("[10] attrs:");
+        printf("[10] attrs in|out:");
         for (k = 0; k < 8; k++)
-            printf(" [%d]=0x%x%s", k, attrs[k],
+            printf(" [%d]=0x%x|0x%x%s", k, attrs_in[k], attrs_out[k],
                    attr_set[k] ? "*" : "");
         printf("\n");
 
-        printf("[10] size=%u (first argument, CLI-overridable)\n", mem_size);
+        a1 = a1_set ? a1_val : (unsigned)dev;
+        printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_in) "
+               "[input] -> ", a1);
+        rc = nvRmMemHandleAllocAttr(a1, attrs_in, &memh_in);
+        printf("rc=0x%x memh_in=%p\n", (unsigned)rc, memh_in);
 
-#ifndef ISPINIT_TWO_STEP_CREATE
-        printf("[10] NvRmMemHandleAllocAttr(size=%u, attrs[8], &memh) -> ",
-               mem_size);
-        rc = nvRmMemHandleAllocAttr((void *)mem_size, attrs, &memh);
-        printf("rc=0x%x memh=%p\n", (unsigned)rc, memh);
-#else
-        /* the kernel's two-command path, kept for reference: the stock
-           does not walk it, but it is our only verified-working code
-           in this area */
-        printf("[10] NvRmMemHandleCreate(0, &memh, size=%u) -> ", mem_size);
-        rc = nvRmMemHandleCreate(0, &memh, mem_size);
-        printf("rc=0x%x memh=%p\n", (unsigned)rc, memh);
-
-        if (rc == 0 && memh != 0) {
-            printf("[10] NvRmMemHandleAllocAttr(memh=%p, attrs[8], &out) -> ",
-                   memh);
-            rc = nvRmMemHandleAllocAttr(memh, attrs, &alloc_out);
-            printf("rc=0x%x out=%p\n", (unsigned)rc, alloc_out);
+        if (rc == 0 && memh_in != 0) {
+            printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_out) "
+                   "[output] -> ", a1);
+            rc = nvRmMemHandleAllocAttr(a1, attrs_out, &memh_out);
+            printf("rc=0x%x memh_out=%p\n", (unsigned)rc, memh_out);
         }
-#endif
 
-        if (rc != 0 || memh == 0) {
+        if (rc != 0 || memh_in == 0 || memh_out == 0) {
             printf("    alloc failed -- skipping submission, closing\n");
         } else {
-            /* [11] the descriptor: seven live words of forty-four */
-            desc[0] = 8;          /* height */
-            desc[1] = 8;          /* width */
-            desc[2] = 0x105a500cu; /* format constant, as-is from the dummy */
-            desc[3] = 1;          /* memory type */
-            desc[4] = 256;        /* stride, multiple of 64 */
-            desc[5] = (unsigned)memh; /* OUR handle from Create */
-            desc[9] = 1;          /* 0x24: plane count */
+            /* [11] two descriptors, same layout as the stock dummy:
+               seven live words of forty-four; identical 8x8 geometry is
+               a deliberate first try -- the output requirements are
+               unknown, and a refusal would be informative. */
+            desc_in[0] = 8;           /* height */
+            desc_in[1] = 8;           /* width */
+            desc_in[2] = 0x105a500cu; /* format constant, from the dummy */
+            desc_in[3] = 1;           /* memory type */
+            desc_in[4] = 256;         /* stride, multiple of 64 */
+            desc_in[5] = (unsigned)memh_in;  /* OUR input handle */
+            desc_in[9] = 1;           /* 0x24: plane count */
+
+            desc_out[0] = 8;
+            desc_out[1] = 8;
+            desc_out[2] = 0x105a500cu;
+            desc_out[3] = 1;
+            desc_out[4] = 256;
+            desc_out[5] = (unsigned)memh_out; /* OUR output handle */
+            desc_out[9] = 1;
+
+            printf("[11] desc_in=%p (h=8 w=8 fmt=0x105a500c stride=256 "
+                   "memh=0x%x planes=1)\n", desc_in, desc_in[5]);
+            printf("[11] desc_out=%p (h=8 w=8 fmt=0x105a500c stride=256 "
+                   "memh=0x%x planes=1)\n", desc_out, desc_out[5]);
 
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
                for instance), the log shows exactly where it stopped. */
-            printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, desc@stack "
-                   "+0x10, aux=zeros) -> calling...\n", hIsp);
+            printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, "
+                   "in@+0x10=%p, out@+0x14=%p, aux=zeros) -> calling...\n",
+                   hIsp, desc_in, desc_out);
             rc = nvIspProcessFrame(hIsp, 1, 0, 0,
                                    0, 0, 0, 0,   /* stack +00..+0c: library ignores */
-                                   (unsigned)desc, 0, 0, 0, 0);
+                                   (unsigned)desc_in, (unsigned)desc_out,
+                                   0, 0, 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
         }
     }

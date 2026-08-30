@@ -204,6 +204,15 @@ int NvRmStreamFlush(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
     return nvrmlog_4("NvRmStreamFlush", "StreamFlush", a1, a2, a3, a4);
 }
 
+/* the accumulated stream-error query: stage 3 surfaces ITS result as
+   the ProcessFrame code (0xa). Seeing GetError's return directly shows
+   the stream state at the moment it is queried, not at the end */
+int NvRmStreamGetError(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmStreamGetError", "StreamGetError",
+                     a1, a2, a3, a4);
+}
+
 int NvRmChannelSyncPointWaitTimeout(unsigned a1, unsigned a2,
                                     unsigned a3, unsigned a4)
 {

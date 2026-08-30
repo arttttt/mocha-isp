@@ -1501,6 +1501,13 @@ round_trip_end:;
            +14 (slot14=aux): +1c mode, +30 width, +34 height,
               +38.. 0x3f000000 (float 0.5) to the end;
            +1c: 3, width, height, 1, 0, hIsp at +14, 2 at +38. */
+        /* mode 1: +0x08 is a POINTER to a structure whose first two
+           words are the frame geometry (ldm {r8,r10} at 0x3386) --
+           default-built here so the bare run is well-formed; the
+           a08= word overrides land on top. In mode 2 the slot is a
+           number (see the sv[] default below). */
+        bufs[2][0] = din_set[1] ? din_val[1] : 8; /* width */
+        bufs[2][1] = din_set[0] ? din_val[0] : 8; /* height */
         bufs[5][0] = 3;
         bufs[5][1] = din_set[1] ? din_val[1] : 8;
         bufs[5][2] = din_set[0] ? din_val[0] : 8;
@@ -1537,6 +1544,8 @@ round_trip_end:;
             for (i = 0; i < 4; i++) {
                 if (n_set[i])
                     sv[i] = n_val[i];
+                else if (i == 2 && pf_mode == 1)
+                    sv[i] = (unsigned)bufs[2]; /* mode 1: geometry ptr */
                 else if (aux_on[i])
                     sv[i] = (unsigned)bufs[i];
                 else

@@ -75,7 +75,7 @@ static const char nvisp_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
  * Cross-checked twice: the hook dump and the lead's mail agree word for
  * word. A typo here is a wrong format with no visible cause.
  */
-static const unsigned cfg_mode1[16] = {
+static const unsigned cfg_mode1_arr[16] = {
     0x00000001, 0x00000007, 0x00000009, 0x0000000a,
     0x00000003, 0x00000000, 0x00000006, 0x00000008,
     0x00000011, 0x0000000f, 0x0000000c, 0x0000000e,
@@ -804,6 +804,15 @@ int main(int argc, char **argv)
     };
     unsigned sp_pre[4];  /* syncpoint values before the submission */
     int st_create = 1, st_sattr = 1, st_stats = 1;
+    unsigned inst = 1;    /* inst=<n>: ISP instance; stock opens 1 and 2.
+                             isp.0 (instance 1, rear) is dead on this
+                             kernel; isp.1 (front) works. */
+    unsigned cfgmode1_arg = 1;  /* cfgmode1=<n>: SetConfiguration mode 1 */
+    unsigned cfgmode2_arg = 2;  /* cfgmode2=<n>: SetConfiguration mode 2 */
+    unsigned create_size = 0x24;   /* createsize=: HwSettingsCreate size */
+    unsigned status_id = 6;        /* status=<n>: GetStatus id */
+    unsigned apply_a2 = 5, apply_a4 = 0;  /* apply=<a2>:<a4> */
+    unsigned setattr_id = 4;       /* setattr=<n>: SetAttribute id */
     int st_apply = 1, st_setattr = 1, st_destroy = 1;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
     /* ctx=<off>:<count> -- ISP-context dumps, default none */
@@ -1485,6 +1494,48 @@ int main(int argc, char **argv)
                    "layout note in the source\n");
             return 1;
         }
+        if (strncmp(tok, "cfgmode1=", 9) == 0) {
+            char *e30 = 0;
+            long v = strtol(tok + 9, &e30, 0);
+            if (e30 == tok + 9 || *e30 != '\0' || v < 0) { bad: printf("[0] bad value in '%s'\n", argv[ai]); return 1; }
+            cfgmode1_arg = (unsigned)v; continue;
+        }
+        if (strncmp(tok, "cfgmode2=", 9) == 0) {
+            char *e30 = 0;
+            long v = strtol(tok + 9, &e30, 0);
+            if (e30 == tok + 9 || *e30 != '\0' || v < 0) goto bad;
+            cfgmode2_arg = (unsigned)v; continue;
+        }
+        if (strncmp(tok, "createsize=", 11) == 0) {
+            char *e30 = 0;
+            long v = strtol(tok + 11, &e30, 0);
+            if (e30 == tok + 11 || *e30 != '\0' || v <= 0) goto bad;
+            create_size = (unsigned)v; continue;
+        }
+        if (strncmp(tok, "status=", 7) == 0) {
+            char *e30 = 0;
+            long v = strtol(tok + 7, &e30, 0);
+            if (e30 == tok + 7 || *e30 != '\0' || v < 0) goto bad;
+            status_id = (unsigned)v; continue;
+        }
+        if (strncmp(tok, "apply=", 6) == 0) {
+            char *colon9 = strchr(tok + 6, ':');
+            char *e30 = 0;
+            long v1, v2 = 0;
+            if (colon9 == 0) goto bad;
+            *colon9 = '\0';
+            v1 = strtol(tok + 6, &e30, 0);
+            if (e30 != colon9) goto bad;
+            v2 = strtol(colon9 + 1, &e30, 0);
+            if (v1 < 0 || v2 < 0) goto bad;
+            apply_a2 = (unsigned)v1; apply_a4 = (unsigned)v2; continue;
+        }
+        if (strncmp(tok, "setattr=", 8) == 0) {
+            char *e30 = 0;
+            long v = strtol(tok + 8, &e30, 0);
+            if (e30 == tok + 8 || *e30 != '\0' || v < 0) goto bad;
+            setattr_id = (unsigned)v; continue;
+        }
         if (strncmp(tok, "pin=", 4) == 0) {
             /* pin=on -- pin the output buffer via NvRmMemPin. Pinning
                may be required on its own: unpinned memory has no
@@ -1531,6 +1582,19 @@ int main(int argc, char **argv)
                     outaddr_val = (unsigned)v2;
                 }
             }
+            continue;
+        }
+        if (strncmp(tok, "inst=", 5) == 0) {
+            /* inst=<n> -- ISP instance for NvIspOpen. Stock opens 1 and
+               2 (isp.0 rear, isp.1 front); on this kernel only isp.1
+               works. Default 1 for comparability with previous runs. */
+            char *e29 = 0;
+            long v = strtol(tok + 5, &e29, 0);
+            if (e29 == tok + 5 || *e29 != '\0' || v < 1 || v > 4) {
+                printf("[0] bad inst '%s', use 1..4\n", argv[ai]);
+                return 1;
+            }
+            inst = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "objout=", 7) == 0) {
@@ -1998,10 +2062,12 @@ int main(int argc, char **argv)
     }
 
 round_trip_end:;
-    /* [5] open instance 1. On failure the library cleans up after
-       itself; we release nothing here, that would be a double free. */
-    printf("[5] NvIspOpen(dev=%p, instance=1, &hIsp) -> ", dev);
-    rc = nvIspOpen((unsigned)dev, 1, &hIsp);
+    /* [5] open the chosen instance (inst=, default 1). On failure the
+       library cleans up after itself; we release nothing here, that
+       would be a double free. Which /dev/nvhost-isp* device this maps
+       to is visible in the kernel log / open interposition. */
+    printf("[5] NvIspOpen(dev=%p, instance=%u, &hIsp) -> ", dev, inst);
+    rc = nvIspOpen((unsigned)dev, inst, &hIsp);
     printf("rc=0x%x hIsp=0x%x\n", (unsigned)rc, hIsp);
     if (rc != 0)
         return 1;
@@ -2116,24 +2182,24 @@ round_trip_end:;
         unsigned cfgw[16];
         int k;
         for (k = 0; k < 16; k++)
-            cfgw[k] = cfg_set[k] ? cfg_val[k] : cfg_mode1[k];
+            cfgw[k] = cfg_set[k] ? cfg_val[k] : cfg_mode1_arr[k];
         printf("[6] cfg words:");
         for (k = 0; k < 16; k++)
             printf(" [%d]=0x%x%s", k, cfgw[k], cfg_set[k] ? "*" : "");
         printf("\n");
         size = 64;
-        printf("[6] NvIspSetConfiguration(hIsp=0x%x, mode=1, cfg16, "
-               "&size=64) -> ", hIsp);
-        rc = nvIspSetConfiguration(hIsp, 1, cfgw, &size);
+        printf("[6] NvIspSetConfiguration(hIsp=0x%x, mode=%u, cfg16, "
+               "&size=64) -> ", hIsp, cfgmode1_arg);
+        rc = nvIspSetConfiguration(hIsp, cfgmode1_arg, cfgw, &size);
         printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
     }
 
     /* [7] configure, mode 2: the single word (stock 2, cfg2= to
        override), size 4 in */
     size = 4;
-    printf("[7] NvIspSetConfiguration(hIsp=0x%x, mode=2, cfg2=0x%x%s, "
-           "&size=4) -> ", hIsp, cfg2_val, cfg2_set ? "*" : "");
-    rc = nvIspSetConfiguration(hIsp, 2, &cfg2_val, &size);
+    printf("[7] NvIspSetConfiguration(hIsp=0x%x, mode=%u, cfg2=0x%x%s, "
+           "&size=4) -> ", hIsp, cfgmode2_arg, cfg2_val, cfg2_set ? "*" : "");
+    rc = nvIspSetConfiguration(hIsp, cfgmode2_arg, &cfg2_val, &size);
     printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
 
     /*
@@ -2149,10 +2215,10 @@ round_trip_end:;
         unsigned carea1[17] = {0}, carea2[17] = {0};
         unsigned *cs1 = carea1 + 1; /* 0x24 region, one word of slack */
         unsigned *cs2 = carea2 + 1;
-        printf("[7b] NvIspHwSettingsCreate(hIsp=0x%x, &p1, 0x24, &p2) -> ",
-               (unsigned)hIsp);
+        printf("[7b] NvIspHwSettingsCreate(hIsp=0x%x, &p1, size=%u, &p2) "
+               "-> ", (unsigned)hIsp, create_size);
         stage_now = "HwSettingsCreate";
-        rc = nvIspHwSettingsCreate((unsigned)hIsp, cs1, 0x24, cs2);
+        rc = nvIspHwSettingsCreate((unsigned)hIsp, cs1, create_size, cs2);
         /* the live chain: SetAttribute/Apply/Destroy receive r0 =
            r3 + 4 -- the settings OBJECT lives inside the p2 buffer at
            offset 4, the handle is that ADDRESS */
@@ -2184,8 +2250,9 @@ round_trip_end:;
     /* [9] status id 6, 4 bytes in, actual size out; must be the rate
        just written, not zero */
     size = 4;
-    printf("[9] NvIspGetStatus(hIsp=0x%x, id=6, &value, size=4) -> ", hIsp);
-    rc = nvIspGetStatus(hIsp, 6, &value, &size);
+    printf("[9] NvIspGetStatus(hIsp=0x%x, id=%u, &value, size=4) -> ",
+           hIsp, status_id);
+    rc = nvIspGetStatus(hIsp, status_id, &value, &size);
     printf("rc=0x%x size=%u value=0x%x\n", (unsigned)rc, size, value);
     print_gate("[9] after GetStatus", hIsp);
 
@@ -2362,9 +2429,9 @@ round_trip_end:;
            moves between runs -- never a constant; zero until we know
            what it points at */
         stage_now = "HwSettingsApply";
-        rc = nvIspHwSettingsApply(hset, 0, 5, 0);
-        printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, 5, 0) -> "
-               "rc=0x%x\n", hset, (unsigned)rc);
+        rc = nvIspHwSettingsApply(hset, 0, apply_a2, apply_a4);
+        printf("[9b4] NvIspHwSettingsApply(hset=0x%x, 0, %u, %u) -> "
+               "rc=0x%x\n", hset, apply_a2, apply_a4, (unsigned)rc);
         /* stage 3 takes its relocation handle from here; zero means it
            falls over before doing any work */
         stage_now = 0;
@@ -2449,8 +2516,10 @@ round_trip_end:;
     if (st_setattr) {
         unsigned flag = 0;
         unsigned fsize = 4;
-        stage_now = "NvIspSetAttribute(id 4)";
-        rc = nvIspSetAttribute(hIsp, 4, &flag, &fsize);
+        stage_now = "NvIspSetAttribute";
+        rc = nvIspSetAttribute(hIsp, setattr_id, &flag, &fsize);
+        printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=%u, &flag, &size) "
+               "-> rc printed with gate below\n", hIsp, setattr_id);
         printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=4, &flag=0, "
                "&size=4) -> rc=0x%x\n", hIsp, (unsigned)rc);
         stage_now = 0;
@@ -3260,7 +3329,8 @@ round_trip_end:;
     if (st_destroy && hset != 0) {
         unsigned dscratch[16] = {0};
         stage_now = "HwSettingsDestroy";
-        rc = nvIspHwSettingsDestroy(hset, 0xf92, dscratch, (unsigned)dev);
+        rc = nvIspHwSettingsDestroy(hset, 0xf92, dscratch,
+                                    (unsigned)dev); /* 0xf92 stock size */
         printf("[14b] NvIspHwSettingsDestroy(hset=0x%x, 0xf92, ptr, dev) -> "
                "rc=0x%x\n", hset, (unsigned)rc);
         print_gate("[14b] after HwSettingsDestroy", hIsp);

@@ -727,6 +727,9 @@ int main(int argc, char **argv)
     unsigned a10_val[44], a14_val[44];
     unsigned params_fill = 0x3f000000u; /* params filler word, fill= key */
     unsigned char a10_set[44] = {{0}}, a14_set[44] = {{0}};
+    unsigned st_fill_w[5] = {0};   /* stat=<type>:fill:<word> */
+    int st_fill_g[5] = {0};        /* fill given for this type */
+    int st4_on = 0;                /* type 4 faults by default */
     unsigned sf_val[256];                 /* sf=<idx>:<val> float words */
     unsigned char sf_set[256] = {{0}};
     unsigned rt_size = 0;                 /* simple-mode byte count */
@@ -1217,8 +1220,13 @@ int main(int argc, char **argv)
         if (strncmp(tok, "blk=", 4) == 0 || strncmp(tok, "stat=", 5) == 0) {
             /* blk=<id>:on|off -- replay stock values for settings block
                <id> (needs the stock settings file on the device);
-               stat=<type>:on|off -- same for the stats buffers.
-               Default off: zeros, comparable with all previous runs. */
+               stat=<type>:on|off|fill:<word> -- stats buffers: on/off
+               replays stock values from the file, fill:<word> fills the
+               WHOLE buffer with a nonzero word so the library's memcmp
+               sees a change and sets the type's bit in obj[0] (zeros
+               compare equal and the call is a silent no-op).
+               Type 4 is DISABLED by default: it faults with our data
+               (stat=4:on or stat=4:fill:<w> to enable). */
             int is_stat = (tok[1] == 't');
             char *colon;
             char *e18 = 0;
@@ -1236,10 +1244,26 @@ int main(int argc, char **argv)
                 printf("[0] bad id in '%s'\n", argv[ai]);
                 return 1;
             }
+            if (is_stat && strncmp(colon + 1, "fill:", 5) == 0) {
+                char *e21 = 0;
+                long fv = strtol(colon + 6, &e21, 0);
+                if (e21 == colon + 6 || *e21 != '\0' || fv < 0) {
+                    printf("[0] bad fill value in '%s'\n", argv[ai]);
+                    return 1;
+                }
+                st_fill_w[id] = (unsigned)fv;
+                st_fill_g[id] = 1;
+                st_on[id] = 1;
+                if (id == 4)
+                    st4_on = 1;
+                continue;
+            }
             if (strcmp(colon + 1, "on") == 0) {
-                if (is_stat)
+                if (is_stat) {
                     st_on[id] = 1;
-                else
+                    if (id == 4)
+                        st4_on = 1;
+                } else
                     blk_on[id] = 1;
             } else if (strcmp(colon + 1, "off") == 0) {
                 if (is_stat)
@@ -1247,7 +1271,8 @@ int main(int argc, char **argv)
                 else
                     blk_on[id] = 0;
             } else {
-                printf("[0] bad state '%s', use on|off\n", colon + 1);
+                printf("[0] bad state '%s', use on|off|fill:<word>\n",
+                       colon + 1);
                 return 1;
             }
             continue;
@@ -2004,11 +2029,18 @@ round_trip_end:;
             {2, 0, 0x68}, {1, 0, 0x20}, {1, 1, 0x20}, {4, 0, 0x48},
         };
         int q;
-        /* stock replay, per-type key (stat=<type>:on) */
+        /* stock replay, per-type key (stat=<type>:on); per-type fill
+           (stat=<type>:fill:<word>) makes the buffer DIFFER from the
+           object -- the memcmp no-op only fires on identical zeros */
         for (q = 0; q < 4; q++) {
             unsigned stype = stats[q][0];
             unsigned bufsize = stats[q][2];
             unsigned size_out = bufsize;
+            if (stype == 4 && st4_on == 0) {
+                printf("[9b3] SetStats type 4 skipped by default "
+                       "(faults with our data; stat=4:on enables)\n");
+                continue;
+            }
             unsigned char *zbuf = malloc(bufsize);
             unsigned char *rbuf = 0;
             unsigned wrc;
@@ -2016,7 +2048,18 @@ round_trip_end:;
                 printf("[9b3] malloc failed for type %u\n", stats[q][0]);
                 continue;
             }
-            memset(zbuf, 0, bufsize);
+            if (st_fill_g[stype] != 0) {
+                /* nonzero fill: memcmp sees a difference and the type's
+                   bit goes into obj[0] */
+                unsigned *wf = (unsigned *)zbuf;
+                unsigned wn;
+                for (wn = 0; wn < bufsize / 4; wn++)
+                    wf[wn] = st_fill_w[stype];
+                printf("[9b3] buffer filled with 0x%08x (%u words)\n",
+                       st_fill_w[stype], bufsize / 4);
+            } else {
+                memset(zbuf, 0, bufsize);
+            }
             if (st_on[stype] != 0 && st_have[stype] != 0) {
                 unsigned n2;
                 bufsize = st_size[stype];
@@ -2036,9 +2079,10 @@ round_trip_end:;
                                          : "SetStats(type 1)";
             wrc = nvIspSetStats((unsigned)hIsp, stats[q][0], stats[q][1],
                                 zbuf, &size_out);
-            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, buf=%uB) "
-                   "-> rc=0x%x size-out=%u\n",
+            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, "
+                   "buf=%uB fill=0x%x) -> rc=0x%x size-out=%u\n",
                    (unsigned)hIsp, stats[q][0], stats[q][1], bufsize,
+                   st_fill_g[stype] ? st_fill_w[stype] : 0,
                    (unsigned)wrc, size_out);
             if (wrc == 10 && size_out != bufsize && size_out != 0) {
                 rbuf = malloc(size_out);

@@ -142,6 +142,8 @@ check "retry junk rejected"    0 4194303 rggb retry=junk
 echo "-- stock replay keys (blk=/stat=)"
 check "blk=5:on"                1 4194303 rggb blk=5:on
 check "stat=4:on"               1 4194303 rggb stat=4:on
+check "stat=2:fill:0x3f000000"  1 4194303 rggb stat=2:fill:0x3f000000
+check "stat=1:fill:junk rejected" 0 4194303 rggb stat=1:fill:junk
 check "blk=16:off"              1 4194303 rggb blk=16:off
 check "blk=17 rejected"         0 4194303 rggb blk=17:on
 check "stat=5 rejected"         0 4194303 rggb stat=5:on

@@ -106,8 +106,9 @@ typedef int (*NvIspHwSettingsCreate_fn)(unsigned devHandle, void *p1,
 typedef int (*NvIspHwSettingsSetAttribute_fn)(unsigned hSettings,
                                               unsigned blockId,
                                               unsigned index, void *buf);
-typedef int (*NvIspSetStats_fn)(unsigned devHandle, unsigned id,
-                                unsigned index, void *buf);
+typedef int (*NvIspSetStats_fn)(unsigned hIsp, unsigned type,
+                                unsigned subidx, void *buf,
+                                unsigned *size);
 typedef int (*NvIspHwSettingsApply_fn)(unsigned hSettings, void *mapped,
                                        unsigned a3, unsigned flags);
 typedef int (*NvIspHwSettingsDestroy_fn)(unsigned hSettings, unsigned size,
@@ -1355,28 +1356,49 @@ round_trip_end:;
         }
     }
 
-    /* [9b3] SetStats x4: (id,index) pairs from the live log; buffer
-       sizes per impl-2: type 2 -> 0x20, 1 -> 0x68, 4 -> 0x48. The
-       library checks them -- a wrong-size zero buffer is exactly the
-       kind of thing that turns into a fault or a silent rc. */
+    /* [9b3] SetStats x4: (type,index) pairs from the live log; FIVE
+       arguments -- the fifth is &size (impl-2): (2,0)->0x68,
+       (1,0)->0x20, (1,1)->0x20, (4,0)->0x48. rc 10 is the
+       fix-and-repeat protocol: the library writes the size it wants
+       into our word; we print it and retry once with that size. */
     if (st_stats) {
         static const unsigned stats[4][3] = {
-            {2, 0, 0x20}, {1, 0, 0x68}, {1, 1, 0x68}, {4, 0, 0x48},
+            {2, 0, 0x68}, {1, 0, 0x20}, {1, 1, 0x20}, {4, 0, 0x48},
         };
-        unsigned zbuf[35] = {0}; /* 140 bytes >= 0x68, zeroed per call */
         int q;
         for (q = 0; q < 4; q++) {
-            memset(zbuf, 0, sizeof(zbuf));
+            unsigned bufsize = stats[q][2];
+            unsigned size_out = bufsize;
+            unsigned char *zbuf = malloc(bufsize);
+            unsigned char *rbuf = 0;
+            unsigned wrc;
+            if (zbuf == 0) {
+                printf("[9b3] malloc failed for type %u\n", stats[q][0]);
+                continue;
+            }
+            memset(zbuf, 0, bufsize);
             stage_now = stats[q][0] == 2 ? "SetStats(type 2)"
                                          : stats[q][0] == 4 ? "SetStats(type 4)"
                                          : "SetStats(type 1)";
-            rc = nvIspSetStats((unsigned)hIsp, stats[q][0], stats[q][1],
-                               zbuf);
-            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, buf %uB) "
-                   "-> rc=0x%x\n",
-                   (unsigned)hIsp, stats[q][0], stats[q][1],
-                   stats[q][2], (unsigned)rc);
+            wrc = nvIspSetStats((unsigned)hIsp, stats[q][0], stats[q][1],
+                                zbuf, &size_out);
+            printf("[9b3] NvIspSetStats(hIsp=0x%x, id=%u, idx=%u, buf=%uB) "
+                   "-> rc=0x%x size-out=%u\n",
+                   (unsigned)hIsp, stats[q][0], stats[q][1], bufsize,
+                   (unsigned)wrc, size_out);
+            if (wrc == 10 && size_out != bufsize && size_out != 0) {
+                rbuf = malloc(size_out);
+                if (rbuf != 0) {
+                    memset(rbuf, 0, size_out);
+                    wrc = nvIspSetStats((unsigned)hIsp, stats[q][0],
+                                        stats[q][1], rbuf, &size_out);
+                    printf("[9b3]   retry with size=%u -> rc=0x%x\n",
+                           size_out, (unsigned)wrc);
+                    free(rbuf);
+                }
+            }
             print_gate("[9b3] after SetStats", hIsp);
+            free(zbuf);
         }
         stage_now = 0;
     }

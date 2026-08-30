@@ -261,6 +261,7 @@ int main(void)
  */
 __asm__(
     ".text\n"
+    ".thumb\n"
     ".align 4\n"
     ".globl _start\n"
     ".type _start, %function\n"

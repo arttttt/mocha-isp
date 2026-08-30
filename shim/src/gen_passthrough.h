@@ -1,19 +1,15 @@
-/*
- * Exported-symbol bindings for the libnvisp_v3 wrapper. Hand-maintained.
+/* GENERATED FILE -- do not edit.
  *
- * Completeness is enforced at acceptance: build/check-shim.sh compares this
- * wrapper against the real library -- every function the stock library
- * exports must be exported here, no data objects, no DT_TEXTREL.
- *
- * Provenance of the original list:
- *   Source binary : /system/vendor/lib/libnvisp_v3.so
- *                   md5 85e94d9a902968251b1967a17d013dad
- *   Produced by   : tools/expdump <binary>
- *                   | grep -vE '__bss_start|_edata|_end$' | sort
- *   Exports       : 41 (39 FUNC + 2 NOTYPE NvSFx*); linker synthetics
- *                   __bss_start/_edata/_end excluded -- imported by no one,
- *                   checked against the UND sets of all importers in the
- *                   device snapshot.
+ * Source binary : /Users/artem/Projects/isp-lab/ref/stock-system/system/vendor/lib/libnvisp_v3.so
+ *                  md5 85e94d9a902968251b1967a17d013dad
+ * Derived from  : exports_func.tsv (md5 a570b6cf592008a344071bc42c78ca7f)
+ * Produced by   : tools/expdump /Users/artem/Projects/isp-lab/ref/stock-system/system/vendor/lib/libnvisp_v3.so | grep -vE '__bss_start|_edata|_end$' | sort > shim/src/exports_func.tsv
+ * Exports       : 41 (all defined exports of the source binary;
+ *                 linker synthetics __bss_start/_edata/_end excluded:
+ *                 imported by no one, checked against the UND sets
+ *                 of all importers in the device snapshot)
+ * Regenerate    : python3 gen_passthrough.py exports_func.tsv
+ *                 gen_passthrough.h /Users/artem/Projects/isp-lab/ref/stock-system/system/vendor/lib/libnvisp_v3.so
  */
 
 extern void *shim_slot_NvIspCtrlInitialize;
@@ -81,8 +77,9 @@ __asm__(
     "  mov  r0, #0\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -112,8 +109,9 @@ __asm__(
     "  mov  r0, #1\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -143,8 +141,9 @@ __asm__(
     "  mov  r0, #2\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -174,8 +173,9 @@ __asm__(
     "  mov  r0, #3\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -205,8 +205,9 @@ __asm__(
     "  mov  r0, #4\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -236,8 +237,9 @@ __asm__(
     "  mov  r0, #5\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -267,8 +269,9 @@ __asm__(
     "  mov  r0, #6\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -298,8 +301,9 @@ __asm__(
     "  mov  r0, #7\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -329,8 +333,9 @@ __asm__(
     "  mov  r0, #8\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -360,8 +365,9 @@ __asm__(
     "  mov  r0, #9\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -391,8 +397,9 @@ __asm__(
     "  mov  r0, #10\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -422,8 +429,9 @@ __asm__(
     "  mov  r0, #11\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -453,8 +461,9 @@ __asm__(
     "  mov  r0, #12\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -484,8 +493,9 @@ __asm__(
     "  mov  r0, #13\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -515,8 +525,9 @@ __asm__(
     "  mov  r0, #14\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -546,8 +557,9 @@ __asm__(
     "  mov  r0, #15\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -577,8 +589,9 @@ __asm__(
     "  mov  r0, #16\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -608,8 +621,9 @@ __asm__(
     "  mov  r0, #17\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -639,8 +653,9 @@ __asm__(
     "  mov  r0, #18\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -670,8 +685,9 @@ __asm__(
     "  mov  r0, #19\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -701,8 +717,9 @@ __asm__(
     "  mov  r0, #20\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -732,8 +749,9 @@ __asm__(
     "  mov  r0, #21\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -763,8 +781,9 @@ __asm__(
     "  mov  r0, #22\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -794,8 +813,9 @@ __asm__(
     "  mov  r0, #23\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -825,8 +845,9 @@ __asm__(
     "  mov  r0, #24\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -856,8 +877,9 @@ __asm__(
     "  mov  r0, #25\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -887,8 +909,9 @@ __asm__(
     "  mov  r0, #26\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -918,8 +941,9 @@ __asm__(
     "  mov  r0, #27\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -949,8 +973,9 @@ __asm__(
     "  mov  r0, #28\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -980,8 +1005,9 @@ __asm__(
     "  mov  r0, #29\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1011,8 +1037,9 @@ __asm__(
     "  mov  r0, #30\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1042,8 +1069,9 @@ __asm__(
     "  mov  r0, #31\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1073,8 +1101,9 @@ __asm__(
     "  mov  r0, #32\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1104,8 +1133,9 @@ __asm__(
     "  mov  r0, #33\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1135,8 +1165,9 @@ __asm__(
     "  mov  r0, #34\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1166,8 +1197,9 @@ __asm__(
     "  mov  r0, #35\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1197,8 +1229,9 @@ __asm__(
     "  mov  r0, #36\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1228,8 +1261,9 @@ __asm__(
     "  mov  r0, #37\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1259,8 +1293,9 @@ __asm__(
     "  mov  r0, #38\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1290,8 +1325,9 @@ __asm__(
     "  mov  r0, #39\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"
@@ -1321,8 +1357,9 @@ __asm__(
     "  mov  r0, #40\n"
     "  bl   shim_resolve\n"
     "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
     "  add  sp, #4\n"
-    "  pop  {r0-r3, lr}\n"
+    "  pop  {lr}\n"
     "  bx   r12\n");
 __asm__(
     ".data\n"

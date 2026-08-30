@@ -86,9 +86,11 @@ echo "-- submission mode and slot14"
 check "mode=2"             1 4194303 rggb mode=2
 check "mode=0"             1 4194303 rggb mode=0
 check "mode junk rejected" 0 4194303 rggb mode=junk
-check "slot14=aux"         1 4194303 rggb slot14=aux
-check "slot14=desc"        1 4194303 rggb slot14=desc
-check "slot14 junk rejected" 0 4194303 rggb slot14=junk
+check "slot14=zero"        1 4194303 rggb slot14=zero
+check "slot08=descnohandle" 1 4194303 rggb slot08=descnohandle
+check "slot10=buf"         1 4194303 rggb slot10=buf
+check "slot18=zero"        1 4194303 rggb slot18=zero
+check "slot junk rejected" 0 4194303 rggb slot08=junk
 
 echo "-- pointer-following context dumps (ctxp=)"
 check "ctxp=0x1318:16"         1 4194303 rggb ctxp=0x1318:16

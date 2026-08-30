@@ -172,6 +172,28 @@ static void print_first_words(const char *tag, const unsigned char *b,
 }
 
 /*
+ * Slot-kind resolution: what a configurable stack slot (+0x08/+0x10/
+ * +0x14/+0x18) actually contains for this run. Defaults live in
+ * slot_kind[]; kinds: descin/descout (surface descriptors with the
+ * respective nvmap handles), descnohandle (frame description without
+ * memory), buf (our zeroed per-slot buffer), zero.
+ */
+static unsigned resolve_slot(const char *kind, unsigned descin,
+                             unsigned descout, unsigned descno,
+                             unsigned buf)
+{
+    if (strcmp(kind, "descin") == 0)
+        return descin;
+    if (strcmp(kind, "descout") == 0)
+        return descout;
+    if (strcmp(kind, "descnohandle") == 0)
+        return descno;
+    if (strcmp(kind, "buf") == 0)
+        return buf;
+    return 0; /* zero */
+}
+
+/*
  * Post-call state: the words themselves plus WHICH words changed.
  * A library answer written into one word of one buffer is easy to miss
  * in sixteen lines -- the diff makes it unmissable.
@@ -567,7 +589,11 @@ int main(int argc, char **argv)
     char hset_mode[8] = "p1";
     unsigned hset_manual = 0;
     /* stock init-chain steps, each toggleable: init=<name>:off */
-    int surfswap = 0;    /* surfswap=on: swap the +0x08/+0x10 surfaces */
+    /* per-slot content keys, independent: slot08/slot10/slot14/slot18
+       = descin | descout | descnohandle | buf | zero */
+    char slot_kind[4][16] = {
+        "descnohandle", "descin", "descout", "buf"
+    };
     unsigned sp_pre[4];  /* syncpoint values before the submission */
     int st_create = 1, st_sattr = 1, st_stats = 1;
     int st_apply = 1, st_setattr = 1, st_destroy = 1;
@@ -751,17 +777,30 @@ int main(int argc, char **argv)
             }
             continue;
         }
-        if (strncmp(tok, "surfswap=", 9) == 0) {
-            /* surfswap=on swaps the +0x08/+0x10 surface descriptors --
-               the reverse-interpretation test, one run, no rebuild */
-            if (strcmp(tok + 9, "on") == 0)
-                surfswap = 1;
-            else if (strcmp(tok + 9, "off") == 0)
-                surfswap = 0;
-            else {
-                printf("[0] bad surfswap '%s', use on|off\n", argv[ai]);
+        if (strncmp(tok, "slot08=", 7) == 0 || strncmp(tok, "slot10=", 7) == 0 ||
+            strncmp(tok, "slot14=", 7) == 0 || strncmp(tok, "slot18=", 7) == 0) {
+            /* slot<NN>=<kind>, independent per slot:
+               descin (surface descriptor with input handle),
+               descout (surface descriptor with output handle),
+               descnohandle (frame description, no memory),
+               buf (zeroed buffer), zero (pass NULL) */
+            static const char kinds[5][14] = {
+                "descin", "descout", "descnohandle", "buf", "zero"
+            };
+            int which = (tok[4] == '0') ? 0 : (tok[4] == '1') ?
+                        (tok[5] == '4' ? 2 : 3) : 1;
+            int k2, hit = -1;
+            const char *val = tok + 7;
+            for (k2 = 0; k2 < 5; k2++)
+                if (strcmp(val, kinds[k2]) == 0)
+                    hit = k2;
+            if (hit < 0) {
+                printf("[0] bad slot kind '%s', use descin|descout|"
+                       "descnohandle|buf|zero\n", argv[ai]);
                 return 1;
             }
+            snprintf(slot_kind[which], sizeof(slot_kind[0]), "%s",
+                     kinds[hit]);
             continue;
         }
         if (strncmp(tok, "mode=", 5) == 0) {
@@ -1800,16 +1839,17 @@ round_trip_end:;
         unsigned desc_out[44] = {0};
         unsigned gh, gw, gf, gt, gs, gp;
         unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
-        unsigned slot14_buf[44] = {0}; /* legacy, unused since the
-                                          fence-layout fix */
-        unsigned fenceA[16] = {0};  /* +0x14: fence-return slot */
-        unsigned fenceB[16] = {0};  /* +0x18: fence-return slot */
+        unsigned desc_no[44] = {0}; /* frame description, no handle */
+        unsigned fenceA[16] = {0};  /* fence-return capture (slot kind) */
+        unsigned fenceB[16] = {0};  /* fence-return capture (slot kind) */
         /* pre-call snapshots for the post-call diff */
-        unsigned snap_in[16], snap_out[16], snap14[16];
+        unsigned snap_in[16], snap_out[16], snap_no[16];
         unsigned snap_aux[7][16];
+        unsigned snap_s08[16], snap_s10[16], snap_s14[16], snap_s18[16];
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
         unsigned sv[7];   /* stack slot values, +00..+20 in slot order */
+        unsigned s08, s10, s14, s18;
         int i, k;
         static const char aux_names[7][3] = {
             "00", "04", "08", "0c", "18", "1c", "20"
@@ -1836,11 +1876,12 @@ round_trip_end:;
         bufs[5][4] = 0;
         bufs[5][5] = (unsigned)hIsp;
         bufs[5][14] = 2;
-        slot14_buf[7] = pf_mode;
-        slot14_buf[12] = din_set[1] ? din_val[1] : 8;
-        slot14_buf[13] = din_set[0] ? din_val[0] : 8;
-        for (k = 14; k < 44; k++)
-            slot14_buf[k] = 0x3f000000u;
+        desc_no[0] = din_set[0] ? din_val[0] : 8;
+        desc_no[1] = din_set[1] ? din_val[1] : 8;
+        desc_no[2] = din_set[2] ? din_val[2] : 0x105a500cu;
+        desc_no[3] = din_set[3] ? din_val[3] : 1;
+        desc_no[4] = din_set[4] ? din_val[4] : 256;
+        desc_no[9] = din_set[9] ? din_val[9] : 1;
 
         for (i = 0; i < 7; i++) {
             for (k = 0; k < 44; k++) {
@@ -2096,7 +2137,7 @@ round_trip_end:;
             for (k = 0; k < 16; k++) {
                 snap_in[k] = desc_in[k];
                 snap_out[k] = desc_out[k];
-                snap14[k] = slot14_buf[k];
+                snap_no[k] = desc_no[k];
             }
 
             print_syncpts("[sp pre-submit]", sp_pre);
@@ -2107,6 +2148,25 @@ round_trip_end:;
                     read_syncpt(ids[q], &sp_pre[q]);
             }
 
+            /* resolve the four configurable slots (+08/+10/+14/+18) */
+            s08 = resolve_slot(slot_kind[0], (unsigned)desc_in,
+                               (unsigned)desc_out, (unsigned)desc_no,
+                               (unsigned)bufs[2]);
+            s10 = resolve_slot(slot_kind[1], (unsigned)desc_in,
+                               (unsigned)desc_out, (unsigned)desc_no,
+                               (unsigned)bufs[2]);
+            s14 = resolve_slot(slot_kind[2], (unsigned)desc_in,
+                               (unsigned)desc_out, (unsigned)desc_no,
+                               (unsigned)bufs[2]);
+            s18 = resolve_slot(slot_kind[3], (unsigned)desc_in,
+                               (unsigned)desc_out, (unsigned)desc_no,
+                               (unsigned)bufs[3]);
+            if (n_set[2])
+                s08 = n_val[2]; /* explicit number wins (mode-2 form) */
+            printf("[12] slots: +08=%s(0x%x) +10=%s(0x%x) +14=%s(0x%x) "
+                   "+18=%s(0x%x)\n",
+                   slot_kind[0], s08, slot_kind[1], s10,
+                   slot_kind[2], s14, slot_kind[3], s18);
             printf("[12] aux slots:");
             for (i = 0; i < 7; i++)
                 printf(" +%s=%p(%s)", aux_names[i],
@@ -2114,10 +2174,9 @@ round_trip_end:;
                        aux_on[i] ? "on" : "off");
             printf("\n");
             printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=%u, "
-                   "in@+0x10=%p, +0x14=%s=%p)\n",
-                   hIsp, pf_mode, desc_in,
-                   slot14_aux ? "aux" : "desc",
-                   slot14_aux ? (void *)slot14_buf : (void *)desc_out);
+                   "slots: +08=%s +10=%s +14=%s +18=%s)\n",
+                   hIsp, pf_mode, slot_kind[0], slot_kind[1],
+                   slot_kind[2], slot_kind[3]);
 
             if (stages_spec[0] != '0') {
                 /* per-stage submission: call the stages the library
@@ -2150,15 +2209,11 @@ round_trip_end:;
                 pkt[2] = pkt3;
                 pkt[3] = sv[0];
                 pkt[4] = sv[1];
-                /* measured layout: +0x08 and +0x10 are the input and
-                   output surface descriptors (library wrote fence
-                   numbers into +0x14/+0x18 and a counter into +0x1c/
-                   +0x20 -- they were never surfaces) */
-                pkt[5] = surfswap ? (unsigned)desc_out : (unsigned)desc_in;
+                pkt[5] = s08;
                 pkt[6] = sv[3];
-                pkt[7] = surfswap ? (unsigned)desc_in : (unsigned)desc_out;
-                pkt[8] = (unsigned)fenceA;
-                pkt[9] = (unsigned)fenceB;
+                pkt[7] = s10;
+                pkt[8] = s14;
+                pkt[9] = s18;
                 pkt[10] = (unsigned)bufs[5];
                 pkt[11] = (unsigned)bufs[6];
                 printf("[12] per-stage run: stages=%s counter=%u\n",
@@ -2193,9 +2248,7 @@ round_trip_end:;
                         stage_now = "st4";
                         rc = ((Stage4_fn)*(unsigned *)((unsigned)hIsp +
                               0x1304))((unsigned)hIsp, pkt[0],
-                                       (unsigned)desc_out,
-                                       aux_on[4] ? (unsigned)bufs[4] : 0,
-                                       aux_on[5] ? (unsigned)bufs[5] : 0);
+                                       s14, s18, (unsigned)bufs[5]);
                         break;
                     }
                     printf("[12] %s -> rc=0x%x\n", sn2[stg - 1],
@@ -2211,13 +2264,9 @@ round_trip_end:;
                 stage_now = 0;
             } else {
                 rc = nvIspProcessFrame(hIsp, pf_mode, 0, 0,
-                                       sv[0], sv[1], sv[2], sv[3],
-                                       surfswap ? (unsigned)desc_out
-                                                : (unsigned)desc_in,
-                                       surfswap ? (unsigned)desc_in
-                                                : (unsigned)desc_out,
-                                       (unsigned)fenceA, (unsigned)fenceB,
-                                       (unsigned)bufs[6]);
+                                       sv[0], sv[1], s08, sv[3],
+                                       s10, s14, s18,
+                                       (unsigned)bufs[5], (unsigned)bufs[6]);
                 printf("    ProcessFrame returned rc=0x%x\n",
                        (unsigned)rc);
             }
@@ -2236,9 +2285,7 @@ round_trip_end:;
                          aux_names[i]);
                 print_state_diff(tag, snap_aux[i], bufs[i], 16);
             }
-            if (slot14_aux)
-                print_state_diff("[12b] post slot14 ", snap14,
-                                 slot14_buf, 16);
+            print_state_diff("[12b] post desc_no ", snap_no, desc_no, 16);
             {
                 /* fences start zeroed: anything non-zero here was
                    written by the library (fence ids and thresholds) */

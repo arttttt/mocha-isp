@@ -1302,7 +1302,6 @@ round_trip_end:;
            r3 + 4 -- the settings OBJECT lives inside the p2 buffer at
            offset 4, the handle is that ADDRESS */
         hset = (unsigned)&cs2[1];
-        stage_now = "HwSettingsCreate";
         printf("rc=0x%x hset=0x%x (p2+4)\n", (unsigned)rc, hset);
         print_first_words("[7b] p1 first words", (unsigned char *)cs1, 8);
         print_first_words("[7b] p2 first words", (unsigned char *)cs2, 8);

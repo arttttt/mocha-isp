@@ -119,6 +119,27 @@ typedef int (*NvIspProcessFrame_fn)(unsigned hIsp, unsigned mode,
                                     unsigned aux2, unsigned aux3,
                                     unsigned aux4);
 
+
+/*
+ * First n 32-bit LE words of a byte buffer, tagged. Used for the three
+ * provenance states of the submission experiment: output-after-alloc,
+ * input-after-write, output-after-submit. Twice-taken emptiness or
+ * twice-taken garbage must be DISTINGUISHABLE, not assumed.
+ */
+static void print_first_words(const char *tag, const unsigned char *b,
+                              int n)
+{
+    int m;
+
+    printf("%s:", tag);
+    for (m = 0; m < n; m++)
+        printf(" %08x",
+               (unsigned)b[m * 4] | ((unsigned)b[m * 4 + 1] << 8) |
+               ((unsigned)b[m * 4 + 2] << 16) |
+               ((unsigned)b[m * 4 + 3] << 24));
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -858,6 +879,39 @@ round_trip_end:;
                    desc_out, desc_out[0], desc_out[1], desc_out[2],
                    desc_out[3], desc_out[4], desc_out[5], desc_out[9]);
 
+            /* state 1 of 3: the OUTPUT buffer as allocation handed it,
+               before anything else. Same junk as after the submission
+               means reused memory; zeros there but content after means
+               the ISP wrote. */
+            {
+                unsigned pbytes = gs * gh;
+                unsigned char *chk = malloc(pbytes);
+                unsigned rrc;
+                if (chk == 0) {
+                    printf("[11] output-after-alloc: malloc failed\n");
+                } else {
+                    memset(chk, 0xEE, pbytes);
+                    rrc = nvRmMemRead((unsigned)memh_out, (void *)0,
+                                      (unsigned)chk, pbytes);
+                    print_first_words("[11] output-after-alloc first words",
+                                      chk, 8);
+                    printf("[11] output-after-alloc: rc=0x%x, "
+                           "non-poison bytes %u of %u\n",
+                           (unsigned)rrc,
+                           pbytes - chk[0] * 0, pbytes); /* count below */
+                    {
+                        unsigned nz = 0;
+                        int q;
+                        for (q = 0; q < (int)pbytes; q++)
+                            if (chk[q] != 0xEE)
+                                nz++;
+                        printf("[11] output-after-alloc: bytes differing "
+                               "from poison: %u of %u\n", nz, pbytes);
+                    }
+                    free(chk);
+                }
+            }
+
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
                for instance), the log shows exactly where it stopped. */
@@ -905,9 +959,11 @@ round_trip_end:;
                     memset(outb, 0xEE, pat_bytes);
                     rrc = nvRmMemRead((unsigned)memh_out, (void *)0,
                                       (unsigned)outb, pat_bytes);
-                    printf("[12] NvRmMemRead(hops) memh_out %u bytes -> "
-                           "rc=0x%x\n", pat_bytes, (unsigned)rrc);
-                    printf("[12] output first words:");
+                    printf("[12] output-after-submit: NvRmMemRead(hops) "
+                           "memh_out %u bytes -> rc=0x%x\n",
+                           pat_bytes, (unsigned)rrc);
+                    print_first_words("[12] output-after-submit first words",
+                                      outb, 8);
                     for (m = 0; m < 8; m++)
                         printf(" %08x",
                                (unsigned)outb[m * 4] |

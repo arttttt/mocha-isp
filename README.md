@@ -103,6 +103,40 @@ So the number crosses from our process, through the stock library, into the
 clock tree, and comes back changed. That is what tells us the ISP is really
 there.
 
+### Configuring it the way the stock stack does
+
+`ispinit` now brings the ISP up *configured*, not merely open. The stock
+stack sends `NvIspSetConfiguration` twice per instance -- mode 1 with a
+sixteen-word payload, then mode 2 with one word -- and the hook read both
+off a running device:
+
+```
+mode 1 (64 bytes): 1 7 9 a 3 0 6 8 11 f c e b 0 10 d
+mode 2 (4 bytes):  2
+```
+
+Replaying those by hand returns `rc=0` from both calls with the sizes
+unchanged, three runs in a row, and the stock camera comes up afterwards.
+
+These sixteen words are safe to hold as a constant because they are format
+selectors -- values 0 to 0x11, none of them an address. Nothing that is an
+address, a handle, an offset, or anything else belonging to one session may
+ever be written down here. Those live exactly one run: a buffer handle comes
+from the allocation that made it, and the address the ISP uses does not
+exist until the kernel patches it in at submit time.
+
+### The mode switch
+
+`NvIspProcessFrame` takes the mode as its second argument: **1 is a frame
+from memory, 2 is the stream from the sensor.** The disassembly says so from
+both sides -- the caller writes it, the library branches on it -- and the
+hook confirms it on a live preview, where every call arrives with `r1=2`.
+
+The frame buffer is not passed as an address but as a memory handle and an
+offset, which the library feeds to `NvRmStreamPushReloc`; the kernel
+resolves the real address, in the ISP's own SMMU domain, when the command is
+submitted. That is why hardcoding one would be meaningless as well as wrong.
+
 
 ## Why not a memory dump
 

@@ -62,6 +62,11 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
 static void *real_handle;
 
+/*
+ * shim_trap is referenced only from C (shim_resolve below), so a plain
+ * static definition is safe: the compiler sees the use and keeps it.
+ * shim_resolve is a different case -- see the attribute on its definition.
+ */
 static void shim_trap(void)
 {
     __builtin_trap();
@@ -71,8 +76,16 @@ static void shim_trap(void)
  * Resolve binding idx: load the real library once, look the name up,
  * rewrite the slot with the real address (or the trap on failure).
  * Returns the address the slot now holds.
+ *
+ * used    : the only reference is `bl shim_resolve` from the trampolines --
+ *           assembly the compiler does not see; without `used` it discards
+ *           this function as unused and the reference dangles.
+ * hidden  : plumbing, must stay out of the dynamic symbol table.
+ * visible : a static function may be renamed by the compiler, which would
+ *           break the assembly reference by name.
  */
-static void *shim_resolve(int idx)
+__attribute__((used, visibility("hidden")))
+void *shim_resolve(unsigned idx)
 {
     const struct shim_binding *b = &shim_bindings[idx];
     void *t;

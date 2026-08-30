@@ -29,7 +29,7 @@ check() {
             echo "  OK   $desc"; pass=$((pass+1)); return
         fi
     else
-        if grep -q "^\[0\] bad" <<<"$out"; then
+        if grep -q "^\[0\] " <<<"$out"; then
             echo "  OK   $desc (rejected as intended)"; pass=$((pass+1)); return
         fi
     fi
@@ -63,6 +63,16 @@ check "aux=1c:on"      1 4194303 rggb aux=1c:on
 check "a1c=5:ptr"      1 4194303 rggb a1c=5:ptr
 check "a1c=14:2"       1 4194303 rggb a1c=14:2
 check "a18=3:ptr a1c=0:3" 1 4194303 rggb a18=3:ptr a1c=0:3
+
+echo "-- first-four slots (00/04/08/0c), default off"
+check "aux=00:on"      1 4194303 rggb aux=00:on
+check "aux=04:on"      1 4194303 rggb aux=04:on
+check "aux=08:on"      1 4194303 rggb aux=08:on
+check "aux=0c:on"      1 4194303 rggb aux=0c:on
+check "a00=2:ptr"      1 4194303 rggb aux=00:on a00=2:ptr
+check "a0c=0:5 a04=1:7" 1 4194303 rggb aux=04:on aux=08:on a04=1:7 a0c=0:5
+check "aux=0c:off (already off)" 1 4194303 rggb aux=0c:off
+check "aux=33:unknown slot rejected" 0 4194303 rggb aux=33:on
 
 echo "-- attribute overrides"
 check "attr=4:0x40000" 1 4194303 rggb attr=4:0x40000

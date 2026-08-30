@@ -41,11 +41,18 @@ digging through internals.
 never on the server: what was built must correspond to a commit
 unambiguously.
 
-**Nothing reaches the device without passing the gate** (`build/build.sh`
-checks this itself):
-- the dependency list makes sense;
-- the count of symbol-versioning sections is **zero**;
-- every undefined symbol exists in the libraries of the device snapshot.
+**Nothing reaches the device without passing the gate.** The gate has two
+halves, because the device snapshot only exists on the Mac while the compiler
+only exists on the server. Both must pass:
+
+- `build/build.sh` (server) — refuses to emit a binary when the count of
+  symbol-versioning sections is non-zero. Also prints dependencies and
+  undefined symbols for the human to read.
+- `build/check-against-device.sh` (Mac) — resolves every undefined symbol and
+  every `DT_NEEDED` entry against the snapshot, and exits non-zero if
+  anything is absent.
+
+Neither half enforces what the other checks. Running only one is not a gate.
 
 **Rehearse the retreat before the advance.** Before the first replacement:
 back up the original, confirm that restoring works, and only then touch

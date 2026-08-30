@@ -211,6 +211,27 @@ forward. Where a library keeps pointers to its own internals in a structure
 the caller owns, the boundary you can observe is that structure, not the
 exported symbols.
 
+**And the ghost slots are not ghosts.** Filling either `+0x00` or `+0x04` --
+two of the four words we had written down as "never read" -- moves the
+refusal from `2` to `0xa`. That is the third time a slot classified as
+unused turned out to be required, and all three classifications came from
+the same place: watching the sensor path, which is the only one the stock
+runs.
+
+So the rule, stated plainly because it cost us three separate detours: an
+argument can mean different things in different modes, and observing one
+mode tells you nothing about the other. `+0x08` holds the sensor width as a
+number in mode 2 and a pointer in mode 1. The stock will never show you
+that.
+
+`0xa` is where it stands. Geometry, crop fields, and every format in both
+pools leave it unchanged, and the analysis says this code carries no
+write-back, so the library is not telling us what it wants. Enumeration has
+run out of a known space to enumerate -- guessing among forty-four
+descriptor words is not enumeration -- and the tool that resolves it is
+replacing the stage pointers with logging thunks, which the context makes
+possible.
+
 The stock stack never uses it. The hook was changed to log any call whose
 mode is not 2 outside the budget, and the camera was driven through preview,
 three full-resolution stills and a video: three JPEGs written, and four

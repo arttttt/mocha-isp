@@ -13,7 +13,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$(mktemp -t ispinit_argtest)"
 trap 'rm -f "$BIN"' EXIT
 
-cc -O1 -o "$BIN" "$DIR/ispinit.c" 2>/dev/null || {
+cc -O1 -DHOST_ARGTEST -o "$BIN" "$DIR/ispinit.c" 2>/dev/null || {
     echo "COMPILE FAILED"; exit 2; }
 
 pass=0

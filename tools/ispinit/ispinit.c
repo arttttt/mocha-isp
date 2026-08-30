@@ -124,6 +124,8 @@ int main(int argc, char **argv)
     unsigned size = 4;
     unsigned rate = 0x003fffffu;
     unsigned order;
+    unsigned attr_val[8];
+    unsigned attr_set[8] = {0};
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -158,6 +160,35 @@ int main(int argc, char **argv)
             printf("[0] bad order '%s', use rggb|bggr|grbg|gbrg\n", argv[2]);
             return 1;
         }
+    }
+
+    /* [attr=]idx:val allocation-attribute overrides, several allowed
+       (hex or decimal; attrs[0] is a pointer -- overriding it from the
+       command line is allowed but almost certainly wrong). */
+    for (int ai = 3; ai < argc; ai++) {
+        char *tok = argv[ai];
+        char *colon;
+        char *e1 = 0, *e2 = 0;
+        long idx, val;
+
+        if (strncmp(tok, "attr=", 5) == 0)
+            tok += 5;
+        colon = strchr(tok, ':');
+        if (colon == 0) {
+            printf("[0] bad attr '%s', use [attr=]idx:val\n", argv[ai]);
+            return 1;
+        }
+        *colon = '\0';
+        idx = strtol(tok, &e1, 0);
+        val = strtol(colon + 1, &e2, 0);
+        if (e1 == tok || *e1 != '\0' || e2 == colon + 1 || *e2 != '\0' ||
+            idx < 0 || idx > 7 || val < 0 || val > 0xffffffffl) {
+            printf("[0] bad attr '%s', use [attr=]idx:val, idx 0..7\n",
+                   argv[ai]);
+            return 1;
+        }
+        attr_set[idx] = 1;
+        attr_val[idx] = (unsigned)val;
     }
     printf("[0] requested rate = 0x%x, order = %s\n", rate,
            order_names[order]);
@@ -322,6 +353,20 @@ int main(int argc, char **argv)
         unsigned attrs[8] = { (unsigned)&tags, 3, 0, 1, 0, 0, 0, 0 };
         void *memh = 0;
         unsigned desc[44] = {0}; /* 0xb0 bytes, the stock record size */
+        int k;
+
+        /* command-line overrides land on top of the recipe */
+        for (k = 0; k < 8; k++)
+            if (attr_set[k])
+                attrs[k] = attr_val[k];
+
+        /* the whole array, every run: each attempt documents itself,
+           overrides marked with * */
+        printf("[10] attrs:");
+        for (k = 0; k < 8; k++)
+            printf(" [%d]=0x%x%s", k, attrs[k],
+                   attr_set[k] ? "*" : "");
+        printf("\n");
 
         printf("[10] NvRmMemHandleAllocAttr(&dev, attrs[8], &memh) -> ");
         rc = nvRmMemHandleAllocAttr(&dev, attrs, &memh);

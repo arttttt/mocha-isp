@@ -2412,6 +2412,11 @@ round_trip_end:;
     }
 #endif
 
+    /* [sp end] the four syncpoints at exit -- comparable across runs:
+       if the entry state of run N+1 differs from the exit state of run
+       N (or from a fresh boot), the runs are not comparable either */
+    print_syncpts("[sp end]", 0);
+
     printf("done\n");
     return 0;
 }

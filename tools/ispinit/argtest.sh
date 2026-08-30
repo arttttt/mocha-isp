@@ -166,6 +166,7 @@ done <<'TAGS'
 [3] libnvisp_v3 base
 [9b] ctx+0x%x
 [9b] ctxp+0x%x
+[sp end]
 [9c] stage
 [end] stage
 [4] NvRmOpen

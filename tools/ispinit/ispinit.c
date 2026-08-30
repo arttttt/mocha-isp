@@ -214,7 +214,6 @@ static void *stage_pre(unsigned slot, unsigned *saved)
 /* the shared continuation: the original returned here with its code
    in r0; print it and return to the parked caller lr. A pure-asm
    symbol -- a naked C function would define the same label twice. */
-__attribute__((used))
 __asm__(
     ".text\n"
     ".thumb\n"

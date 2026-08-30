@@ -225,6 +225,21 @@ static void stage_post(unsigned rc)
     printf("[stage %u] leave rc=0x%x\n", stage_cur, rc);
 }
 
+/* the continuation body, entered from the original's return with
+   rc in r0 and sp = S (the parked caller lr sits at S-4) */
+__asm__(
+    ".text\n"
+    ".thumb\n"
+    ".thumb_func\n"
+    ".hidden stage_cont\n"
+    "stage_cont:\n"
+    "  push {r0, r1}\n"
+    "  bl   stage_post\n"
+    "  ldr  r0, [sp]\n"
+    "  add  sp, #8\n"
+    "  ldr  r1, [sp, #-4]\n"
+    "  bx   r1\n");
+
 #else /* HOST_ARGTEST: the parser in main is still exercised */
 
 static const void *stage_hook_syms[STAGE_SLOTS] = { 0 };

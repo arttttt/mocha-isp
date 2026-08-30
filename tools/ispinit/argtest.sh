@@ -147,6 +147,14 @@ check "blk=17 rejected"         0 4194303 rggb blk=17:on
 check "stat=5 rejected"         0 4194303 rggb stat=5:on
 check "blk junk rejected"       0 4194303 rggb blk=junk
 
+echo "-- params slot kind"
+check "slot14=params"          1 4194303 rggb slot14=params
+check "slot08=params"          1 4194303 rggb slot08=params
+check "a14=7:1"                1 4194303 rggb slot14=params a14=7:1
+check "a10=20:0x3f800000"      1 4194303 rggb slot10=params a10=20:0x3f800000
+check "fill=0x3f800000"        1 4194303 rggb slot14=params fill=0x3f800000
+check "params junk rejected"   0 4194303 rggb a14=junk
+
 echo "-- settings-handle source (hset=)"
 check "hset=p1"                1 4194303 rggb hset=p1
 check "hset=p2a"               1 4194303 rggb hset=p2a

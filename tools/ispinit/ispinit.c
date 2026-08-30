@@ -724,6 +724,9 @@ int main(int argc, char **argv)
                                syncpoints -- timeouts land late */
 
     unsigned retry_n = 1;                 /* submissions per run */
+    unsigned a10_val[44], a14_val[44];
+    unsigned params_fill = 0x3f000000u; /* params filler word, fill= key */
+    unsigned char a10_set[44] = {{0}}, a14_set[44] = {{0}};
     unsigned sf_val[256];                 /* sf=<idx>:<val> float words */
     unsigned char sf_set[256] = {{0}};
     unsigned rt_size = 0;                 /* simple-mode byte count */
@@ -948,14 +951,15 @@ int main(int argc, char **argv)
                descout (surface descriptor with output handle),
                descnohandle (frame description, no memory),
                buf (zeroed buffer), zero (pass NULL) */
-            static const char kinds[5][14] = {
-                "descin", "descout", "descnohandle", "buf", "zero"
+            static const char kinds[6][14] = {
+                "descin", "descout", "descnohandle", "buf", "zero",
+                "params"
             };
             int which = (tok[4] == '0') ? 0 : (tok[4] == '1') ?
                         (tok[5] == '4' ? 2 : 3) : 1;
             int k2, hit = -1;
             const char *val = tok + 7;
-            for (k2 = 0; k2 < 5; k2++)
+            for (k2 = 0; k2 < 6; k2++)
                 if (strcmp(val, kinds[k2]) == 0)
                     hit = k2;
             if (hit < 0) {
@@ -1246,6 +1250,48 @@ int main(int argc, char **argv)
                 printf("[0] bad state '%s', use on|off\n", colon + 1);
                 return 1;
             }
+            continue;
+        }
+        if (strncmp(tok, "a10=", 4) == 0 || strncmp(tok, "a14=", 4) == 0) {
+            /* a10=/a14=<idx>:<val> -- word overrides for the +10/+14
+               slot buffers (same shape as a08=/a18=) */
+            char *colon;
+            char *e19 = 0;
+            long idx, val;
+            int is14 = (tok[1] == '1' && tok[2] == '4');
+            colon = strchr(tok + 4, ':');
+            if (colon == 0) {
+                printf("[0] bad a10/a14 '%s', use <idx>:<val>\n", argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            idx = strtol(tok + 4, &e19, 0);
+            if (e19 == tok + 4 || *e19 != '\0' || idx < 0 || idx > 43) {
+                printf("[0] bad index in '%s'\n", argv[ai]);
+                return 1;
+            }
+            val = strtol(colon + 1, &e19, 0);
+            if (e19 == colon + 1 || *e19 != '\0' || val < 0) {
+                printf("[0] bad value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (is14) {
+                a14_val[idx] = (unsigned)val;
+                a14_set[idx] = 1;
+            } else {
+                a10_val[idx] = (unsigned)val;
+                a10_set[idx] = 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "fill=", 5) == 0) {
+            char *e20 = 0;
+            long v = strtol(tok + 5, &e20, 0);
+            if (e20 == tok + 5 || *e20 != '\0' || v < 0) {
+                printf("[0] bad fill '%s'\n", argv[ai]);
+                return 1;
+            }
+            params_fill = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "obj0=", 5) == 0) {
@@ -2147,6 +2193,8 @@ round_trip_end:;
         unsigned desc_no[44] = {0}; /* frame description, no handle */
         unsigned fenceA[16] = {0};  /* fence-return capture (slot kind) */
         unsigned fenceB[16] = {0};  /* fence-return capture (slot kind) */
+        unsigned sbuf10[44] = {0};  /* buffer behind slot10 */
+        unsigned sbuf14[44] = {0};  /* buffer behind slot14 */
         /* pre-call snapshots for the post-call diff */
         unsigned snap_in[16], snap_out[16], snap_no[16];
         unsigned snap_aux[7][16];
@@ -2348,6 +2396,30 @@ round_trip_end:;
                 sv[2] = (pf_mode == 1) ? (unsigned)desc_in
                                        : (din_set[1] ? din_val[1] : 8);
 
+            /* the params kind, stock shape (live capture): zeros, mode
+               at +1c, geometry at +30/+34, then the coefficient array
+               0.5 (0x3f000000) to the end. Word overrides land on top. */
+            {
+                unsigned *pb[4];
+                pb[0] = bufs[2];
+                pb[1] = sbuf10;
+                pb[2] = sbuf14;
+                pb[3] = bufs[4];
+                for (i = 0; i < 4; i++) {
+                    if (strcmp(slot_kind[i], "params") != 0)
+                        continue;
+                    unsigned *b = pb[i];
+                    unsigned q3;
+                    for (q3 = 0; q3 < 44; q3++)
+                        b[q3] = 0;
+                    b[7] = pf_mode;  /* +1c: mode */
+                    b[12] = din_set[1] ? din_val[1] : 8; /* +30: width */
+                    b[13] = din_set[0] ? din_val[0] : 8; /* +34: height */
+                    for (q3 = 14; q3 < 44; q3++)
+                        b[q3] = params_fill;
+                }
+            }
+
             /* state 1 of 3: the OUTPUT buffer as allocation handed it,
                before anything else. Same junk as after the submission
                means reused memory; zeros there but content after means
@@ -2443,6 +2515,10 @@ round_trip_end:;
                 snap_in[k] = desc_in[k];
                 snap_out[k] = desc_out[k];
                 snap_no[k] = desc_no[k];
+                snap_s08[k] = bufs[2][k];
+                snap_s10[k] = sbuf10[k];
+                snap_s14[k] = sbuf14[k];
+                snap_s18[k] = bufs[4][k];
             }
 
             print_syncpts("[sp pre-submit]", sp_pre);
@@ -2459,13 +2535,26 @@ round_trip_end:;
                                (unsigned)bufs[2]);
             s10 = resolve_slot(slot_kind[1], (unsigned)desc_in,
                                (unsigned)desc_out, (unsigned)desc_no,
-                               (unsigned)bufs[2]);
+                               (unsigned)sbuf10);
             s14 = resolve_slot(slot_kind[2], (unsigned)desc_in,
                                (unsigned)desc_out, (unsigned)desc_no,
-                               (unsigned)bufs[2]);
+                               (unsigned)sbuf14);
             s18 = resolve_slot(slot_kind[3], (unsigned)desc_in,
                                (unsigned)desc_out, (unsigned)desc_no,
-                               (unsigned)bufs[3]);
+                               (unsigned)bufs[4]);
+            /* word overrides re-applied after the params build: a08=
+               for the +08 buffer (params may have overwritten it),
+               a10=/a14= for their own buffers; a18= was applied earlier
+               and bufs[4] is untouched by params */
+            for (k = 0; k < 44; k++)
+                if (aux_set[2][k])
+                    bufs[2][k] = aux_val[2][k];
+            for (k = 0; k < 44; k++) {
+                if (a10_set[k])
+                    sbuf10[k] = a10_val[k];
+                if (a14_set[k])
+                    sbuf14[k] = a14_val[k];
+            }
             if (n_set[2])
                 s08 = n_val[2]; /* explicit number wins (mode-2 form) */
             printf("[12] slots: +08=%s(0x%x) +10=%s(0x%x) +14=%s(0x%x) "
@@ -2622,6 +2711,10 @@ round_trip_end:;
                 print_state_diff(tag, snap_aux[i], bufs[i], 16);
             }
             print_state_diff("[12b] post desc_no ", snap_no, desc_no, 16);
+            print_state_diff("[12b] post slot08buf ", snap_s08, bufs[2], 16);
+            print_state_diff("[12b] post slot10buf ", snap_s10, sbuf10, 16);
+            print_state_diff("[12b] post slot14buf ", snap_s14, sbuf14, 16);
+            print_state_diff("[12b] post slot18buf ", snap_s18, bufs[4], 16);
             {
                 /* fences start zeroed: anything non-zero here was
                    written by the library (fence ids and thresholds) */

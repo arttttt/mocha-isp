@@ -20,7 +20,10 @@
  *                             would be a double free.
  *
  * Every step prints its result. A silent failure is useless: we must see
- * at which call it stopped, not guess.
+ * at which call it stopped, not guess. Each line is flushed on its '\n' --
+ * a diagnostic program that loses its diagnostics when it crashes is
+ * useless exactly when it is needed (the SIGSEGV run printed nothing
+ * because everything sat in the buffer).
  *
  * Exit is a normal return from main. Nobody has established that the
  * kernel reclaims the channel behind a killed process, so we do not kill
@@ -76,6 +79,8 @@ static void out_ch(char c)
     if (out_len == sizeof(out_buf))
         out_flush();
     out_buf[out_len++] = c;
+    if (c == '\n')
+        out_flush();
 }
 
 static void out_str(const char *s)

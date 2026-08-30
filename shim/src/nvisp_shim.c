@@ -71,6 +71,52 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_DEREF_BINDING "NvIspSetAttribute"
 #define SHIM_DEREF_IDX     6
 
+/*
+ * --- the intervention gate -------------------------------------------------
+ *
+ * Writing into a stranger's memory (the debug flag behind r2) is toggled by
+ * a file, not a constant: presence of /data/local/tmp/nvisp_shim_flags
+ * turns the intervention on, deleting it turns it off -- after a
+ * mediaserver restart, with no redeploy. Checked once at the first
+ * SetAttribute log and cached; nothing reads the file per call.
+ *
+ * open/read/close come from libc.so the same way everything else does --
+ * dlopen + dlsym -- so DT_NEEDED stays libdl.so. (Verified 2026-08-30:
+ * libc.so in the snapshot exports all three.) O_RDONLY is 0 on Linux.
+ */
+static const char flags_path[] = "/data/local/tmp/nvisp_shim_flags";
+static int flags_checked;   /* 0 = not yet, 1 = decided */
+static int flags_present_;  /* the decision */
+static int (*libc_open)(const char *, int);
+static long (*libc_read)(int, void *, unsigned long);
+static int (*libc_close)(int);
+
+static int intervention_enabled(void)
+{
+    int fd;
+
+    if (flags_checked)
+        return flags_present_;
+    flags_checked = 1;
+    flags_present_ = 0;
+    if (libc_open == 0) {
+        void *h = dlopen("libc.so", SHIM_DLOPEN_FLAGS);
+        if (h != 0) {
+            libc_open = (int (*)(const char *, int))dlsym(h, "open");
+            libc_read = (long (*)(int, void *, unsigned long))dlsym(h, "read");
+            libc_close = (int (*)(int))dlsym(h, "close");
+        }
+    }
+    if (libc_open == 0 || libc_read == 0 || libc_close == 0)
+        return 0;
+    fd = libc_open(flags_path, 0);
+    if (fd < 0)
+        return 0;
+    libc_close(fd);
+    flags_present_ = 1;
+    return 1;
+}
+
 static void *real_handle;
 static void *hook_real_cache[41];
 static unsigned call_counter;
@@ -291,10 +337,29 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      */
     if (idx == SHIM_DEREF_IDX && saved[2] != 0) {
         unsigned v = *(const unsigned *)saved[2];
+        int wrote = 0;
+
+        /*
+         * The intervention, first of its kind. Turn the library's debug
+         * flag ON, under all three guards in code, not in argument:
+         * only id 4 (the only id this call supports), only over a zero
+         * (a one means somebody enabled it before us -- leave it), only
+         * over a valid pointer, and only when the flag file exists.
+         * Our change must be visible in the log as ours: val=0x0 -> 0x1.
+         */
+        if (intervention_enabled() && saved[1] == 4 && v == 0) {
+            *(unsigned *)saved[2] = 1;
+            v = 1;
+            wrote = 1;
+        }
         p = " val=0x";
         while (*p) *w++ = *p++;
         for (i = 28; i >= 0; i -= 4)
             *w++ = hexdig[(v >> i) & 0xf];
+        if (wrote) {
+            p = " -> 0x1";
+            while (*p) *w++ = *p++;
+        }
     }
     p = " r3=0x";
     while (*p) *w++ = *p++;

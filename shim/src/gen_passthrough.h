@@ -627,11 +627,27 @@ __asm__(
     "  add  sp, #4\n"
     "  pop  {lr}\n"
     "  bx   r12\n");
-__asm__(
+ __asm__(
     ".data\n"
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsSetAttribute\n"
-    "shim_slot_NvIspHwSettingsSetAttribute: .word tramp_16\n");
+    "shim_slot_NvIspHwSettingsSetAttribute: .word hook_SetAttribute\n");
+__asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_SetAttribute\n"
+    "hook_SetAttribute:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #16\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"

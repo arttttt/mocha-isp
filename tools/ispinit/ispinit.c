@@ -155,7 +155,10 @@ int main(int argc, char **argv)
     unsigned rt_x8 = 0;                   /* 0 = auto: memStride*numRows */
     int rt_simple = 0;                    /* rt=simple: plain Write/Read */
     unsigned rt_size = 0;                 /* simple-mode byte count */
-    char rt_order[5] = "hpos";            /* simple-mode argument order */
+    char rt_order[5] = "hops";            /* simple-mode argument order:
+        NvRmMemWrite(handle, offset, ptr, size) -- found by enumerating
+        the six h-first permutations, hpos/hosp/hpso/hsop refused,
+        hops PASSED at 64/512/2048 bytes byte-identical */
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     /* seven stack slots: +00 +04 +08 +0c +18 +1c +20. The first four
@@ -824,6 +827,35 @@ round_trip_end:;
                                    aux_on[5] ? (unsigned)bufs[5] : 0,
                                    aux_on[6] ? (unsigned)bufs[6] : 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
+
+            /* [12b] read the OUTPUT buffer back whatever the rc was:
+               the first submission that works must meet the read side
+               already in place. Poisoned with 0xEE first, so untouched
+               bytes are visible as such. */
+            {
+                unsigned pat_bytes = 256 * 8;
+                unsigned char *outb = malloc(pat_bytes);
+                unsigned rrc;
+                int m;
+                if (outb == 0) {
+                    printf("[12] output malloc failed -- nothing to read\n");
+                } else {
+                    memset(outb, 0xEE, pat_bytes);
+                    rrc = nvRmMemRead((unsigned)memh_out, (void *)0,
+                                      (unsigned)outb, pat_bytes);
+                    printf("[12] NvRmMemRead(hops) memh_out %u bytes -> "
+                           "rc=0x%x\n", pat_bytes, (unsigned)rrc);
+                    printf("[12] output first words:");
+                    for (m = 0; m < 8; m++)
+                        printf(" %08x",
+                               (unsigned)outb[m * 4] |
+                               ((unsigned)outb[m * 4 + 1] << 8) |
+                               ((unsigned)outb[m * 4 + 2] << 16) |
+                               ((unsigned)outb[m * 4 + 3] << 24));
+                    printf("\n");
+                    free(outb);
+                }
+            }
         }
     }
 

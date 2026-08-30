@@ -2450,7 +2450,6 @@ round_trip_end:;
         unsigned flag = 0;
         unsigned fsize = 4;
         stage_now = "NvIspSetAttribute(id 4)";
-        stage_now = "NvIspSetAttribute(id 4)";
         rc = nvIspSetAttribute(hIsp, 4, &flag, &fsize);
         printf("[13b] NvIspSetAttribute(hIsp=0x%x, id=4, &flag=0, "
                "&size=4) -> rc=0x%x\n", hIsp, (unsigned)rc);

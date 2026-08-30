@@ -148,6 +148,16 @@ So there is nothing to watch. The memory mode exists in the library and has
 to be assembled by hand -- which changes what a gap in the analysis costs:
 it used to mean "read it off the device", and now it means "guess".
 
+### What a dead process leaves behind
+
+Worth knowing, and established by accident. `ispinit` crashed between
+`NvIspOpen` and `NvIspClose`, so the host1x channel was never returned --
+the one leak we had been carefully avoiding, because nobody had established
+whether the kernel reclaims it. It does: the stock camera came up
+afterwards with all four streams and wrote a photo.
+
+So the teardown discipline stays, but the fear behind it can go.
+
 
 ## Why not a memory dump
 

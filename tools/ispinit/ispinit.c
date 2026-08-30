@@ -74,6 +74,7 @@ static const unsigned cfg_mode2 = 2;
 /* --- the five calls --- */
 
 typedef int (*NvRmOpen_fn)(void **out);
+typedef int (*NvRmMemHandleAllocAttr_fn)(void *dev, void *attrs, void **out);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
 typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
@@ -83,13 +84,32 @@ typedef int (*NvIspGetStatus_fn)(unsigned hIsp, unsigned statusId,
                                  void *value, unsigned *size);
 typedef int (*NvIspClose_fn)(unsigned hIsp);
 
+/*
+ * ProcessFrame: 4 register args + 9 stack words. The hook's live stack
+ * (caller-sp coordinates) shows the five pointers at +0x10..+0x20 and
+ * four words the library never reads at +0x00..+0x0c -- in C terms the
+ * stack argument area starts at +0x00, so the descriptors are
+ * parameters 9..13 and the unread words are parameters 5..8, mirrored
+ * as zeros here (the stock's 3280/2460 there were session sensor
+ * geometry; we encode nothing of the session).
+ */
+typedef int (*NvIspProcessFrame_fn)(unsigned hIsp, unsigned mode,
+                                    unsigned r2, unsigned r3,
+                                    unsigned s5, unsigned s6,
+                                    unsigned s7, unsigned s8,
+                                    unsigned inDesc, unsigned aux1,
+                                    unsigned aux2, unsigned aux3,
+                                    unsigned aux4);
+
 int main(int argc, char **argv)
 {
     void *nvrm;
     void *nvisp;
     NvRmOpen_fn nvRmOpen;
+    NvRmMemHandleAllocAttr_fn nvRmMemHandleAllocAttr;
     NvIspOpen_fn nvIspOpen;
     NvIspSetConfiguration_fn nvIspSetConfiguration;
+    NvIspProcessFrame_fn nvIspProcessFrame;
     NvIspSetIspClockRate_fn nvIspSetIspClockRate;
     NvIspGetStatus_fn nvIspGetStatus;
     NvIspClose_fn nvIspClose;
@@ -137,19 +157,26 @@ int main(int argc, char **argv)
 
     /* [3] the symbols; a miss here is printed and fatal */
     nvRmOpen = (NvRmOpen_fn)dlsym(nvrm, "NvRmOpen");
+    nvRmMemHandleAllocAttr =
+        (NvRmMemHandleAllocAttr_fn)dlsym(nvrm, "NvRmMemHandleAllocAttr");
     nvIspOpen = (NvIspOpen_fn)dlsym(nvisp, "NvIspOpen");
     nvIspSetConfiguration =
         (NvIspSetConfiguration_fn)dlsym(nvisp, "NvIspSetConfiguration");
+    nvIspProcessFrame =
+        (NvIspProcessFrame_fn)dlsym(nvisp, "NvIspProcessFrame");
     nvIspSetIspClockRate =
         (NvIspSetIspClockRate_fn)dlsym(nvisp, "NvIspSetIspClockRate");
     nvIspGetStatus = (NvIspGetStatus_fn)dlsym(nvisp, "NvIspGetStatus");
     nvIspClose = (NvIspClose_fn)dlsym(nvisp, "NvIspClose");
 
-    printf("[3] dlsym: NvRmOpen=%p NvIspOpen=%p SetConfiguration=%p "
-           "SetIspClockRate=%p GetStatus=%p Close=%p\n",
-           nvRmOpen, nvIspOpen, nvIspSetConfiguration, nvIspSetIspClockRate,
-           nvIspGetStatus, nvIspClose);
-    if (nvRmOpen == 0 || nvIspOpen == 0 || nvIspSetConfiguration == 0 ||
+    printf("[3] dlsym: NvRmOpen=%p AllocAttr=%p NvIspOpen=%p "
+           "SetConfiguration=%p ProcessFrame=%p SetIspClockRate=%p "
+           "GetStatus=%p Close=%p\n",
+           nvRmOpen, nvRmMemHandleAllocAttr, nvIspOpen, nvIspSetConfiguration,
+           nvIspProcessFrame, nvIspSetIspClockRate, nvIspGetStatus,
+           nvIspClose);
+    if (nvRmOpen == 0 || nvRmMemHandleAllocAttr == 0 || nvIspOpen == 0 ||
+        nvIspSetConfiguration == 0 || nvIspProcessFrame == 0 ||
         nvIspSetIspClockRate == 0 || nvIspGetStatus == 0 ||
         nvIspClose == 0) {
         printf("    dlerror: %s\n", dlerror());
@@ -203,9 +230,60 @@ int main(int argc, char **argv)
     rc = nvIspGetStatus(hIsp, 6, &value, &size);
     printf("rc=0x%x size=%u value=0x%x\n", (unsigned)rc, size, value);
 
-    /* [10] hand it back, completely: NvIspClose releases everything
+    /*
+     * [10..12] submit the placeholder frame. First reproduce what the
+     * hardware already accepted (the stock's 8x8 dummy: format 0x105a500c
+     * from the stock pool, stride 256, one plane), with OUR buffer and
+     * OUR handle; geometry and format change one step at a time after
+     * this works. The numbers 8x8 are copied deliberately as known-good,
+     * the handle is ours from the allocation -- never copied, it lives
+     * one run.
+     */
+
+    /* [10] one page of memory through AllocAttr(r0=dev, attrs[32], &out);
+       the stock dummy's attrs[1]=3, size in attrs[4] (impl-2). No free
+       yet: the first submission's state is unknown, an extra release
+       would add variables to the experiment. */
+    {
+        unsigned attrs[32] = {0};
+        void *memh = 0;
+        unsigned desc[44] = {0}; /* 0xb0 bytes, the stock record size */
+
+        attrs[1] = 3;
+        attrs[4] = 4096; /* one page: stride 256 x height 8 = 2048, with headroom */
+
+        printf("[10] NvRmMemHandleAllocAttr(dev=%p, attrs[32], &memh) -> ",
+               dev);
+        rc = nvRmMemHandleAllocAttr(dev, attrs, &memh);
+        printf("rc=0x%x memh=%p\n", rc, memh);
+
+        if (rc != 0 || memh == 0) {
+            printf("    alloc failed -- skipping submission, closing\n");
+        } else {
+            /* [11] the descriptor: seven live words of forty-four */
+            desc[0] = 8;          /* height */
+            desc[1] = 8;          /* width */
+            desc[2] = 0x105a500cu; /* format constant, as-is from the dummy */
+            desc[3] = 1;          /* memory type */
+            desc[4] = 256;        /* stride, multiple of 64 */
+            desc[5] = (unsigned)memh; /* OUR handle */
+            desc[9] = 1;          /* 0x24: plane count */
+
+            /* [12] the submission itself. The intent line goes out
+               before the call: if the call never returns (a fence wait,
+               for instance), the log shows exactly where it stopped. */
+            printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, desc@stack "
+                   "+0x10, aux=zeros) -> calling...\n", hIsp);
+            rc = nvIspProcessFrame(hIsp, 1, 0, 0,
+                                   0, 0, 0, 0,   /* stack +00..+0c: library ignores */
+                                   (unsigned)desc, 0, 0, 0, 0);
+            printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
+        }
+    }
+
+    /* [13] hand it back, completely: NvIspClose releases everything
        itself, including the host1x channel. */
-    printf("[10] NvIspClose(hIsp=0x%x) -> ", hIsp);
+    printf("[13] NvIspClose(hIsp=0x%x) -> ", hIsp);
     rc = nvIspClose(hIsp);
     printf("rc=0x%x\n", (unsigned)rc);
 

@@ -180,6 +180,7 @@ static void print_state_diff(const char *tag, const unsigned *before,
 
 #ifndef HOST_ARGTEST
 
+extern __attribute__((visibility("hidden"))) void stage_cont(void);
 extern void stage_hook_0(void);
 extern void stage_hook_1(void);
 extern void stage_hook_2(void);
@@ -216,7 +217,6 @@ static void *stage_pre(unsigned slot, unsigned *saved)
    its address is handed to the hook by stage_pre through saved[4] --
    the C-side reference keeps the relocation in compiler territory,
    which the 4.9 linker accepts, unlike hand-written movw/movt. */
-extern __attribute__((visibility("hidden"))) void stage_cont(void);
 
 __attribute__((used, noinline))
 static void stage_post(unsigned rc)

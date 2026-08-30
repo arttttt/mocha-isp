@@ -82,6 +82,14 @@ check "cfg2=5"                 1 4194303 rggb cfg2=5
 check "cfg=16:1 rejected"      0 4194303 rggb cfg=16:1
 check "cfg junk rejected"      0 4194303 rggb cfg=junk
 
+echo "-- submission mode and slot14"
+check "mode=2"             1 4194303 rggb mode=2
+check "mode=0"             1 4194303 rggb mode=0
+check "mode junk rejected" 0 4194303 rggb mode=junk
+check "slot14=aux"         1 4194303 rggb slot14=aux
+check "slot14=desc"        1 4194303 rggb slot14=desc
+check "slot14 junk rejected" 0 4194303 rggb slot14=junk
+
 echo "-- context dumps (ctx=)"
 check "ctx=0x1200:32"          1 4194303 rggb ctx=0x1200:32
 check "ctx two regions"        1 4194303 rggb ctx=0x1200:64 ctx=0x1300:64

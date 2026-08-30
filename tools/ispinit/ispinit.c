@@ -179,6 +179,12 @@ int main(int argc, char **argv)
        the strided form stays available under rt=strided for signature
        re-checks. Its rc=0x100 rejection on every run was pure noise. */
     int rt_simple = 1;
+    unsigned pf_mode = 1;   /* ProcessFrame's 2nd arg: mode=<val>; the
+                               mode=2 run is the control we never ran */
+    int slot14_aux = 0;     /* slot14=aux: put a plain aux buffer into
+                               +0x14 instead of the output descriptor
+                               (impl-2 once called it a Flush token --
+                               never tested) */
     unsigned wait_ms = 0;                 /* wait=<ms>: delay before the
                                              post-submit output read */
     unsigned rt_size = 0;                 /* simple-mode byte count */
@@ -361,6 +367,28 @@ int main(int argc, char **argv)
                 }
                 aux_val[which][idx] = (unsigned)val;
                 aux_set[which][idx] = 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "mode=", 5) == 0) {
+            char *e6 = 0;
+            long v = strtol(tok + 5, &e6, 0);
+            if (e6 == tok + 5 || *e6 != '\0' || v < 0) {
+                printf("[0] bad mode '%s', use mode=<val>\n", argv[ai]);
+                return 1;
+            }
+            pf_mode = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "slot14=", 7) == 0) {
+            if (strcmp(tok + 7, "aux") == 0)
+                slot14_aux = 1;
+            else if (strcmp(tok + 7, "desc") == 0)
+                slot14_aux = 0;
+            else {
+                printf("[0] bad slot14 '%s', use slot14=desc|aux\n",
+                       argv[ai]);
+                return 1;
             }
             continue;
         }
@@ -928,6 +956,7 @@ round_trip_end:;
         unsigned desc_out[44] = {0};
         unsigned gh, gw, gf, gt, gs, gp;
         unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
+        unsigned slot14_buf[44] = {0}; /* +0x14 in slot14=aux mode */
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
         int i, k;
@@ -1145,15 +1174,19 @@ round_trip_end:;
                        aux_on[i] ? (void *)bufs[i] : (void *)0,
                        aux_on[i] ? "on" : "off");
             printf("\n");
-            printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, "
-                   "in@+0x10=%p, out@+0x14=%p) -> calling...\n",
-                   hIsp, desc_in, desc_out);
-            rc = nvIspProcessFrame(hIsp, 1, 0, 0,
+            printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=%u, "
+                   "in@+0x10=%p, +0x14=%s=%p) -> calling...\n",
+                   hIsp, pf_mode, desc_in,
+                   slot14_aux ? "aux" : "desc",
+                   slot14_aux ? (void *)slot14_buf : (void *)desc_out);
+            rc = nvIspProcessFrame(hIsp, pf_mode, 0, 0,
                                    aux_on[0] ? (unsigned)bufs[0] : 0,
                                    aux_on[1] ? (unsigned)bufs[1] : 0,
                                    aux_on[2] ? (unsigned)bufs[2] : 0,
                                    aux_on[3] ? (unsigned)bufs[3] : 0,
-                                   (unsigned)desc_in, (unsigned)desc_out,
+                                   (unsigned)desc_in,
+                                   slot14_aux ? (unsigned)slot14_buf
+                                              : (unsigned)desc_out,
                                    aux_on[4] ? (unsigned)bufs[4] : 0,
                                    aux_on[5] ? (unsigned)bufs[5] : 0,
                                    aux_on[6] ? (unsigned)bufs[6] : 0);

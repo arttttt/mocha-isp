@@ -113,6 +113,7 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_IDX_HWSATTR 16
 #define SHIM_IDX_SETSTATS 29
 #define SHIM_HWSATTR_BUDGET 14
+#define SHIM_SETSTATS_BUDGET 8
 static unsigned pf_odd_logged;
 static unsigned pf_dumped;
 
@@ -312,6 +313,84 @@ static char *shim_put_dec(char *w, unsigned v)
     return w;
 }
 
+/*
+ * Heap-range table for the block 8/9 pointer dumps. Ranges are scanned
+ * ONCE from /proc/self/maps through dlsym'd open/read/close -- DT_NEEDED
+ * stays libdl.so. File-backed mappings are excluded; [heap], [anon:*]
+ * and plain anonymous rw ranges are kept.
+ */
+#define HEAP_RANGES 64
+static unsigned heap_lo[HEAP_RANGES], heap_hi[HEAP_RANGES];
+static int heap_n = -1; /* -1 = not scanned yet */
+static int (*h_open)(const char *, int);
+static long (*h_read)(int, void *, unsigned);
+static int (*h_close)(int);
+static int (*h_sscanf)(const char *, const char *, ...);
+static char *(*h_strchr)(const char *, int);
+static unsigned (*h_strlen)(const char *);
+
+static int addr_in_heap(unsigned a)
+{
+    int i;
+    for (i = 0; i < heap_n; i++)
+        if (a >= heap_lo[i] && a < heap_hi[i])
+            return 1;
+    return 0;
+}
+
+static void scan_heap_ranges(void)
+{
+    /* /proc/self/maps is larger than one read: parse incrementally,
+       carrying the incomplete tail line between chunks */
+    static char buf[8192];
+    static unsigned remn;
+    int fd, i, n;
+
+    heap_n = 0;
+    if (h_open == 0) {
+        void *h = dlopen("libc.so", 0);
+        if (h != 0) {
+            h_open = (int (*)(const char *, int))dlsym(h, "open");
+            h_read = (long (*)(int, void *, unsigned))dlsym(h, "read");
+            h_close = (int (*)(int))dlsym(h, "close");
+            h_sscanf = (int (*)(const char *, const char *, ...))dlsym(
+                h, "sscanf");
+            h_strchr = (char *(*)(const char *, int))dlsym(h, "strchr");
+            h_strlen = (unsigned (*)(const char *))dlsym(h, "strlen");
+        }
+    }
+    if (h_open == 0 || h_read == 0 || h_close == 0 || h_sscanf == 0 ||
+        h_strchr == 0 || h_strlen == 0)
+        return;
+    fd = h_open("/proc/self/maps", 0);
+    if (fd < 0)
+        return;
+    remn = 0;
+    while ((n = h_read(fd, buf + remn, sizeof(buf) - remn - 1)) > 0) {
+        char *p = buf;
+        char *nl;
+        buf[remn + n] = '\0';
+        while ((nl = h_strchr(p, '\n')) != 0) {
+            unsigned lo = 0, hi = 0;
+            char perms[8];
+            *nl = '\0';
+            if (h_sscanf(p, "%x-%x %7s", &lo, &hi, perms) == 3 &&
+                perms[0] == 'r' && perms[1] == 'w' &&
+                h_strchr(p, '/') == 0 && heap_n < HEAP_RANGES) {
+                heap_lo[heap_n] = lo;
+                heap_hi[heap_n] = hi;
+                heap_n++;
+            }
+            p = nl + 1;
+        }
+        /* carry the incomplete tail */
+        remn = h_strlen(p);
+        for (i = 0; i < (int)remn; i++)
+            buf[i] = p[i];
+    }
+    h_close(fd);
+}
+
 __attribute__((used, visibility("hidden")))
 void *shim_log_call(unsigned idx, unsigned *saved)
 {
@@ -350,8 +429,11 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * nonstandard mode no matter how many ordinary frames ran before --
      * but at most 20 times per process.
      */
-    if (shim_budget[idx] >= (idx == SHIM_IDX_HWSATTR ? SHIM_HWSATTR_BUDGET
-                                                     : 4)) {
+    if (shim_budget[idx] >=
+        (idx == SHIM_IDX_HWSATTR ? SHIM_HWSATTR_BUDGET
+                                 : idx == SHIM_IDX_SETSTATS
+                                     ? SHIM_SETSTATS_BUDGET
+                                     : 4)) {
         int bypass = (idx == SHIM_DEREF_IDX_PF && saved[1] != 2 &&
                       pf_odd_logged < 20);
         if (!bypass)
@@ -546,6 +628,65 @@ void *shim_log_call(unsigned idx, unsigned *saved)
                 *w++ = ',';
             for (i = 28; i >= 0; i -= 4)
                 *w++ = hexdig[(word >> i) & 0xf];
+        }
+
+        /*
+         * Blocks 8 and 9 carry ARRAYS OF RECORDS: a counter word, then
+         * pointers into the heap (live: 9 then four pointers at 0x24
+         * stride, 0x10 then ten at 0x40). One guarded extra level:
+         * heap-range check (scanned once), word alignment, counter <=
+         * 64, nonzero pointer, <= 4 tables per call, <= 32 words per
+         * table. Anything suspicious is SKIPPED -- this is mediaserver,
+         * and under-capture beats a dead camera.
+         */
+        if ((saved[1] == 8 || saved[1] == 9) && heap_n < 0)
+            scan_heap_ranges();
+        if ((saved[1] == 8 || saved[1] == 9) && heap_n > 0) {
+            const unsigned *bw = (const unsigned *)saved[3];
+            unsigned nw = size / 4;
+            unsigned q2, dumps = 0;
+            char tbuf[640];
+
+            for (q2 = 0; q2 + 1 < nw && dumps < 4; q2++) {
+                unsigned cnt = bw[q2];
+                unsigned tptr = bw[q2 + 1];
+                unsigned tw = 32, t2;
+                char *t = tbuf;
+                static const char dig[] = "0123456789abcdef";
+
+                if (cnt == 0 || cnt > 64)
+                    continue;
+                if (tptr == 0 || (tptr & 3) != 0 || !addr_in_heap(tptr))
+                    continue;
+                t = tbuf;
+                p = "[tbl] id=";
+                while (*p) *t++ = *p++;
+                t = shim_put_dec(t, saved[1]);
+                p = " @0x";
+                while (*p) *t++ = *p++;
+                for (i = 28; i >= 0; i -= 4)
+                    *t++ = dig[(tptr >> i) & 0xf];
+                p = " cnt=";
+                while (*p) *t++ = *p++;
+                t = shim_put_dec(t, cnt);
+                p = " w=";
+                while (*p) *t++ = *p++;
+                for (t2 = 0; t2 < tw; t2++) {
+                    unsigned word = ((const unsigned *)tptr)[t2];
+                    int j;
+                    if (t2 != 0)
+                        *t++ = ',';
+                    *t++ = '+';
+                    *t++ = dig[((t2 * 4) >> 4) & 0xf];
+                    *t++ = dig[(t2 * 4) & 0xf];
+                    *t++ = ':';
+                    for (j = 28; j >= 0; j -= 4)
+                        *t++ = dig[(word >> j) & 0xf];
+                }
+                *t = 0;
+                shim_log(SHIM_LOG_PRIO_INFO, tbuf);
+                dumps++;
+            }
         }
     }
     *w = 0;

@@ -101,6 +101,18 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
  */
 #define SHIM_DEREF_BINDING_PF "NvIspProcessFrame"
 #define SHIM_DEREF_IDX_PF     5
+
+/*
+ * Settings-content dumps: the stock fills the per-block configuration
+ * buffers LIVE through HwSettingsSetAttribute (binding 16, fourteen
+ * calls) and SetStats (binding 29, four calls). We replay zeros today;
+ * dumping the real content lets the memory-mode run feed real values
+ * instead. Budget for binding 16 raised to 14 so the WHOLE set passes
+ * at least once.
+ */
+#define SHIM_IDX_HWSATTR 16
+#define SHIM_IDX_SETSTATS 29
+#define SHIM_HWSATTR_BUDGET 14
 static unsigned pf_odd_logged;
 static unsigned pf_dumped;
 
@@ -338,7 +350,8 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * nonstandard mode no matter how many ordinary frames ran before --
      * but at most 20 times per process.
      */
-    if (shim_budget[idx] >= 4) {
+    if (shim_budget[idx] >= (idx == SHIM_IDX_HWSATTR ? SHIM_HWSATTR_BUDGET
+                                                     : 4)) {
         int bypass = (idx == SHIM_DEREF_IDX_PF && saved[1] != 2 &&
                       pf_odd_logged < 20);
         if (!bypass)
@@ -497,6 +510,42 @@ void *shim_log_call(unsigned idx, unsigned *saved)
                 p = " obj0=null";
                 while (*p) *w++ = *p++;
             }
+        }
+    }
+
+    /*
+     * Buffer content dumps for the settings walk. HwSettingsSetAttribute
+     * (16): (hSettings, blockId, index, buf, &size) -- the size POINTER
+     * is the caller's first stack word (saved[6]). SetStats (29): same
+     * form. We print exactly size/4 words from buf, never past the
+     * caller's own size, pointers null-checked first -- this is
+     * mediaserver's address space.
+     */
+    if ((idx == SHIM_IDX_HWSATTR || idx == SHIM_IDX_SETSTATS) &&
+        saved[3] != 0 && saved[6] != 0) {
+        unsigned size = *(const unsigned *)saved[6];
+        unsigned words = size / 4;
+        unsigned q;
+
+        if (words > 34)
+            words = 34; /* the largest known block is 136 bytes */
+        p = (idx == SHIM_IDX_HWSATTR) ? " hwsa id=" : " stats id=";
+        while (*p) *w++ = *p++;
+        w = shim_put_dec(w, saved[1]);
+        p = " idx=";
+        while (*p) *w++ = *p++;
+        w = shim_put_dec(w, saved[2]);
+        p = " size=";
+        while (*p) *w++ = *p++;
+        w = shim_put_dec(w, size);
+        p = " buf=";
+        while (*p) *w++ = *p++;
+        for (q = 0; q < (int)words; q++) {
+            unsigned word = ((const unsigned *)saved[3])[q];
+            if (q != 0)
+                *w++ = ',';
+            for (i = 28; i >= 0; i -= 4)
+                *w++ = hexdig[(word >> i) & 0xf];
         }
     }
     *w = 0;

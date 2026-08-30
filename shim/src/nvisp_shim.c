@@ -63,6 +63,8 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 static void *real_handle;
 static void *hook_real_cache[41];
 static unsigned call_counter;
+static unsigned shim_resolve_failures;
+static unsigned shim_budget[41];
 static unsigned seen_pairs[64];
 static unsigned seen_pairs_n;
 
@@ -217,8 +219,33 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     const char *p;
     int i;
 
-    call_counter++;
+    /* ensure the real library is loaded */
+    if (real_handle == 0) {
+        real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
+    }
 
+    /* resolve: dlsym the real address for this binding, cache it,
+       fall back to trap if resolution fails */
+    if (hook_real_cache[idx] == 0) {
+        void *t = 0;
+        if (real_handle != 0) {
+            t = dlsym(real_handle, shim_bindings[idx].name);
+        }
+        if (t == 0) {
+            t = (void *)shim_trap;
+            shim_log(SHIM_LOG_PRIO_ERROR,
+                     "resolve: dlsym FAILED, slot -> trap");
+        }
+        hook_real_cache[idx] = t;
+    }
+
+    /* budget: log only the first 4 calls per binding */
+    if (shim_budget[idx] >= 4) {
+        return hook_real_cache[idx];
+    }
+    shim_budget[idx]++;
+
+    /* build the log message */
     /* ensure the real library is loaded */
     if (real_handle == 0) {
         real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);

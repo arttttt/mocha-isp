@@ -24,6 +24,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTDIR="$ROOT/build/out"
 mkdir -p "$OUTDIR"
 
+# Clear the previous artifact BEFORE compiling. A failed build must leave
+# nothing behind: otherwise the acceptance checks run against yesterday's
+# binary and pass, and the only hint is an md5 that looks familiar. That
+# happened once and was caught by eye, which is not a method.
+rm -f "$OUTDIR/$OUT"
+
 [ -x "$CC" ] || { echo "NO COMPILER: $CC"; exit 1; }
 
 # --- 1. link-time stubs --------------------------------------------------

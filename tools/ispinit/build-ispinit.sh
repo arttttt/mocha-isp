@@ -27,6 +27,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUTDIR="$ROOT/build/out"
 mkdir -p "$OUTDIR"
 
+# Same rule as build/build.sh: a failed build leaves nothing behind, so
+# nobody can accept an artifact that was not produced by this run.
+rm -f "$OUTDIR/ispinit"
+
 [ -x "$CC" ] || { echo "NO COMPILER: $CC"; exit 1; }
 
 # --- the executable ------------------------------------------------------

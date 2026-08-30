@@ -76,7 +76,7 @@ with open(out_path, 'w') as f:
             '    ".thumb\\n"\n'
             '    ".align 2\\n"\n'
             '    ".globl ' + n + '\\n"\n'
-            '    ".type ' + n + ', %%function\\n"\n'
+            '    ".type ' + n + ', %function\\n"\n'
             '    "' + n + ':\\n"\n'
             '    "  ldr  r12, 9f\\n"\n'
             '    "  add  r12, pc\\n"\n'

@@ -627,6 +627,43 @@ static void print_obj_state(const char *tag, unsigned hIsp)
     last_valid = 1;
 }
 
+/* settings-object diff: settings blocks write into the object AT
+   hset, not into the +0x1660 window (that belongs to SetStats). Only
+   CHANGED words print; the label states only what was measured --
+   "memcmp no-op" would be a claim we have not tested here. */
+static unsigned set_snap[256];
+static int set_snap_valid;
+
+static void set_snap_take(unsigned hset)
+{
+    int i;
+    for (i = 0; i < 256; i++)
+        set_snap[i] = *(unsigned *)(hset + i * 4);
+    set_snap_valid = 1;
+}
+
+static void print_set_diff(const char *tag, unsigned hset)
+{
+    int i, c = 0;
+
+    if (hset == 0)
+        return;
+    if (set_snap_valid == 0)
+        set_snap_take(hset);
+    printf("%s:", tag);
+    for (i = 0; i < 256; i++) {
+        unsigned cur = *(unsigned *)(hset + i * 4);
+        if (cur != set_snap[i]) {
+            printf(" +%03x:%08x(was %08x)", i * 4, cur, set_snap[i]);
+            set_snap[i] = cur;
+            c++;
+        }
+    }
+    if (c == 0)
+        printf(" no changes in the observed area (256 words)");
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -1811,6 +1848,8 @@ round_trip_end:;
                hset_mode);
         print_first_words("[7b] p1 first words", (unsigned char *)cs1, 8);
         print_first_words("[7b] p2 first words", (unsigned char *)cs2, 8);
+        if (hset != 0)
+            set_snap_take(hset);
         print_gate("[7b] after HwSettingsCreate", hIsp);
     }
 
@@ -1903,7 +1942,7 @@ round_trip_end:;
                          blocks[q][1]);
                 print_first_words(btag, (const unsigned char *)zbuf, 16);
             }
-            print_obj_state(tag, hIsp);
+            print_set_diff(tag, hset);
             free(zbuf);
             free(rbuf);
         }

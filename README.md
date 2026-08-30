@@ -183,6 +183,34 @@ So the refusal happens early, before any call into `libnvrm` at all. That
 narrows it to validation, and it means nothing about command building,
 relocations or memory can be the cause.
 
+Three things then moved it, all of them measurements rather than readings.
+
+**The modes answer differently.** The same program, one argument changed:
+mode 1 refuses with `2`, mode 2 refuses with `0xa`, and modes 0 and 3 are
+rejected as invalid. So the session is sound and the path works -- the
+reading that memory mode is simply unimplemented for this chip does not
+survive the control. `0xa` is the "here is what I need, retry" code, which
+makes the sensor path's refusal a constructive one.
+
+**The stage table can be read out of the running process.** The ISP context
+holds pointers to the internal stages, and the context is ours. Dumping it
+gave the real addresses; the one the analysis had been working from was off
+by one table slot, so a function nobody had opened was being blamed for
+three hours.
+
+**Stage 3 does nothing.** It loads a pointer from `ctx+0x1318`, reads the
+first word of the object it points at, finds zero, and branches straight to
+the epilogue -- returning success without acting. The object exists and is
+partly filled; only that first word is zero. So the question narrows from
+"who creates this" to "who increments this", which is a much smaller
+question.
+
+And because the context belongs to us, the same trick goes further than
+reading: the stage pointers can be replaced with our own thunks that log and
+forward. Where a library keeps pointers to its own internals in a structure
+the caller owns, the boundary you can observe is that structure, not the
+exported symbols.
+
 The stock stack never uses it. The hook was changed to log any call whose
 mode is not 2 outside the budget, and the camera was driven through preview,
 three full-resolution stills and a video: three JPEGs written, and four

@@ -122,6 +122,70 @@ typedef int (*NvIspProcessFrame_fn)(unsigned hIsp, unsigned mode,
 
 
 /*
+ * Stage-table interception. The ISP handler table lives in the context;
+ * entries are function pointers (thumb bit set). stage=<off>:on swaps
+ * an entry for one of our hooks; the hook prints entry args (r0-r3
+ * only -- arity unestablished), calls the original, prints its return
+ * code, and returns it unchanged. Nothing else is touched; the stack
+ * the library sees is exactly the stack it built. Fired/never-called
+ * prints at the end.
+ */
+#define STAGE_SLOTS 8
+extern void stage_hook_0(void);
+extern void stage_hook_1(void);
+extern void stage_hook_2(void);
+extern void stage_hook_3(void);
+extern void stage_hook_4(void);
+extern void stage_hook_5(void);
+extern void stage_hook_6(void);
+extern void stage_hook_7(void);
+static const void *stage_hook_syms[STAGE_SLOTS] = {
+    stage_hook_0, stage_hook_1, stage_hook_2, stage_hook_3,
+    stage_hook_4, stage_hook_5, stage_hook_6, stage_hook_7
+};
+static unsigned stage_hook_orig[STAGE_SLOTS];   /* table value we replaced */
+static unsigned stage_hook_fired[STAGE_SLOTS];
+static unsigned stage_cur;                      /* slot currently entered */
+static unsigned stage_pending_rc;
+
+/*
+ * Called from asm with (slot, &saved[r0..r3,r12,lr]). Prints the entry
+ * args and returns the ORIGINAL function address; the asm tail-jumps
+ * to it with lr = the shared continuation.
+ */
+__attribute__((used, noinline))
+static void *stage_pre(unsigned slot, unsigned *saved)
+{
+    printf("[stage %u] enter r0=0x%x r1=0x%x r2=0x%x r3=0x%x\n",
+           slot, saved[0], saved[1], saved[2], saved[3]);
+    return (void *)stage_hook_orig[slot];
+}
+
+/* the shared continuation: the original returned here with its code
+   in r0; print it and go back to the library */
+__attribute__((used, noinline, naked))
+static void stage_cont(void)
+{
+    __asm__(
+        ".thumb\n"
+        ".thumb_func\n"
+        "stage_cont:\n"
+        "  push {r0, lr}\n"
+        "  bl   stage_post\n"
+        "  ldr  r0, [sp]\n"
+        "  add  sp, #8\n"
+        "  ldr.w pc, [sp, #-4]\n");
+}
+
+__attribute__((used, noinline))
+static void stage_post(unsigned rc)
+{
+    stage_hook_fired[stage_cur] = 1;
+    stage_pending_rc = rc;
+    printf("[stage %u] leave rc=0x%x\n", stage_cur, rc);
+}
+
+/*
  * First n 32-bit LE words of a byte buffer, tagged. Used for the three
  * provenance states of the submission experiment: output-after-alloc,
  * input-after-write, output-after-submit. Twice-taken emptiness or
@@ -1364,3 +1428,179 @@ round_trip_end:;
     printf("done\n");
     return 0;
 }
+
+
+/*
+ * Stage hooks: same register discipline as the verified shim
+ * trampolines. Frame after push {r0-r3, lr, r12} (24 bytes):
+ *   sp+0..12 = r0..r3, sp+16 = caller lr, sp+20 = scratch slot.
+ * stage_pre prints and returns the original; caller lr is parked in
+ * the scratch slot, the continuation address goes into lr, args are
+ * restored, sp returns to entry value (stack args stay valid), and
+ * bx jumps to the original. stage_cont logs the return code and
+ * returns to the parked caller lr.
+ */
+__asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_0\n"
+    "stage_hook_0:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #0\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_1\n"
+    "stage_hook_1:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #1\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_2\n"
+    "stage_hook_2:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #2\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_3\n"
+    "stage_hook_3:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #3\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_4\n"
+    "stage_hook_4:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #4\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_5\n"
+    "stage_hook_5:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #5\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_6\n"
+    "stage_hook_6:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #6\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");
+__asm__(
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden stage_hook_7\n"
+    "stage_hook_7:\n"
+    "  push {r0-r3, lr, r12}\n"
+    "  mov  r0, #7\n"
+    "  add  r1, sp, #4\n"
+    "  bl   stage_pre\n"
+    "  mov  r12, r0\n"
+    "  ldr  r0, [sp, #16]\n"
+    "  str  r0, [sp, #20]\n"
+    "  ldr  lr, [pc, #8]\n"
+    "  b    2f\n"
+    "  .align 2\n"
+    "  .word stage_cont\n"
+    "2:  add  sp, #4\n"
+    "  ldm  sp!, {r0-r3}\n"
+    "  bx   r12\n");

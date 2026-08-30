@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "bayer_gen.h"
 
@@ -175,6 +176,8 @@ int main(int argc, char **argv)
     unsigned rt_off = 0;                  /* offset into the nvmap buffer */
     unsigned rt_x8 = 0;                   /* 0 = auto: memStride*numRows */
     int rt_simple = 0;                    /* rt=simple: plain Write/Read */
+    unsigned wait_ms = 0;                 /* wait=<ms>: delay before the
+                                             post-submit output read */
     unsigned rt_size = 0;                 /* simple-mode byte count */
     char rt_order[5] = "hops";            /* simple-mode argument order:
         NvRmMemWrite(handle, offset, ptr, size) -- found by enumerating
@@ -348,6 +351,21 @@ int main(int argc, char **argv)
                 aux_val[which][idx] = (unsigned)val;
                 aux_set[which][idx] = 1;
             }
+            continue;
+        }
+        if (strncmp(tok, "wait=", 5) == 0) {
+            /* wait=<ms> -- delay before the post-submit output read.
+               A crutch for the async hypothesis: if the output content
+               changes with delay and not without, processing is
+               asynchronous and the real answer is a fence wait. */
+            char *e4 = 0;
+            long v = strtol(tok + 5, &e4, 0);
+            if (e4 == tok + 5 || *e4 != '\0' || v < 0) {
+                printf("[0] bad wait '%s', use wait=<milliseconds>\n",
+                       argv[ai]);
+                return 1;
+            }
+            wait_ms = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "din=", 4) == 0 || strncmp(tok, "dout=", 5) == 0) {
@@ -782,6 +800,7 @@ round_trip_end:;
         unsigned attrs_out[8];
         void *memh_in = 0;
         void *memh_out = 0;
+        unsigned char *pat_out = 0;   /* the 0xDEADBEEF reference */
         unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
                                         record size */
         unsigned desc_out[44] = {0};
@@ -869,6 +888,37 @@ round_trip_end:;
             }
             desc_in[5] = (unsigned)memh_in;   /* OUR input handle */
             desc_out[5] = (unsigned)memh_out; /* OUR output handle */
+
+            /*
+             * Output pre-fill: 0xDEADBEEF repeated, written through the
+             * same Write path. Pages come back NOT zeroed (measured),
+             * so post-submit content proves nothing by itself -- but
+             * with a known pattern in place the post-submit rule is
+             * simple: everything that DIFFERS from the pattern, the
+             * ISP wrote. Zero diffs = untouched; partial = started and
+             * stopped; full = frame written. The pattern buffer is
+             * kept alive for that comparison.
+             */
+            {
+                unsigned pbytes = gs * gh;
+                unsigned wq;
+                pat_out = malloc(pbytes);
+                if (pat_out == 0) {
+                    printf("[11] output pre-fill malloc failed -- "
+                           "post-submit diff will be blind\n");
+                } else {
+                    for (wq = 0; wq + 4 <= pbytes; wq += 4) {
+                        pat_out[wq] = (unsigned char)0xEF;
+                        pat_out[wq + 1] = (unsigned char)0xBE;
+                        pat_out[wq + 2] = (unsigned char)0xAD;
+                        pat_out[wq + 3] = (unsigned char)0xDE;
+                    }
+                    rc = nvRmMemWrite((unsigned)memh_out, (void *)0,
+                                      (unsigned)pat_out, pbytes);
+                    printf("[11] output pre-fill 0xDEADBEEF: %u bytes -> "
+                           "rc=0x%x\n", pbytes, (unsigned)rc);
+                }
+            }
 
             printf("[11] desc_in=%p (h=%u w=%u fmt=0x%x type=%u stride=%u "
                    "memh=0x%x planes=%u)\n",
@@ -994,11 +1044,21 @@ round_trip_end:;
             {
                 unsigned pat_bytes = gs * gh;
                 unsigned char *outb = malloc(pat_bytes);
-                unsigned rrc;
-                int m;
+                unsigned rrc, pat_diff = 0;
+                int m, q;
                 if (outb == 0) {
                     printf("[12] output malloc failed -- nothing to read\n");
                 } else {
+                    /* async hypothesis, crutch stage: wait=<ms> before
+                       the read. Content that appears only with the
+                       delay proves asynchronous processing. */
+                    if (wait_ms != 0) {
+                        struct timespec ts;
+                        ts.tv_sec = (time_t)(wait_ms / 1000);
+                        ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+                        printf("[12] waiting %u ms before read\n", wait_ms);
+                        nanosleep(&ts, 0);
+                    }
                     memset(outb, 0xEE, pat_bytes);
                     rrc = nvRmMemRead((unsigned)memh_out, (void *)0,
                                       (unsigned)outb, pat_bytes);
@@ -1007,6 +1067,17 @@ round_trip_end:;
                            pat_bytes, (unsigned)rrc);
                     print_first_words("[12] output-after-submit first words",
                                       outb, 8);
+                    if (pat_out != 0) {
+                        for (q = 0; q < (int)pat_bytes; q++)
+                            if (outb[q] != pat_out[q])
+                                pat_diff++;
+                        printf("[12] post-submit: %u of %u bytes differ "
+                               "from the 0xDEADBEEF pattern (%s)\n",
+                               pat_diff, pat_bytes,
+                               pat_diff == 0 ? "ISP did not touch it" :
+                               pat_diff == pat_bytes ? "fully written" :
+                               "partially written -- processing started");
+                    }
                     for (m = 0; m < 8; m++)
                         printf(" %08x",
                                (unsigned)outb[m * 4] |

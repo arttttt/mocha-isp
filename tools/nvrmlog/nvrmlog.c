@@ -150,3 +150,68 @@ int NvRmMemHandleFree(unsigned a1)
     printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
     return rc;
 }
+
+/*
+ * Stream-path functions: if Begin/End/Flush fire during OUR submission,
+ * the pushbuffer was formed and handed to hardware -- meaning format
+ * and geometry passed and a nonzero rc from ProcessFrame is NOT a
+ * rejection. Generic four-word print, forwarded as-is; arity
+ * unestablished, extra registers are harmless on AAPCS.
+ */
+typedef int (*Any4_fn)(unsigned, unsigned, unsigned, unsigned);
+
+static int nvrmlog_4(const char *name, const char *tag,
+                     unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    static void *cache[8];
+    static const char *names[8];
+    int (*fn)(unsigned, unsigned, unsigned, unsigned);
+    int i, rc;
+
+    for (i = 0; i < 8; i++) {
+        if (names[i] == 0) {
+            names[i] = name;
+            cache[i] = 0;
+        }
+        if (names[i] == name)
+            break;
+    }
+    fn = (Any4_fn)resolve_real(name, (void **)&cache[i < 8 ? i : 0]);
+
+    printf("[nvrmlog] %s a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
+           tag, a1, a2, a3, a4);
+    if (fn == 0) {
+        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
+        return 0xb;
+    }
+    rc = fn(a1, a2, a3, a4);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
+}
+
+int NvRmStreamBegin(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmStreamBegin", "StreamBegin", a1, a2, a3, a4);
+}
+
+int NvRmStreamEnd(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmStreamEnd", "StreamEnd", a1, a2, a3, a4);
+}
+
+int NvRmStreamFlush(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmStreamFlush", "StreamFlush", a1, a2, a3, a4);
+}
+
+int NvRmChannelSyncPointWaitTimeout(unsigned a1, unsigned a2,
+                                    unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmChannelSyncPointWaitTimeout",
+                     "SyncPointWaitTimeout", a1, a2, a3, a4);
+}
+
+int NvRmFenceWait(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    return nvrmlog_4("NvRmFenceWait", "FenceWait", a1, a2, a3, a4);
+}

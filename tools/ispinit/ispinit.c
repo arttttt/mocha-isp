@@ -208,24 +208,15 @@ static void *stage_pre(unsigned slot, unsigned *saved)
 {
     printf("[stage %u] enter r0=0x%x r1=0x%x r2=0x%x r3=0x%x\n",
            slot, saved[0], saved[1], saved[2], saved[3]);
+    saved[4] = (unsigned)stage_cont; /* the hook reads it into lr */
     return (void *)stage_hook_orig[slot];
 }
 
-/* the shared continuation: the original returned here with its code
-   in r0; print it and return to the parked caller lr. A pure-asm
-   symbol -- a naked C function would define the same label twice. */
-__asm__(
-    ".text\n"
-    ".thumb\n"
-    ".thumb_func\n"
-    ".hidden stage_cont\n"
-    "stage_cont:\n"
-    "  push {r0, r1}\n"
-    "  bl   stage_post\n"
-    "  ldr  r0, [sp]\n"
-    "  add  sp, #8\n"
-    "  ldr  r1, [sp, #-4]\n"
-    "  bx   r1\n");
+/* the shared continuation: a pure-asm symbol (defined nowhere in C),
+   its address is handed to the hook by stage_pre through saved[4] --
+   the C-side reference keeps the relocation in compiler territory,
+   which the 4.9 linker accepts, unlike hand-written movw/movt. */
+extern __attribute__((visibility("hidden"))) void stage_cont(void);
 
 __attribute__((used, noinline))
 static void stage_post(unsigned rc)
@@ -1518,11 +1509,12 @@ round_trip_end:;
  * Entry: sp = S (8-aligned), args r0-r3, the library's own stack args
  * at [S..] -- untouched by us. Frame after push {r0-r3, r12, lr}
  * (24 bytes): sp+0..12 = r0..r3, sp+16 = scratch, sp+20 = caller lr.
- * stage_pre prints and returns the original; caller lr parks in the
- * scratch slot; the continuation goes into lr via movw/movt (no
- * literal pool); args reload from the frame; sp returns to S; bx
- * calls the original. stage_cont prints the return code and returns
- * to the parked lr, leaving sp = S.
+ * stage_pre prints and returns the original, and writes the
+ * continuation address into saved[4] (the frame's r12 slot). Args
+ * reload from the frame, sp returns to S (the library's stack args
+ * stay valid), and bx calls the original. stage_cont -- entered with
+ * sp = S, the parked caller lr at S-4 -- prints the return code and
+ * returns to the parked lr, leaving sp = S.
  */
 #ifndef HOST_ARGTEST
 __asm__(
@@ -1542,10 +1534,7 @@ __asm__(
         "  add  r1, sp, #0\n" \
         "  bl   stage_pre\n" \
         "  mov  r12, r0\n" \
-        "  ldr  r0, [sp, #20]\n" \
-        "  str  r0, [sp, #16]\n" \
-        "  movw lr, #:lower16:stage_cont\n" \
-        "  movt lr, #:upper16:stage_cont\n" \
+        "  ldr  lr, [sp, #16]\n" \
         "  ldr  r0, [sp, #0]\n" \
         "  ldr  r1, [sp, #4]\n" \
         "  ldr  r2, [sp, #8]\n" \

@@ -526,11 +526,30 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * mediaserver's address space.
      */
     if ((idx == SHIM_IDX_HWSATTR || idx == SHIM_IDX_SETSTATS) &&
-        saved[3] != 0 && saved[6] != 0) {
-        unsigned size = *(const unsigned *)saved[6];
-        unsigned words = size / 4;
+        saved[3] != 0) {
+        unsigned size;
+        unsigned words;
         unsigned q;
 
+        if (idx == SHIM_IDX_HWSATTR) {
+            /* the size POINTER travels in the caller's first stack
+               word (saved[6]) -- read through it */
+            size = (saved[6] != 0) ? *(const unsigned *)saved[6] : 0;
+        } else {
+            /* SetStats: where the size lives is UNESTABLISHED (the
+               stack word saved[6] did not hold it in the captures).
+               Use the known per-type sizes instead, marked as such. */
+            unsigned t = saved[1];
+            size = (t == 1) ? 0x20 : (t == 2) ? 0x68
+                 : (t == 3) ? 0x24 : (t == 4) ? 0x48 : 0;
+        }
+        if (size == 0) {
+            p = " stats: size unavailable -- content skipped";
+            while (*p) *w++ = *p++;
+            *w = 0;
+            return hook_real_cache[idx];
+        }
+        words = size / 4;
         if (words > 34)
             words = 34; /* the largest known block is 136 bytes */
         p = (idx == SHIM_IDX_HWSATTR) ? " hwsa id=" : " stats id=";

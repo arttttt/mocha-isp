@@ -616,7 +616,7 @@ static void print_obj_state(const char *tag, unsigned hIsp)
                 changed = 1;
             }
         if (changed == 0)
-            printf(" | changed: NO -- memcmp no-op, rc=0 says nothing");
+            printf(" | no changes in the observed area");
     } else {
         printf(" | first sample");
     }

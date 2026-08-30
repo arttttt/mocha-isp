@@ -40,6 +40,24 @@ The fourteen: `NvIspOpen`, `NvIspClose`, `NvIspProcessFrame`,
 `NvIspHwSettingsSetAttribute`, `NvIspHwSettingsApply`,
 `NvIspSetConfiguration`, `NvIspGetStats`, `NvIspSetStats`.
 
+Stage 2 is done. Every slot enters a hook that logs the arguments, with a
+budget of four calls per binding so the per-frame traffic cannot drown the
+log. The init sequence, read off a running device:
+
+```
+NvIspOpen              r1 = 1, then 2      two instances
+NvIspSetConfiguration  r1 = 1, then 2      always as a pair, per instance
+NvIspGetStatus         r1 = 6              the only status id the library serves
+NvIspSetAttribute      r1 = 4              the only attribute id it serves
+```
+
+Two things this measurement settled that reading alone had not. The whole
+group of fourteen per-frame settings is re-applied every 33 ms -- a full
+rebuild per frame, not a one-time configuration. And the registers beyond a
+function's real arity hold the caller's leftovers, not arguments: in one
+line a value sat four bytes from a neighbouring call's leftover, close
+enough to read as data. Arity first, then the registers.
+
 ## Why not a memory dump
 
 We tried. The settings live on the heap, are computed at runtime, and the

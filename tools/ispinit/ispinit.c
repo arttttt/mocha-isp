@@ -91,6 +91,8 @@ typedef int (*NvRmMemReadStrided_fn)(unsigned handle, void *bufPtr,
                                      unsigned bufStride, unsigned offset,
                                      unsigned memStride, unsigned widthBytes,
                                      unsigned numRows, unsigned x8);
+typedef int (*NvRmMemRW_fn)(unsigned handle, void *ptr, unsigned a3,
+                            unsigned a4);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
 typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
@@ -126,6 +128,8 @@ int main(int argc, char **argv)
     NvRmMemHandleAllocAttr_fn nvRmMemHandleAllocAttr;
     NvRmMemWriteStrided_fn nvRmMemWriteStrided;
     NvRmMemReadStrided_fn nvRmMemReadStrided;
+    NvRmMemRW_fn nvRmMemWrite;
+    NvRmMemRW_fn nvRmMemRead;
     NvIspOpen_fn nvIspOpen;
     NvIspSetConfiguration_fn nvIspSetConfiguration;
     NvIspProcessFrame_fn nvIspProcessFrame;
@@ -149,6 +153,9 @@ int main(int argc, char **argv)
     unsigned rt_wb = 0, rt_nr = 0;        /* 0 = follow w*h and h */
     unsigned rt_off = 0;                  /* offset into the nvmap buffer */
     unsigned rt_x8 = 0;                   /* 0 = auto: memStride*numRows */
+    int rt_simple = 0;                    /* rt=simple: plain Write/Read */
+    unsigned rt_size = 0;                 /* simple-mode byte count */
+    char rt_order[5] = "hpos";            /* simple-mode argument order */
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     int aux_on[3] = {1, 1, 1}; /* slots +18, +1c, +20 */
@@ -214,6 +221,8 @@ int main(int argc, char **argv)
             unsigned *dst = 0;
             if (strcmp(rest, "on") == 0) { rt_on = 1; continue; }
             if (strcmp(rest, "off") == 0) { rt_on = 0; continue; }
+            if (strcmp(rest, "simple") == 0) { rt_simple = 1; continue; }
+            if (strcmp(rest, "strided") == 0) { rt_simple = 0; continue; }
             colon = strchr(rest, ':');
             if (colon == 0) {
                 printf("[0] bad rt '%s', use rt=on|off or rt=<key>:<val>\n",
@@ -226,6 +235,21 @@ int main(int argc, char **argv)
                 printf("[0] bad rt value in '%s'\n", argv[ai]);
                 return 1;
             }
+            if (strncmp(rest, "order:", 6) == 0) {
+                /* simple-mode argument order, a permutation of hpos:
+                   h=handle p=ptr o=offset s=size */
+                const char *o = rest + 6;
+                if (strlen(o) != 4 || strspn(o, "hpos") != 4 ||
+                    o[0] == o[1] || o[0] == o[2] || o[0] == o[3] ||
+                    o[1] == o[2] || o[1] == o[3] || o[2] == o[3]) {
+                    printf("[0] bad rt order '%s', permutation of hpos\n",
+                           o);
+                    return 1;
+                }
+                memcpy(rt_order, o, 5);
+                continue;
+            }
+            if (strcmp(rest, "size") == 0) dst = &rt_size;
             if (strcmp(rest, "w") == 0) dst = &rt_w;
             else if (strcmp(rest, "h") == 0) dst = &rt_h;
             else if (strcmp(rest, "bs") == 0) dst = &rt_bs;
@@ -407,6 +431,8 @@ int main(int argc, char **argv)
         (NvRmMemWriteStrided_fn)dlsym(nvrm, "NvRmMemWriteStrided");
     nvRmMemReadStrided =
         (NvRmMemReadStrided_fn)dlsym(nvrm, "NvRmMemReadStrided");
+    nvRmMemWrite = (NvRmMemRW_fn)dlsym(nvrm, "NvRmMemWrite");
+    nvRmMemRead = (NvRmMemRW_fn)dlsym(nvrm, "NvRmMemRead");
     nvIspOpen = (NvIspOpen_fn)dlsym(nvisp, "NvIspOpen");
     nvIspSetConfiguration =
         (NvIspSetConfiguration_fn)dlsym(nvisp, "NvIspSetConfiguration");
@@ -464,6 +490,7 @@ int main(int argc, char **argv)
         unsigned x8 = rt_x8 ? rt_x8 : rt_ms * nr;
         unsigned region = rt_ms * nr;
         unsigned bad = 0, first_bad = 0xffffffffu;
+        unsigned cmp_region;
         int k;
 
         if (rt_wb == 0 && wb > rt_bs)
@@ -472,9 +499,11 @@ int main(int argc, char **argv)
             if (attr_set[k])
                 attrs_rt[k] = attr_val[k];
 
-        printf("[5] round trip: w=%u h=%u bs=0x%x ms=0x%x wb=%u nr=%u "
-               "off=0x%x x8=0x%x\n",
-               rt_w, rt_h, rt_bs, rt_ms, wb, nr, rt_off, x8);
+        printf("[5] round trip (%s): w=%u h=%u bs=0x%x ms=0x%x wb=%u "
+               "nr=%u off=0x%x x8=0x%x size=%u order=%s\n",
+               rt_simple ? "simple" : "strided",
+               rt_w, rt_h, rt_bs, rt_ms, wb, nr, rt_off, x8,
+               rt_size ? rt_size : region, rt_order);
 
         if (nvRmMemWriteStrided == 0 || nvRmMemReadStrided == 0) {
             printf("[5] Strided symbols missing -- round trip skipped\n");
@@ -494,16 +523,54 @@ int main(int argc, char **argv)
                 printf("[5] pattern: bayer_fill(%s) checksum=0x%x\n",
                        order_names[order], sum);
 
-                rc = nvRmMemWriteStrided((unsigned)memh_rt, stage, rt_bs,
-                                         rt_off, rt_ms, wb, nr, x8);
-                printf("[5] NvRmMemWriteStrided -> rc=0x%x\n", (unsigned)rc);
+                if (rt_simple) {
+                    /* plain Write/Read, four arguments; the order of
+                       ptr/offset/size is not certain, so it is a CLI
+                       permutation: rt=order:hpos etc. */
+                    unsigned aw[4], ar[4], m;
+                    if (nvRmMemWrite == 0 || nvRmMemRead == 0) {
+                        printf("[5] NvRmMemWrite/Read symbols missing -- "
+                               "simple mode unavailable\n");
+                        free(stage);
+                        free(back);
+                        goto round_trip_end;
+                    }
+                    for (m = 0; m < 4; m++) {
+                        if (rt_order[m] == 'h') aw[m] = (unsigned)memh_rt;
+                        else if (rt_order[m] == 'p') aw[m] = (unsigned)stage;
+                        else if (rt_order[m] == 'o') aw[m] = rt_off;
+                        else aw[m] = rt_size ? rt_size : region;
+                    }
+                    rc = nvRmMemWrite(aw[0], (void *)aw[1], aw[2], aw[3]);
+                    printf("[5] NvRmMemWrite(%s) -> rc=0x%x\n", rt_order,
+                           (unsigned)rc);
 
-                memset(back, 0xEE, region);
-                rc = nvRmMemReadStrided((unsigned)memh_rt, back, rt_bs,
-                                        rt_off, rt_ms, wb, nr, x8);
-                printf("[5] NvRmMemReadStrided -> rc=0x%x\n", (unsigned)rc);
+                    memset(back, 0xEE, region);
+                    for (m = 0; m < 4; m++) {
+                        if (rt_order[m] == 'h') ar[m] = (unsigned)memh_rt;
+                        else if (rt_order[m] == 'p') ar[m] = (unsigned)back;
+                        else if (rt_order[m] == 'o') ar[m] = rt_off;
+                        else ar[m] = rt_size ? rt_size : region;
+                    }
+                    rc = nvRmMemRead(ar[0], (void *)ar[1], ar[2], ar[3]);
+                    printf("[5] NvRmMemRead(%s) -> rc=0x%x\n", rt_order,
+                           (unsigned)rc);
+                } else {
+                    rc = nvRmMemWriteStrided((unsigned)memh_rt, stage,
+                                             rt_bs, rt_off, rt_ms, wb, nr,
+                                             x8);
+                    printf("[5] NvRmMemWriteStrided -> rc=0x%x\n",
+                           (unsigned)rc);
 
-                for (k = 0; k < (int)region; k++) {
+                    memset(back, 0xEE, region);
+                    rc = nvRmMemReadStrided((unsigned)memh_rt, back, rt_bs,
+                                            rt_off, rt_ms, wb, nr, x8);
+                    printf("[5] NvRmMemReadStrided -> rc=0x%x\n",
+                           (unsigned)rc);
+                }
+
+                cmp_region = rt_simple && rt_size ? rt_size : region;
+                for (k = 0; k < (int)cmp_region; k++) {
                     if (stage[k] != back[k]) {
                         bad++;
                         if (first_bad == 0xffffffffu)
@@ -537,17 +604,18 @@ int main(int argc, char **argv)
 
                 if (bad == 0) {
                     printf("[5] ROUND TRIP PASSED: %u bytes identical\n",
-                           region);
+                           cmp_region);
                 } else {
                     printf("[5] ROUND TRIP FAILED: %u of %u bytes differ, "
                            "first at byte 0x%x (row %u, col %u)\n",
-                           bad, region, first_bad,
+                           bad, cmp_region, first_bad,
                            first_bad / rt_ms, (first_bad % rt_ms) / 4);
                 }
             }
         }
     }
 
+round_trip_end:;
     /* [5] open instance 1. On failure the library cleans up after
        itself; we release nothing here, that would be a double free. */
     printf("[5] NvIspOpen(dev=%p, instance=1, &hIsp) -> ", dev);

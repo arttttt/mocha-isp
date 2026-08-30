@@ -74,6 +74,14 @@ check "a0c=0:5 a04=1:7" 1 4194303 rggb aux=04:on aux=08:on a04=1:7 a0c=0:5
 check "aux=0c:off (already off)" 1 4194303 rggb aux=0c:off
 check "aux=33:unknown slot rejected" 0 4194303 rggb aux=33:on
 
+echo "-- configuration words (cfg=/cfg2=)"
+check "cfg=0:2"                1 4194303 rggb cfg=0:2
+check "cfg=15:0xd"             1 4194303 rggb cfg=15:0xd
+check "cfg multiple"           1 4194303 rggb cfg=0:2 cfg=3:5
+check "cfg2:5"                 1 4194303 rggb cfg2:5
+check "cfg=16:1 rejected"      0 4194303 rggb cfg=16:1
+check "cfg junk rejected"      0 4194303 rggb cfg=junk
+
 echo "-- descriptor overrides (din/dout)"
 check "din=2:0x10992007"       1 4194303 rggb din=2:0x10992007
 check "dout=9:2"               1 4194303 rggb dout=9:2

@@ -192,6 +192,10 @@ int main(int argc, char **argv)
     unsigned aux_val[7][44];
     unsigned char aux_set[7][44] = {{0}};
     unsigned char aux_isptr[7][44] = {{0}}; /* value was 'ptr' */
+    unsigned cfg_val[16];                 /* cfg=<idx>:<val> overrides */
+    unsigned char cfg_set[16] = {{0}};
+    unsigned cfg2_val = cfg_mode2;        /* mode-2 word, stock value */
+    int cfg2_set = 0;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
     unsigned char din_set[44] = {{0}};
     unsigned char dout_set[44] = {{0}};
@@ -366,6 +370,48 @@ int main(int argc, char **argv)
                 return 1;
             }
             wait_ms = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "cfg2=", 5) == 0) {
+            /* cfg2=<val> -- the single mode-2 configuration word
+               (stock sends 2) */
+            char *e5 = 0;
+            long v = strtol(tok + 5, &e5, 0);
+            if (e5 == tok + 5 || *e5 != '\0' || v < 0) {
+                printf("[0] bad cfg2 '%s', use cfg2=<val>\n", argv[ai]);
+                return 1;
+            }
+            cfg2_val = (unsigned)v;
+            cfg2_set = 1;
+            continue;
+        }
+        if (strncmp(tok, "cfg=", 4) == 0) {
+            /* cfg=<idx>:<val> -- override one of the sixteen mode-1
+               configuration words; defaults are the stock words
+               (1,7,9,a,3,0,6,8,11,f,c,e,b,0,10,d). impl-2 read word 0
+               from {0,1,2}: possibly the frame SOURCE for the session
+               -- the stock only walks the sensor path, and our
+               memory-mode submission may need a different value. */
+            char *colon;
+            long idx, val;
+            colon = strchr(tok + 4, ':');
+            if (colon == 0) {
+                printf("[0] bad cfg '%s', use cfg=<idx>:<val>\n", argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            idx = strtol(tok + 4, &e1, 0);
+            if (e1 == tok + 4 || *e1 != '\0' || idx < 0 || idx > 15) {
+                printf("[0] bad cfg index in '%s'\n", argv[ai]);
+                return 1;
+            }
+            val = strtol(colon + 1, &e2, 0);
+            if (e2 == colon + 1 || *e2 != '\0' || val < 0) {
+                printf("[0] bad cfg value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            cfg_val[idx] = (unsigned)val;
+            cfg_set[idx] = 1;
             continue;
         }
         if (strncmp(tok, "din=", 4) == 0 || strncmp(tok, "dout=", 5) == 0) {
@@ -734,21 +780,33 @@ round_trip_end:;
     if (rc != 0)
         return 1;
 
-    /* [6] configure, mode 1: the stock's sixteen selector words, size 64
-       in. The size AFTER the call matters: rc 10 means the library
-       disagreed and wrote the size it wants -- the fix-and-retry
-       mechanism. We print what it said instead of guessing. */
-    size = 64;
-    printf("[6] NvIspSetConfiguration(hIsp=0x%x, mode=1, cfg16, &size=64) "
-           "-> ", hIsp);
-    rc = nvIspSetConfiguration(hIsp, 1, cfg_mode1, &size);
-    printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
+    /* [6] configure, mode 1: the stock's sixteen selector words
+       (CLI-overridable, cfg=), size 64 in. The size AFTER the call
+       matters: rc 10 means the library disagreed and wrote the size it
+       wants -- the fix-and-retry mechanism. We print what it said
+       instead of guessing. */
+    {
+        unsigned cfgw[16];
+        int k;
+        for (k = 0; k < 16; k++)
+            cfgw[k] = cfg_set[k] ? cfg_val[k] : cfg_mode1[k];
+        printf("[6] cfg words:");
+        for (k = 0; k < 16; k++)
+            printf(" [%d]=0x%x%s", k, cfgw[k], cfg_set[k] ? "*" : "");
+        printf("\n");
+        size = 64;
+        printf("[6] NvIspSetConfiguration(hIsp=0x%x, mode=1, cfg16, "
+               "&size=64) -> ", hIsp);
+        rc = nvIspSetConfiguration(hIsp, 1, cfgw, &size);
+        printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
+    }
 
-    /* [7] configure, mode 2: the single word 2, size 4 in */
+    /* [7] configure, mode 2: the single word (stock 2, cfg2= to
+       override), size 4 in */
     size = 4;
-    printf("[7] NvIspSetConfiguration(hIsp=0x%x, mode=2, &cfg_mode2, "
-           "&size=4) -> ", hIsp);
-    rc = nvIspSetConfiguration(hIsp, 2, &cfg_mode2, &size);
+    printf("[7] NvIspSetConfiguration(hIsp=0x%x, mode=2, cfg2=0x%x%s, "
+           "&size=4) -> ", hIsp, cfg2_val, cfg2_set ? "*" : "");
+    rc = nvIspSetConfiguration(hIsp, 2, &cfg2_val, &size);
     printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
 
     /* [8] set the requested rate: the zero cache would answer the next

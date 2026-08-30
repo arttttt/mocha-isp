@@ -154,6 +154,35 @@ produces one candidate and no way to tell whether it is right; five such
 candidates in a row were wrong, and each was refuted by hardware in a single
 run.
 
+### Where the submission stands
+
+`NvIspProcessFrame` in memory mode is reached, validated, and refused. The
+path so far, each step a removed obstacle:
+
+| | |
+|---|---|
+| crash inside the library | a stack slot the library dereferences was null |
+| `rc=4` | a required pointer was missing |
+| `rc=2` | the layout is accepted; a value is not |
+
+The slot that crashed us is worth recording: stack offset `+0x08`, which the
+stock fills with `3280` -- the sensor width. We read that as "a number, so
+the slot is unused", and it is a pointer in memory mode. One position, two
+meanings depending on the mode, and the stock only ever exercises one of
+them. Watching the working system cannot show you the half it never runs.
+
+What `rc=2` is not: not the format (every Bayer code and the dummy's own
+give the same answer, and the dummy's is in the accepted pool), not the
+memory type, not the geometry (that refuses with `0xa`), not the fence
+count, not a sync-slot number mistaken for an error -- an interceptor on
+`NvRmStreamBegin`/`End`/`Flush` shows the push buffer is never built, and
+the output buffer, pre-filled with `0xDEADBEEF`, is untouched a full second
+later.
+
+So the refusal happens early, before any call into `libnvrm` at all. That
+narrows it to validation, and it means nothing about command building,
+relocations or memory can be the cause.
+
 The stock stack never uses it. The hook was changed to log any call whose
 mode is not 2 outside the budget, and the camera was driven through preview,
 three full-resolution stills and a video: three JPEGs written, and four

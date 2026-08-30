@@ -336,15 +336,21 @@ src_dir = sys.argv[1]
 src = open(os.path.join(src_dir, 'nvisp_shim.c')).read()
 hdr = open(os.path.join(src_dir, 'gen_passthrough.h')).read()
 
-name = re.search(r'#define\s+SHIM_DEREF_BINDING\s+"([A-Za-z0-9_]+)"', src)
-idx = re.search(r'#define\s+SHIM_DEREF_IDX\s+(\d+)', src)
+# Pairs may be plain (SHIM_DEREF_BINDING / SHIM_DEREF_IDX) or suffixed
+# (SHIM_DEREF_BINDING_LSC / SHIM_DEREF_IDX_LSC) when several are declared.
+names = dict(re.findall(r'#define\s+SHIM_DEREF_BINDING(\w*)\s+"([A-Za-z0-9_]+)"', src))
+idxs = dict(re.findall(r'#define\s+SHIM_DEREF_IDX(\w*)\s+(\d+)', src))
 
-if not name and not idx:
+if not names and not idxs:
     print("   no dereference declared -- skipped")
     sys.exit(0)
-if not (name and idx):
-    print("\nFAIL: a dereference must declare BOTH SHIM_DEREF_BINDING and")
-    print("      SHIM_DEREF_IDX. One without the other cannot be checked.")
+unpaired = set(names) ^ set(idxs)
+if unpaired:
+    for u in sorted(unpaired):
+        print(f"   unpaired declaration: suffix '{u}'")
+    print("\nFAIL: every dereference must declare BOTH a binding name and an")
+    print("      index, with matching suffixes. One without the other cannot")
+    print("      be checked.")
     sys.exit(1)
 
 order = []
@@ -352,19 +358,26 @@ for m in re.finditer(r'shim_slot_([A-Za-z0-9_]+):', hdr):
     if m.group(1) not in order:
         order.append(m.group(1))
 
-want, i = name.group(1), int(idx.group(1))
-print(f"   declared: {want} at index {i}")
-if i >= len(order):
-    print(f"\nFAIL: index {i} is past the end of the {len(order)}-entry table.")
+bad = False
+for suffix in sorted(names):
+    want, i = names[suffix], int(idxs[suffix])
+    if i >= len(order):
+        print(f"   {want}: index {i} is past the end of the "
+              f"{len(order)}-entry table")
+        bad = True
+        continue
+    if order[i] != want:
+        here = order.index(want) if want in order else '(absent)'
+        print(f"   {want} declared at index {i}, but {i} is {order[i]}; "
+              f"{want} is at {here}")
+        bad = True
+        continue
+    print(f"   {want} at index {i} -- they agree")
+if bad:
+    print("\nFAIL: a dereference is aimed at a different binding than it")
+    print("      names. A register that is a pointer in one binding is an")
+    print("      index in another; reading it there takes address 0 or 1.")
     sys.exit(1)
-if order[i] != want:
-    print(f"   index {i} is actually {order[i]}")
-    print(f"   {want} is at index {order.index(want) if want in order else '(absent)'}")
-    print(f"\nFAIL: the dereference is aimed at {order[i]}, not at {want}.")
-    print("      A register that is a pointer in one binding is an index in")
-    print("      another; reading it there takes address 0 or 1.")
-    sys.exit(1)
-print(f"   index {i} is {order[i]} -- they agree")
 PY
 DEREF=$?
 [ "$DEREF" = 0 ] || exit 1

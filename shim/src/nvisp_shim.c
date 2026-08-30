@@ -92,8 +92,15 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
  * cheaply rather than believe it, a call with r1 != 2 bypasses the
  * budget and logs whatever the frame count is -- capped at 20 lines
  * per process so an unexpected stream cannot flood logcat.
+ * On every logged call we also dump 13 words of the caller's stack
+ * starting at the caller's original sp (saved[6]), each with its
+ * offset in the line: the library reads five of them (+0x10..+0x20 in
+ * the caller's frame, prologue delta 0x48), and the offsets in print
+ * make a numbering shift impossible. The words are NOT dereferenced --
+ * the stack is ours, we do not follow them further.
  */
-#define SHIM_IDX_PROCESSFRAME  5
+#define SHIM_DEREF_BINDING_PF "NvIspProcessFrame"
+#define SHIM_DEREF_IDX_PF     5
 static unsigned pf_odd_logged;
 
 /*
@@ -331,7 +338,7 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * but at most 20 times per process.
      */
     if (shim_budget[idx] >= 4) {
-        int bypass = (idx == SHIM_IDX_PROCESSFRAME && saved[1] != 2 &&
+        int bypass = (idx == SHIM_DEREF_IDX_PF && saved[1] != 2 &&
                       pf_odd_logged < 20);
         if (!bypass)
             return hook_real_cache[idx];
@@ -378,7 +385,6 @@ void *shim_log_call(unsigned idx, unsigned *saved)
            this code once did) makes "was 0, we set 1" indistinguishable
            from "was 1, untouched" -- the print must precede the action. */
         unsigned v = *(const unsigned *)saved[2];
-        unsigned as_read = v;
         int wrote = 0;
 
         /*
@@ -434,11 +440,34 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     while (*p) *w++ = *p++;
     for (i = 28; i >= 0; i -= 4)
         *w++ = hexdig[(saved[3] >> i) & 0xf];
-    /* stack candidate: saved[6] = original sp + 4 (the 5th arg if present) */
+    /* stack candidate: saved[6] = the caller's original sp */
     p = " sp0=0x";
     while (*p) *w++ = *p++;
     for (i = 28; i >= 0; i -= 4)
         *w++ = hexdig[(saved[6] >> i) & 0xf];
+    /*
+     * Caller-stack dump, ProcessFrame only: 13 words from the caller's
+     * original sp, each printed with its offset so a numbering shift
+     * cannot hide inside the list. Nothing dereferenced: the stack is
+     * ours and valid, we stop after reading the words themselves.
+     */
+    if (idx == SHIM_DEREF_IDX_PF) {
+        int k;
+        p = " stack=";
+        while (*p) *w++ = *p++;
+        for (k = 0; k < 13; k++) {
+            unsigned word = saved[6 + k];
+            unsigned off = (unsigned)k * 4;
+            if (k != 0)
+                *w++ = ',';
+            *w++ = '+';
+            *w++ = hexdig[(off >> 4) & 0xf];
+            *w++ = hexdig[off & 0xf];
+            *w++ = ':';
+            for (i = 28; i >= 0; i -= 4)
+                *w++ = hexdig[(word >> i) & 0xf];
+        }
+    }
     *w = 0;
 
     shim_log(SHIM_LOG_PRIO_INFO, msg);

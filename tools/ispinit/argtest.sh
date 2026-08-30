@@ -162,6 +162,13 @@ check "objout=on"              1 4194303 rggb objout=on
 check "objout=0xdead"          1 4194303 rggb objout=0xdead
 check "objout junk rejected"   0 4194303 rggb objout=junk
 
+echo "-- stock object clone (objload=/objlen=)"
+check "objload=path"           1 4194303 rggb objload=/data/local/tmp/stock_obj.bin
+check "objlen=512"             1 4194303 rggb objload=/data/local/tmp/stock_obj.bin objlen=512
+check "objlen=0x40 low bound"  1 4194303 rggb objlen=0x40
+check "objlen=0 rejected"      0 4194303 rggb objlen=0
+check "objlen huge rejected"   0 4194303 rggb objlen=0x8000
+
 echo "-- settings-handle source (hset=)"
 check "hset=p1"                1 4194303 rggb hset=p1
 check "hset=p2a"               1 4194303 rggb hset=p2a

@@ -727,6 +727,12 @@ int main(int argc, char **argv)
     int objout_on = 0;
     int objout_manual = 0;
     unsigned objout_val = 0;
+    /* objload=<path>: clone the stock gate object from a file captured
+       by objread, into OUR object after Open (the object lives in our
+       own address space, plain memcpy). objlen caps the write. */
+    int objload_on = 0;
+    const char *objload_path = "/data/local/tmp/stock_obj.bin";
+    unsigned objlen = 0x1000; /* start small; 0x4000 is the full dump */
     unsigned final_s = 0;   /* final=<sec>: settle-wait, then re-read
                                syncpoints -- timeouts land late */
 
@@ -1381,6 +1387,22 @@ int main(int argc, char **argv)
             retry_n = (unsigned)v;
             continue;
         }
+        if (strncmp(tok, "objload=", 8) == 0) {
+            objload_path = tok + 8;
+            objload_on = 1;
+            continue;
+        }
+        if (strncmp(tok, "objlen=", 7) == 0) {
+            char *e23 = 0;
+            long v = strtol(tok + 7, &e23, 0);
+            if (e23 == tok + 7 || *e23 != '\0' || v < 0x40 || v > 0x4000) {
+                printf("[0] bad objlen '%s', use 0x40..0x4000 bytes\n",
+                       argv[ai]);
+                return 1;
+            }
+            objlen = (unsigned)v;
+            continue;
+        }
         if (strncmp(tok, "objout=", 7) == 0) {
             /* objout=on -- write the output nvmap handle into the
                frame-record relocation field; objout=<hex> -- write an
@@ -1877,6 +1899,39 @@ round_trip_end:;
         sp_fd = open("/dev/nvhost-ctrl", O_RDONLY);
     printf("[5c] /dev/nvhost-ctrl fd=%d\n", sp_fd);
     print_syncpts("[5c] syncpoints at open", 0);
+
+    /* [5d] clone the stock gate object into ours, from the file the
+       external objread captured. The object lives in OUR address
+       space (hIsp is ours), so this is a plain read+memcpy -- no
+       /proc tricks. The frame counter inside is copied too: it
+       CONTINUES from the stock's value by design, do not reset it. */
+    if (objload_on && hIsp != 0) {
+        unsigned objp = *(unsigned *)((unsigned)hIsp + 0x1318);
+        FILE *f;
+        if (objp == 0) {
+            printf("[5d] objload: [hIsp+0x1318] is null -- skipped\n");
+        } else {
+            f = fopen(objload_path, "rb");
+            if (f == 0) {
+                printf("[5d] objload: cannot open %s -- skipped\n",
+                       objload_path);
+            } else {
+                unsigned n = fread((void *)objp, 1, objlen, f);
+                fclose(f);
+                printf("[5d] objload: %u bytes -> obj@0x%x from %s\n",
+                       n, objp, objload_path);
+                printf("[5d] obj[0]=0x%x\n", *(unsigned *)objp);
+                {
+                    int i3;
+                    printf("[5d] obj+0x1660:");
+                    for (i3 = 0; i3 < 16; i3++)
+                        printf(" +%x:%08x", 0x1660 + i3 * 4,
+                               *(unsigned *)(objp + 0x1660 + i3 * 4));
+                    printf("\n");
+                }
+            }
+        }
+    }
 
     /* crash isolation for the per-stage calls */
     memset(&sa, 0, sizeof(sa));

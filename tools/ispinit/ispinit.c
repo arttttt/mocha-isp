@@ -508,29 +508,123 @@ static void print_syncpts(const char *tag, unsigned *out /* may be 0 */)
     printf("\n");
 }
 
+/*
+ * Stock settings replay. The shim dump (mail-1045) writes lines
+ *   id=<block> size=<bytes> buf=<hex32 words, comma separated>
+ * to /data/local/tmp/stock_settings.txt. ispinit loads that file and,
+ * per-block key on, replays the real values instead of zeros.
+ * Stats buffers replay from the same file format (id = stats type).
+ */
+#define MAX_BLK_ID 16
+#define MAX_STAT_TYPE 4
+static unsigned blk_val[MAX_BLK_ID + 1][44], blk_size[MAX_BLK_ID + 1];
+static int blk_have[MAX_BLK_ID + 1], blk_on[MAX_BLK_ID + 1];
+static unsigned st_val[MAX_STAT_TYPE + 1][32], st_size[MAX_STAT_TYPE + 1];
+static int st_have[MAX_STAT_TYPE + 1], st_on[MAX_STAT_TYPE + 1];
+
+static const char *stock_file = "/data/local/tmp/stock_settings.txt";
+
+static void load_stock_settings(void)
+{
+    FILE *f = fopen(stock_file, "r");
+    char line[1024];
+    int blocks = 0, stats = 0;
+
+    if (f == 0) {
+        printf("stock settings file: absent -- zeros will be used\n");
+        return;
+    }
+    while (fgets(line, sizeof(line), f) != 0) {
+        unsigned id, size;
+        const char *b;
+        if (sscanf(line, "id=%u size=%u", &id, &size) != 2)
+            continue;
+        b = strstr(line, "buf=");
+        if (b == 0)
+            continue;
+        b += 4;
+        if (id <= MAX_BLK_ID) {
+            unsigned *dst = blk_val[id];
+            unsigned n = 0;
+            while (*b != '\0' && *b != '\n' && n < 44) {
+                dst[n++] = (unsigned)strtoul(b, 0, 16);
+                while (*b != ',' && *b != '\0' && *b != '\n')
+                    b++;
+                if (*b == ',')
+                    b++;
+            }
+            blk_size[id] = size;
+            blk_have[id] = 1;
+            blocks++;
+        } else if (id >= 1 && id <= MAX_STAT_TYPE) {
+            unsigned *dst = st_val[id];
+            unsigned n = 0;
+            while (*b != '\0' && *b != '\n' && n < 32) {
+                dst[n++] = (unsigned)strtoul(b, 0, 16);
+                while (*b != ',' && *b != '\0' && *b != '\n')
+                    b++;
+                if (*b == ',')
+                    b++;
+            }
+            st_size[id] = size;
+            st_have[id] = 1;
+            stats++;
+        }
+    }
+    fclose(f);
+    printf("stock settings file: %d blocks, %d stats types loaded\n",
+           blocks, stats);
+}
+
 /* the nested float table for SetStats type 4 (+0x10 field points here):
    256 words of slack, zeroed -- the real table size is unknown; the
    first run's goal is only that the +0x10 deref stops faulting */
 static unsigned stat4_floats[256];
 
 /* obj state after a SetStats step: the gate pointer, its first word,
-   and the +0x1660 window that feeds the memory-write configuration */
+   and the +0x1660 window that feeds the memory-write configuration.
+   obj[0] is a BITMASK (type1->bit0, 2->bit2, 3->bit4, 4->bit5;
+   stock 0x37 = all four loaded), and the library memcmps: rc=0 means
+   "nothing changed" as often as "accepted". The CHANGED list is the
+   real signal -- rc alone cannot tell a write from a no-op. */
+static unsigned last_obj0, last_win[16];
+static int last_valid;
+
 static void print_obj_state(const char *tag, unsigned hIsp)
 {
     unsigned g = *(unsigned *)(hIsp + 0x1318);
+    unsigned o0 = g != 0 ? *(unsigned *)g : 0;
+    unsigned win[16];
+    int i, changed = 0;
 
     if (hIsp == 0)
         return;
-    printf("%s: ctx1318=0x%x obj0=0x%x\n", tag, g,
-           g != 0 ? *(unsigned *)g : 0);
-    if (g != 0) {
-        int i;
-        printf("%s: obj+0x1660:", tag);
-        for (i = 0; i < 16; i++)
-            printf(" +%x:%08x", 0x1660 + i * 4,
-                   *(unsigned *)(g + 0x1660 + i * 4));
-        printf("\n");
+    printf("%s: ctx1318=0x%x obj0=0x%x\n", tag, g, o0);
+    printf("%s: obj+0x1660:", tag);
+    for (i = 0; i < 16; i++) {
+        win[i] = g != 0 ? *(unsigned *)(g + 0x1660 + i * 4) : 0;
+        printf(" +%x:%08x", 0x1660 + i * 4, win[i]);
     }
+    if (last_valid) {
+        if (o0 != last_obj0) {
+            printf(" | obj0 was 0x%x", last_obj0);
+            changed = 1;
+        }
+        for (i = 0; i < 16; i++)
+            if (win[i] != last_win[i]) {
+                printf(" | +%x was 0x%x", 0x1660 + i * 4, last_win[i]);
+                changed = 1;
+            }
+        if (changed == 0)
+            printf(" | changed: NO -- memcmp no-op, rc=0 says nothing");
+    } else {
+        printf(" | first sample");
+    }
+    printf("\n");
+    last_obj0 = o0;
+    for (i = 0; i < 16; i++)
+        last_win[i] = win[i];
+    last_valid = 1;
 }
 
 int main(int argc, char **argv)
@@ -1079,6 +1173,44 @@ int main(int argc, char **argv)
             final_s = (unsigned)v;
             continue;
         }
+        if (strncmp(tok, "blk=", 4) == 0 || strncmp(tok, "stat=", 5) == 0) {
+            /* blk=<id>:on|off -- replay stock values for settings block
+               <id> (needs the stock settings file on the device);
+               stat=<type>:on|off -- same for the stats buffers.
+               Default off: zeros, comparable with all previous runs. */
+            int is_stat = (tok[1] == 't');
+            char *colon;
+            char *e18 = 0;
+            long id;
+            colon = strchr(tok + (is_stat ? 5 : 4), ':');
+            if (colon == 0) {
+                printf("[0] bad %s '%s', use <id>:on|off\n",
+                       is_stat ? "stat" : "blk", argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            id = strtol(tok + (is_stat ? 5 : 4), &e18, 0);
+            if (e18 == tok + (is_stat ? 5 : 4) || *e18 != '\0' ||
+                id < 1 || id > (is_stat ? MAX_STAT_TYPE : MAX_BLK_ID)) {
+                printf("[0] bad id in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (strcmp(colon + 1, "on") == 0) {
+                if (is_stat)
+                    st_on[id] = 1;
+                else
+                    blk_on[id] = 1;
+            } else if (strcmp(colon + 1, "off") == 0) {
+                if (is_stat)
+                    st_on[id] = 0;
+                else
+                    blk_on[id] = 0;
+            } else {
+                printf("[0] bad state '%s', use on|off\n", colon + 1);
+                return 1;
+            }
+            continue;
+        }
         if (strncmp(tok, "obj0=", 5) == 0) {
             /* obj0=<val> -- manually write this value into the first
                word of the object at [hIsp+0x1318] before the submission.
@@ -1305,6 +1437,7 @@ int main(int argc, char **argv)
 #ifndef HOST_ARGTEST
     scan_modules();
 #endif
+    load_stock_settings();
 
     /*
      * [gen] Generator self-test on a HOST staging buffer: FIRST, before
@@ -1712,6 +1845,7 @@ round_trip_end:;
         };
         int q;
         for (q = 0; q < 14; q++) {
+            unsigned id = blocks[q][0];
             unsigned bufsize = 256; /* our buffer; the library corrects
                                        it via rc 10 if it wants less */
             unsigned size_out = bufsize;
@@ -1724,6 +1858,18 @@ round_trip_end:;
                 continue;
             }
             memset(zbuf, 0, bufsize);
+            /* stock replay, per-block key: real values instead of
+               zeros -- the memcmp makes zero-on-zero a silent no-op */
+            if (blk_on[id] != 0 && blk_have[id] != 0) {
+                unsigned n2;
+                for (n2 = 0; n2 < 44; n2++) {
+                    zbuf[n2 * 4] = (unsigned char)(blk_val[id][n2]);
+                    zbuf[n2 * 4 + 1] = (unsigned char)(blk_val[id][n2] >> 8);
+                    zbuf[n2 * 4 + 2] = (unsigned char)(blk_val[id][n2] >> 16);
+                    zbuf[n2 * 4 + 3] = (unsigned char)(blk_val[id][n2] >> 24);
+                }
+                size_out = blk_size[id];
+            }
             snprintf(tag, sizeof(tag), "HwSettingsSetAttribute id=%u",
                      blocks[q][0]);
             stage_now = tag;
@@ -1757,7 +1903,7 @@ round_trip_end:;
                          blocks[q][1]);
                 print_first_words(btag, (const unsigned char *)zbuf, 16);
             }
-            print_gate(tag, hIsp);
+            print_obj_state(tag, hIsp);
             free(zbuf);
             free(rbuf);
         }
@@ -1773,7 +1919,9 @@ round_trip_end:;
             {2, 0, 0x68}, {1, 0, 0x20}, {1, 1, 0x20}, {4, 0, 0x48},
         };
         int q;
+        /* stock replay, per-type key (stat=<type>:on) */
         for (q = 0; q < 4; q++) {
+            unsigned stype = stats[q][0];
             unsigned bufsize = stats[q][2];
             unsigned size_out = bufsize;
             unsigned char *zbuf = malloc(bufsize);
@@ -1784,6 +1932,20 @@ round_trip_end:;
                 continue;
             }
             memset(zbuf, 0, bufsize);
+            if (st_on[stype] != 0 && st_have[stype] != 0) {
+                unsigned n2;
+                bufsize = st_size[stype];
+                size_out = bufsize;
+                for (n2 = 0; n2 < 32; n2++) {
+                    zbuf[n2 * 4] = (unsigned char)(st_val[stype][n2]);
+                    zbuf[n2 * 4 + 1] =
+                        (unsigned char)(st_val[stype][n2] >> 8);
+                    zbuf[n2 * 4 + 2] =
+                        (unsigned char)(st_val[stype][n2] >> 16);
+                    zbuf[n2 * 4 + 3] =
+                        (unsigned char)(st_val[stype][n2] >> 24);
+                }
+            }
             stage_now = stats[q][0] == 2 ? "SetStats(type 2)"
                                          : stats[q][0] == 4 ? "SetStats(type 4)"
                                          : "SetStats(type 1)";

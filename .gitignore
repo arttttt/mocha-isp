@@ -2,3 +2,5 @@
 *.o
 build/out/
 .DS_Store
+shim/src/gen_passthrough.py
+shim/src/exports_func.tsv

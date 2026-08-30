@@ -196,7 +196,11 @@ int main(int argc, char **argv)
     unsigned char cfg_set[16] = {{0}};
     unsigned cfg2_val = cfg_mode2;        /* mode-2 word, stock value */
     int cfg2_set = 0;
+    unsigned nvisp_base;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
+    /* ctx=<off>:<count> -- ISP-context dumps, default none */
+    unsigned ctx_off[4], ctx_cnt[4];
+    int ctx_n = 0;
     unsigned char din_set[44] = {{0}};
     unsigned char dout_set[44] = {{0}};
     int rc;
@@ -355,6 +359,38 @@ int main(int argc, char **argv)
                 aux_val[which][idx] = (unsigned)val;
                 aux_set[which][idx] = 1;
             }
+            continue;
+        }
+        if (strncmp(tok, "ctx=", 4) == 0) {
+            /* ctx=<off>:<count> -- dump <count> words of the ISP
+               context from <off>; several regions allowed, up to four.
+               The context is ours, valid between Open and Close,
+               read-only. Default: no dump. */
+            char *colon;
+            char *e5 = 0;
+            long off, cnt;
+            colon = strchr(tok + 4, ':');
+            if (colon == 0) {
+                printf("[0] bad ctx '%s', use ctx=<off>:<count>\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            off = strtol(tok + 4, &e5, 0);
+            cnt = strtol(colon + 1, &e5, 0);
+            if (e5 == colon + 1 || *e5 != '\0' || off < 0 || cnt <= 0 ||
+                cnt > 256) {
+                printf("[0] bad ctx region in '%s' (count 1..256)\n",
+                       argv[ai]);
+                return 1;
+            }
+            if (ctx_n == 4) {
+                printf("[0] too many ctx regions (max 4)\n");
+                return 1;
+            }
+            ctx_off[ctx_n] = (unsigned)off;
+            ctx_cnt[ctx_n] = (unsigned)cnt;
+            ctx_n++;
             continue;
         }
         if (strncmp(tok, "wait=", 5) == 0) {
@@ -606,6 +642,16 @@ int main(int argc, char **argv)
            nvIspSetConfiguration,
            nvIspProcessFrame, nvIspSetIspClockRate, nvIspGetStatus,
            nvIspClose);
+    /*
+     * Base of libnvisp_v3: dlsym address minus the symbol's static
+     * offset (NvIspProcessFrame st_value = 0x1784 + thumb bit, per the
+     * snapshot). Table pointers read from the context translate to
+     * file offsets by subtracting this -- impl-2 gets exact addresses
+     * instead of computed ones.
+     */
+    nvisp_base = ((unsigned)nvIspProcessFrame & ~1u) - 0x1784u;
+    printf("[3] libnvisp_v3 base = 0x%x\n", nvisp_base);
+
     if (nvRmOpen == 0 || nvRmMemHandleCreate == 0 ||
         nvRmMemHandleAllocAttr == 0 || nvIspOpen == 0 ||
         nvIspSetConfiguration == 0 || nvIspProcessFrame == 0 ||

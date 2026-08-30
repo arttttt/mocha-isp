@@ -82,6 +82,13 @@ check "cfg2=5"                 1 4194303 rggb cfg2=5
 check "cfg=16:1 rejected"      0 4194303 rggb cfg=16:1
 check "cfg junk rejected"      0 4194303 rggb cfg=junk
 
+echo "-- context dumps (ctx=)"
+check "ctx=0x1200:32"          1 4194303 rggb ctx=0x1200:32
+check "ctx two regions"        1 4194303 rggb ctx=0x1200:64 ctx=0x1300:64
+check "ctx=0:1"                1 4194303 rggb ctx=0:1
+check "ctx junk rejected"      0 4194303 rggb ctx=junk
+check "ctx count 0 rejected"   0 4194303 rggb ctx=0x1200:0
+
 echo "-- descriptor overrides (din/dout)"
 check "din=2:0x10992007"       1 4194303 rggb din=2:0x10992007
 check "dout=9:2"               1 4194303 rggb dout=9:2

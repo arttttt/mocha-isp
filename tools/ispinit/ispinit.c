@@ -520,6 +520,7 @@ int main(int argc, char **argv)
     char hset_mode[8] = "p1";
     unsigned hset_manual = 0;
     /* stock init-chain steps, each toggleable: init=<name>:off */
+    int surfswap = 0;    /* surfswap=on: swap the +0x08/+0x10 surfaces */
     int st_create = 1, st_sattr = 1, st_stats = 1;
     int st_apply = 1, st_setattr = 1, st_destroy = 1;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
@@ -699,6 +700,19 @@ int main(int argc, char **argv)
                 }
                 aux_val[which][idx] = (unsigned)val;
                 aux_set[which][idx] = 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "surfswap=", 9) == 0) {
+            /* surfswap=on swaps the +0x08/+0x10 surface descriptors --
+               the reverse-interpretation test, one run, no rebuild */
+            if (strcmp(tok + 9, "on") == 0)
+                surfswap = 1;
+            else if (strcmp(tok + 9, "off") == 0)
+                surfswap = 0;
+            else {
+                printf("[0] bad surfswap '%s', use on|off\n", argv[ai]);
+                return 1;
             }
             continue;
         }
@@ -1731,7 +1745,10 @@ round_trip_end:;
         unsigned desc_out[44] = {0};
         unsigned gh, gw, gf, gt, gs, gp;
         unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
-        unsigned slot14_buf[44] = {0}; /* +0x14 in slot14=aux mode */
+        unsigned slot14_buf[44] = {0}; /* legacy, unused since the
+                                          fence-layout fix */
+        unsigned fenceA[16] = {0};  /* +0x14: fence-return slot */
+        unsigned fenceB[16] = {0};  /* +0x18: fence-return slot */
         /* pre-call snapshots for the post-call diff */
         unsigned snap_in[16], snap_out[16], snap14[16];
         unsigned snap_aux[7][16];
@@ -1792,8 +1809,8 @@ round_trip_end:;
             for (i = 0; i < 4; i++) {
                 if (n_set[i])
                     sv[i] = n_val[i];
-                else if (i == 2 && pf_mode == 1)
-                    sv[i] = (unsigned)bufs[2]; /* mode 1: geometry ptr */
+                else if (i == 2)
+                    sv[i] = 0; /* set after the descriptors are built */
                 else if (aux_on[i])
                     sv[i] = (unsigned)bufs[i];
                 else
@@ -1812,6 +1829,7 @@ round_trip_end:;
             for (i = 0; i < 7; i++)
                 for (k = 0; k < 16; k++)
                     snap_aux[i][k] = bufs[i][k];
+
         }
 
         for (k = 0; k < 8; k++) {
@@ -1920,6 +1938,14 @@ round_trip_end:;
                    "memh=0x%x planes=%u)\n",
                    desc_out, desc_out[0], desc_out[1], desc_out[2],
                    desc_out[3], desc_out[4], desc_out[5], desc_out[9]);
+
+            /* now that the descriptors exist: in mode 1 the +0x08 slot
+               is the INPUT surface descriptor (measured: stage 1 reads
+               geometry from it, stage 2 the format); in mode 2 it is a
+               number. n08= overrides both readings. */
+            if (n_set[2] == 0)
+                sv[2] = (pf_mode == 1) ? (unsigned)desc_in
+                                       : (din_set[1] ? din_val[1] : 8);
 
             /* state 1 of 3: the OUTPUT buffer as allocation handed it,
                before anything else. Same junk as after the submission
@@ -2061,14 +2087,17 @@ round_trip_end:;
                 pkt[2] = pkt3;
                 pkt[3] = sv[0];
                 pkt[4] = sv[1];
-                pkt[5] = sv[2];
+                /* measured layout: +0x08 and +0x10 are the input and
+                   output surface descriptors (library wrote fence
+                   numbers into +0x14/+0x18 and a counter into +0x1c/
+                   +0x20 -- they were never surfaces) */
+                pkt[5] = surfswap ? (unsigned)desc_out : (unsigned)desc_in;
                 pkt[6] = sv[3];
-                pkt[7] = (unsigned)desc_in;
-                pkt[8] = slot14_aux ? (unsigned)slot14_buf
-                                    : (unsigned)desc_out;
-                pkt[9] = sv[4];
-                pkt[10] = sv[5];
-                pkt[11] = sv[6];
+                pkt[7] = surfswap ? (unsigned)desc_in : (unsigned)desc_out;
+                pkt[8] = (unsigned)fenceA;
+                pkt[9] = (unsigned)fenceB;
+                pkt[10] = (unsigned)bufs[5];
+                pkt[11] = (unsigned)bufs[6];
                 printf("[12] per-stage run: stages=%s counter=%u\n",
                        stages_spec, counter);
                 printf("[12] packet: mode=0x%x r2=0x%x r3=0x%x "
@@ -2119,16 +2148,13 @@ round_trip_end:;
                 stage_now = 0;
             } else {
                 rc = nvIspProcessFrame(hIsp, pf_mode, 0, 0,
-                                       aux_on[0] ? (unsigned)bufs[0] : 0,
-                                       aux_on[1] ? (unsigned)bufs[1] : 0,
-                                       aux_on[2] ? (unsigned)bufs[2] : 0,
-                                       aux_on[3] ? (unsigned)bufs[3] : 0,
-                                       (unsigned)desc_in,
-                                       slot14_aux ? (unsigned)slot14_buf
-                                                  : (unsigned)desc_out,
-                                       aux_on[4] ? (unsigned)bufs[4] : 0,
-                                       aux_on[5] ? (unsigned)bufs[5] : 0,
-                                       aux_on[6] ? (unsigned)bufs[6] : 0);
+                                       sv[0], sv[1], sv[2], sv[3],
+                                       surfswap ? (unsigned)desc_out
+                                                : (unsigned)desc_in,
+                                       surfswap ? (unsigned)desc_in
+                                                : (unsigned)desc_out,
+                                       (unsigned)fenceA, (unsigned)fenceB,
+                                       (unsigned)bufs[6]);
                 printf("    ProcessFrame returned rc=0x%x\n",
                        (unsigned)rc);
             }
@@ -2150,6 +2176,13 @@ round_trip_end:;
             if (slot14_aux)
                 print_state_diff("[12b] post slot14 ", snap14,
                                  slot14_buf, 16);
+            {
+                /* fences start zeroed: anything non-zero here was
+                   written by the library (fence ids and thresholds) */
+                unsigned z16[16] = {0};
+                print_state_diff("[12b] post fenceA ", z16, fenceA, 16);
+                print_state_diff("[12b] post fenceB ", z16, fenceB, 16);
+            }
 
             /* [12b] read the OUTPUT buffer back whatever the rc was:
                the first submission that works must meet the read side

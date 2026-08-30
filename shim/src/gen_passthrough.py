@@ -26,10 +26,8 @@ tsv, out_path, src_bin = sys.argv[1], sys.argv[2], sys.argv[3]
 SYNTHETIC = {'__bss_start', '_edata', '_end'}
 
 names = []
-tsv_lines = []
 for line in open(tsv):
     line = line.rstrip('\n')
-    tsv_lines.append(line)
     cols = line.split('\t')
     if len(cols) < 7 or cols[0] == 'addr' or cols[6] in SYNTHETIC:
         continue
@@ -63,20 +61,35 @@ with open(out_path, 'w') as f:
     f.write(' *                 gen_passthrough.h %s\n' % src_bin)
     f.write(' */\n\n')
 
+    # hidden writable slots (not exported: internal state)
     for n in names:
-        f.write('void *shim_slot_%s;\n' % n)
+        f.write('extern void *shim_slot_%s;\n' % n)
     f.write('\n')
+
+    # stubs: exported functions. Thumb mode; the slot holds the real
+    # address; the literal holds a position-invariant delta
+    # (slot - (9b + 8)), resolved at assembly time -- no DT_TEXTREL.
     for n in names:
         f.write(
             '__asm__(\n'
             '    ".text\\n"\n'
+            '    ".thumb\\n"\n'
             '    ".align 2\\n"\n'
-            '    "%(sym)s:\\n"\n'
-            '    "  ldr r12, 1f\\n"\n'
-            '    "  bx  r12\\n"\n'
+            '    ".globl ' + n + '\\n"\n'
+            '    ".type ' + n + ', %%function\\n"\n'
+            '    "' + n + ':\\n"\n'
+            '    "  ldr  r12, 9f\\n"\n'
+            '    "  add  r12, pc\\n"\n'
+            '    "  ldr  r12, [r12]\\n"\n'
+            '    "  bx   r12\\n"\n'
             '    "  .align 2\\n"\n'
-            '    "1: .word shim_slot_%(sym)s\\n");\n'
-            'extern void %(sym)s(void);\n' % {'sym': n})
+            '    "9:  .word shim_slot_' + n + ' - (9b + 8)\\n"\n'
+            '    ".data\\n"\n'
+            '    ".align 2\\n"\n'
+            '    ".hidden shim_slot_' + n + '\\n"\n'
+            '    "shim_slot_' + n + ': .word 0\\n");\n')
+
+    # name/slot table consumed by the constructor
     f.write('\n')
     f.write('struct shim_binding {\n')
     f.write('    const char *name;\n')
@@ -84,7 +97,7 @@ with open(out_path, 'w') as f:
     f.write('};\n\n')
     f.write('static const struct shim_binding shim_bindings[] = {\n')
     for n in names:
-        f.write('    { "%(n)s", &shim_slot_%(n)s },\n' % {'n': n})
+        f.write('    { "%s", &shim_slot_%s },\n' % (n, n))
     f.write('    { 0, 0 },\n')
     f.write('};\n')
 

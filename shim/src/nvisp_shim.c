@@ -61,6 +61,8 @@ void *dlsym(void *handle, const char *symbol);
 static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
 static void *real_handle;
+static void *hook_real_cache[41];
+static unsigned call_counter;
 
 /*
  * Logging via liblog, loaded the same way as the real library -- dlopen +
@@ -118,7 +120,6 @@ void *shim_resolve(unsigned idx)
     const struct shim_binding *b = &shim_bindings[idx];
     void *t;
     char msg[112];
-    char *q;
 
     if (real_handle == 0) {
         real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
@@ -177,4 +178,76 @@ void *shim_resolve(unsigned idx)
     }
     shim_log(SHIM_LOG_PRIO_INFO, msg);
     return t;
+}
+
+/*
+ * Called by the stage-2 hook on every forwarded call to the hooked binding.
+ * Logs the four argument registers and the call counter, then returns the
+ * real function address so the caller can jump to it.
+ *
+ * used    : called only from assembly (the stage-2 hook stubs).
+ * hidden  : plumbing, stays out of the dynamic symbol table.
+ */
+__attribute__((used, visibility("hidden")))
+void *shim_log_call(unsigned idx, unsigned *saved)
+{
+    /* hex encoding table (no libc) */
+    static const char hexdig[] = "0123456789abcdef";
+    char msg[160];
+    char *w = msg;
+    const char *p;
+    int i;
+    unsigned long v;
+
+    /* build: "hook [Name] #N r0=0xXXXXXXXX r1=0xXXXXXXXX r2=0xXXXXXXXX r3=0xXXXXXXXX" */
+    p = "hook [";
+    while (*p) *w++ = *p++;
+    p = shim_bindings[idx].name;
+    while (*p) *w++ = *p++;
+    *w++ = ']';
+    *w++ = ' ';
+    /* counter (decimal) */
+    {
+        char buf[12];
+        int n = 0;
+        unsigned c = call_counter;
+        if (c == 0) { *w++ = '0'; }
+        else {
+            while (c > 0) { buf[n++] = '0' + (c % 10); c /= 10; }
+            while (n > 0) { *w++ = buf[--n]; }
+        }
+    }
+    p = " r0=0x";
+    while (*p) *w++ = *p++;
+    for (i = 28; i >= 0; i -= 4)
+        *w++ = hexdig[(saved[0] >> i) & 0xf];
+    p = " r1=0x";
+    while (*p) *w++ = *p++;
+    for (i = 28; i >= 0; i -= 4)
+        *w++ = hexdig[(saved[1] >> i) & 0xf];
+    p = " r2=0x";
+    while (*p) *w++ = *p++;
+    for (i = 28; i >= 0; i -= 4)
+        *w++ = hexdig[(saved[2] >> i) & 0xf];
+    p = " r3=0x";
+    while (*p) *w++ = *p++;
+    for (i = 28; i >= 0; i -= 4)
+        *w++ = hexdig[(saved[3] >> i) & 0xf];
+    *w = 0;
+
+    shim_log(SHIM_LOG_PRIO_INFO, msg);
+
+    /* ensure the real library is loaded */
+    if (real_handle == 0) {
+        real_handle = dlopen(real_path, SHIM_DLOPEN_FLAGS);
+    }
+
+    /* resolve: dlsym the real address for this binding, cache it */
+    {
+        void *t = dlsym(real_handle, shim_bindings[idx].name);
+        if (t != 0) {
+            hook_real_cache[idx] = t;
+        }
+    }
+    return hook_real_cache[idx];
 }

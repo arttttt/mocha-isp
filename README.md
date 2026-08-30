@@ -58,6 +58,37 @@ function's real arity hold the caller's leftovers, not arguments: in one
 line a value sat four bytes from a neighbouring call's leftover, close
 enough to read as data. Arity first, then the registers.
 
+### Raising the ISP by hand
+
+`tools/ispinit` is the first thing here that acts instead of watching. It
+loads the stock library, brings the ISP up, asks it a question, and gives it
+back:
+
+```
+[5] NvIspOpen(dev=0x1, instance=1, &hIsp) -> rc=0x0 hIsp=0xb837aef8
+[6] NvIspSetIspClockRate(rate=0x003fffff) -> rc=0x0
+[7] NvIspGetStatus(id=6, size=4)          -> rc=0x0 value=0x927c0
+[8] NvIspClose                            -> rc=0x0
+```
+
+Five runs in a row, a silent kernel log, and the stock camera comes up
+afterwards every time. Giving the hardware back is the part that had to be
+right: `NvIspClose` releases the host1x channel itself, and a leaked channel
+is what would have left the camera dead.
+
+The device handle is worth a note. `NvRmOpen` is a four-instruction stub
+that writes 1 into its out-parameter, and `NvRmChannelOpen` -- which lives
+in `libnvrm_graphics.so`, not `libnvrm.so` -- never reads that argument at
+all. So the handle is the literal value 1. Reading the disassembly as
+"pass the pointer" would have produced a silent failure; the live hook log
+said `r0=1` and settled it.
+
+Read back 600000 for a requested 4194303: something clamped it, and only the
+clock tree can. That is evidence, not yet proof -- a constant would look the
+same. The control is to request a value below the ceiling and see whether it
+comes back.
+
+
 ## Why not a memory dump
 
 We tried. The settings live on the heap, are computed at runtime, and the

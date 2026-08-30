@@ -108,7 +108,8 @@ typedef int (*NvIspHwSettingsCreate_fn)(unsigned devHandle, void *p1,
                                         unsigned size, void *p2);
 typedef int (*NvIspHwSettingsSetAttribute_fn)(unsigned hSettings,
                                               unsigned blockId,
-                                              unsigned index, void *buf);
+                                              unsigned index, void *buf,
+                                              unsigned *size);
 typedef int (*NvIspSetStats_fn)(unsigned hIsp, unsigned type,
                                 unsigned subidx, void *buf,
                                 unsigned *size);
@@ -1502,20 +1503,46 @@ round_trip_end:;
             {8, 0}, {9, 0}, {0xa, 0}, {0xb, 0}, {0xd, 0}, {0xe, 0},
             {0x10, 0},
         };
-        unsigned zbuf[64] = {0};
         int q;
         for (q = 0; q < 14; q++) {
+            unsigned bufsize = 256; /* our buffer; the library corrects
+                                       it via rc 10 if it wants less */
+            unsigned size_out = bufsize;
+            unsigned char *zbuf = malloc(bufsize);
+            unsigned char *rbuf = 0;
+            unsigned wrc;
             char tag[32];
+            if (zbuf == 0) {
+                printf("[9b2] malloc failed for id %u\n", blocks[q][0]);
+                continue;
+            }
+            memset(zbuf, 0, bufsize);
             snprintf(tag, sizeof(tag), "HwSettingsSetAttribute id=%u",
                      blocks[q][0]);
             stage_now = tag;
-            rc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
-                                             blocks[q][1], zbuf);
+            /* FIVE arguments: the fifth (&size) travels on the stack --
+               the 0x1eb8 crash was the library reading a stale stack
+               word as the size pointer */
+            wrc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
+                                              blocks[q][1], zbuf,
+                                              &size_out);
             snprintf(tag, sizeof(tag), "[9b2] SetAttr id=%u idx=%u",
                      blocks[q][0], blocks[q][1]);
             printf("[9b2] HwSettingsSetAttribute(hset=0x%x, id=%u, idx=%u, "
-                   "zero-buf) -> rc=0x%x\n",
-                   hset, blocks[q][0], blocks[q][1], (unsigned)rc);
+                   "buf, &size=%u) -> rc=0x%x size-out=%u\n",
+                   hset, blocks[q][0], blocks[q][1], bufsize,
+                   (unsigned)wrc, size_out);
+            if (wrc == 10 && size_out != bufsize && size_out != 0) {
+                rbuf = malloc(size_out);
+                if (rbuf != 0) {
+                    memset(rbuf, 0, size_out);
+                    wrc = nvIspHwSettingsSetAttribute(hset, blocks[q][0],
+                                                      blocks[q][1], rbuf,
+                                                      &size_out);
+                    printf("[9b2]   retry with size=%u -> rc=0x%x\n",
+                           size_out, (unsigned)wrc);
+                }
+            }
             {
                 char btag[48];
                 snprintf(btag, sizeof(btag),
@@ -1524,6 +1551,8 @@ round_trip_end:;
                 print_first_words(btag, (const unsigned char *)zbuf, 16);
             }
             print_gate(tag, hIsp);
+            free(zbuf);
+            free(rbuf);
         }
     }
 

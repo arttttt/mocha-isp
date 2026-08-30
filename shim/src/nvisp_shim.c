@@ -72,6 +72,20 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_DEREF_IDX     6
 
 /*
+ * Second permitted dereference: NvIspSetConfiguration(handle, mode,
+ * buf*, &size) -- r2 is the buffer, r3 the size pointer, both stack
+ * addresses the library reads immediately after us (live log: pairs of
+ * r1=1 then r1=2 per instance, r2/r3 in the stack range). We dump the
+ * buffer CONTENT, the structure we must reproduce to raise the ISP
+ * ourselves: one word through r3 gives the real size, then floor(size/4)
+ * words through r2, never more than 16 words / 64 bytes, and never a
+ * buffer read when the size is insane -- the size comes from the caller
+ * and we do not control it.
+ */
+#define SHIM_DEREF_BINDING_CFG "NvIspSetConfiguration"
+#define SHIM_DEREF_IDX_CFG     21
+
+/*
  * --- the intervention gate -------------------------------------------------
  *
  * Writing into a stranger's memory (the debug flag behind r2) is toggled by
@@ -271,7 +285,10 @@ __attribute__((used, visibility("hidden")))
 void *shim_log_call(unsigned idx, unsigned *saved)
 {
     static const char hexdig[] = "0123456789abcdef";
-    char msg[192];
+    /* 384: the base fields take ~90; the SetConfiguration dump adds up
+       to " size=4294967295 cfg=" + 16 eight-digit words + 15 commas
+       (~168). 192 could overflow on a full mode-1 dump. */
+    char msg[384];
     char *w = msg;
     const char *p;
     int i;
@@ -363,6 +380,34 @@ void *shim_log_call(unsigned idx, unsigned *saved)
         if (wrote) {
             p = " -> 0x1";
             while (*p) *w++ = *p++;
+        }
+    }
+
+    /*
+     * The SetConfiguration dump. Guards in code: both pointers non-null,
+     * size word read through r3 first, buffer read only for a sane size
+     * (0 < size <= 64 bytes), words = size/4, printed on one line as
+     * comma-separated 32-bit hex. Mode 1 should name 0x40 (16 words of
+     * format selectors), mode 2 a single word -- but we print what the
+     * size says, not what the analysis predicted.
+     */
+    if (idx == SHIM_DEREF_IDX_CFG && saved[2] != 0 && saved[3] != 0) {
+        unsigned size = *(const unsigned *)saved[3];
+        p = " size=";
+        while (*p) *w++ = *p++;
+        w = shim_put_dec(w, size);
+        if (size != 0 && size <= 64) {
+            unsigned nwords = size / 4;
+            unsigned k;
+            p = " cfg=";
+            while (*p) *w++ = *p++;
+            for (k = 0; k < nwords; k++) {
+                unsigned word = ((const unsigned *)saved[2])[k];
+                if (k != 0)
+                    *w++ = ',';
+                for (i = 28; i >= 0; i -= 4)
+                    *w++ = hexdig[(word >> i) & 0xf];
+            }
         }
     }
     p = " r3=0x";

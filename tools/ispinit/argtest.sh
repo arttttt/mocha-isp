@@ -74,6 +74,13 @@ check "a0c=0:5 a04=1:7" 1 4194303 rggb aux=04:on aux=08:on a04=1:7 a0c=0:5
 check "aux=0c:off (already off)" 1 4194303 rggb aux=0c:off
 check "aux=33:unknown slot rejected" 0 4194303 rggb aux=33:on
 
+echo "-- descriptor overrides (din/dout)"
+check "din=2:0x10992007"       1 4194303 rggb din=2:0x10992007
+check "dout=9:2"               1 4194303 rggb dout=9:2
+check "geometry din=0:16 din=1:16" 1 4194303 rggb din=0:16 din=1:16
+check "din=5 rejected"         0 4194303 rggb din=5:7
+check "dout=5 rejected"        0 4194303 rggb dout=5:0x40a
+
 echo "-- attribute overrides"
 check "attr=4:0x40000" 1 4194303 rggb attr=4:0x40000
 check "attr=4:0x800 attr=2:0x100" 1 4194303 rggb attr=4:0x800 attr=2:0x100

@@ -168,6 +168,9 @@ int main(int argc, char **argv)
     unsigned aux_val[7][44];
     unsigned char aux_set[7][44] = {{0}};
     unsigned char aux_isptr[7][44] = {{0}}; /* value was 'ptr' */
+    unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
+    unsigned char din_set[44] = {{0}};
+    unsigned char dout_set[44] = {{0}};
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -323,6 +326,46 @@ int main(int argc, char **argv)
                 }
                 aux_val[which][idx] = (unsigned)val;
                 aux_set[which][idx] = 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "din=", 4) == 0 || strncmp(tok, "dout=", 5) == 0) {
+            /* din=<idx>:<val>, dout=... -- descriptor word overrides;
+               several allowed, idx 0..43. Word 5 (the memory handle) is
+               PROGRAM-SET and rejected here: an override there is not a
+               configurable, it is a broken run. */
+            int is_out = (tok[1] == 'o');
+            char *colon;
+            long idx, val;
+            colon = strchr(tok + (is_out ? 5 : 4), ':');
+            if (colon == 0) {
+                printf("[0] bad descriptor override '%s', use "
+                       "din=<idx>:<val>\n", argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            idx = strtol(tok + (is_out ? 5 : 4), &e1, 0);
+            if (e1 == tok + (is_out ? 5 : 4) || *e1 != '\0' ||
+                idx < 0 || idx > 43) {
+                printf("[0] bad descriptor index in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (idx == 5) {
+                printf("[0] %s=5 rejected: the memory handle is "
+                       "program-set\n", is_out ? "dout" : "din");
+                return 1;
+            }
+            val = strtol(colon + 1, &e2, 0);
+            if (e2 == colon + 1 || *e2 != '\0' || val < 0) {
+                printf("[0] bad descriptor value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (is_out) {
+                dout_val[idx] = (unsigned)val;
+                dout_set[idx] = 1;
+            } else {
+                din_val[idx] = (unsigned)val;
+                din_set[idx] = 1;
             }
             continue;
         }
@@ -721,6 +764,7 @@ round_trip_end:;
         unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
                                         record size */
         unsigned desc_out[44] = {0};
+        unsigned gh, gw, gf, gt, gs, gp;
         unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
@@ -771,30 +815,48 @@ round_trip_end:;
         if (rc != 0 || memh_in == 0 || memh_out == 0) {
             printf("    alloc failed -- skipping submission, closing\n");
         } else {
-            /* [11] two descriptors, same layout as the stock dummy:
-               seven live words of forty-four; identical 8x8 geometry is
-               a deliberate first try -- the output requirements are
-               unknown, and a refusal would be informative. */
-            desc_in[0] = 8;           /* height */
-            desc_in[1] = 8;           /* width */
-            desc_in[2] = 0x105a500cu; /* format constant, from the dummy */
-            desc_in[3] = 1;           /* memory type */
-            desc_in[4] = 256;         /* stride, multiple of 64 */
-            desc_in[5] = (unsigned)memh_in;  /* OUR input handle */
-            desc_in[9] = 1;           /* 0x24: plane count */
+            /* [11] two descriptors, stock dummy layout with seven live
+               words. Geometry/format fields are CLI-overridable
+               (din=/dout=); the geometry drives the pattern fill and
+               the write size so all three never disagree. The handle
+               word is program-set LAST, an override there is rejected
+               at parse time. */
+            gh = din_set[0] ? din_val[0] : 8;
+            gw = din_set[1] ? din_val[1] : 8;
+            gf = din_set[2] ? din_val[2] : 0x105a500cu;
+            gt = din_set[3] ? din_val[3] : 1;
+            gs = din_set[4] ? din_val[4] : 256;
+            gp = din_set[9] ? din_val[9] : 1;
 
-            desc_out[0] = 8;
-            desc_out[1] = 8;
-            desc_out[2] = 0x105a500cu;
-            desc_out[3] = 1;
-            desc_out[4] = 256;
+            desc_in[0] = gh;
+            desc_in[1] = gw;
+            desc_in[2] = gf;
+            desc_in[3] = gt;
+            desc_in[4] = gs;
+            desc_in[9] = gp;
+            desc_out[0] = dout_set[0] ? dout_val[0] : gh;
+            desc_out[1] = dout_set[1] ? dout_val[1] : gw;
+            desc_out[2] = dout_set[2] ? dout_val[2] : gf;
+            desc_out[3] = dout_set[3] ? dout_val[3] : gt;
+            desc_out[4] = dout_set[4] ? dout_val[4] : gs;
+            desc_out[9] = dout_set[9] ? dout_val[9] : gp;
+            for (k = 0; k < 44; k++) {
+                if (din_set[k] && k != 5)
+                    desc_in[k] = din_val[k];
+                if (dout_set[k] && k != 5)
+                    desc_out[k] = dout_val[k];
+            }
+            desc_in[5] = (unsigned)memh_in;   /* OUR input handle */
             desc_out[5] = (unsigned)memh_out; /* OUR output handle */
-            desc_out[9] = 1;
 
-            printf("[11] desc_in=%p (h=8 w=8 fmt=0x105a500c stride=256 "
-                   "memh=0x%x planes=1)\n", desc_in, desc_in[5]);
-            printf("[11] desc_out=%p (h=8 w=8 fmt=0x105a500c stride=256 "
-                   "memh=0x%x planes=1)\n", desc_out, desc_out[5]);
+            printf("[11] desc_in=%p (h=%u w=%u fmt=0x%x type=%u stride=%u "
+                   "memh=0x%x planes=%u)\n",
+                   desc_in, desc_in[0], desc_in[1], desc_in[2], desc_in[3],
+                   desc_in[4], desc_in[5], desc_in[9]);
+            printf("[11] desc_out=%p (h=%u w=%u fmt=0x%x type=%u stride=%u "
+                   "memh=0x%x planes=%u)\n",
+                   desc_out, desc_out[0], desc_out[1], desc_out[2],
+                   desc_out[3], desc_out[4], desc_out[5], desc_out[9]);
 
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
@@ -833,7 +895,7 @@ round_trip_end:;
                already in place. Poisoned with 0xEE first, so untouched
                bytes are visible as such. */
             {
-                unsigned pat_bytes = 256 * 8;
+                unsigned pat_bytes = gs * gh;
                 unsigned char *outb = malloc(pat_bytes);
                 unsigned rrc;
                 int m;

@@ -94,6 +94,15 @@ echo "-- pointer-following context dumps (ctxp=)"
 check "ctxp=0x1318:16"         1 4194303 rggb ctxp=0x1318:16
 check "ctxp junk rejected"     0 4194303 rggb ctxp=junk
 
+echo "-- per-stage submission (stages=/pkt2=/pkt3=)"
+check "stages=0"               1 4194303 rggb stages=0
+check "stages=1234"            1 4194303 rggb stages=1234
+check "stages=12"              1 4194303 rggb stages=12
+check "stages=4"               1 4194303 rggb stages=4
+check "stages=21 rejected"     0 4194303 rggb stages=21
+check "stages=5 rejected"      0 4194303 rggb stages=5
+check "pkt2/pkt3"              1 4194303 rggb pkt2=1 pkt3=2
+
 echo "-- numeric slot values (n00/n04/n08/n0c)"
 check "n08=3280"               1 4194303 rggb n08=3280
 check "n0c=2460"               1 4194303 rggb n0c=2460

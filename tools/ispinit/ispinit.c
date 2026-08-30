@@ -45,6 +45,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "bayer_gen.h"
 
@@ -112,6 +114,15 @@ typedef int (*NvIspHwSettingsDestroy_fn)(unsigned hSettings, unsigned size,
                                          void *p3, unsigned devHandle);
 typedef int (*NvIspSetAttribute_fn)(unsigned hIsp, unsigned attrId,
                                     void *inVal, void *inSize);
+/* the four stages, per the 0x1784 frame read (lead + impl-2):
+   st.4 takes a FIFTH argument on the stack (+0x1c) */
+typedef int (*Stage1_fn)(unsigned hIsp, void *pkt, unsigned inDesc);
+typedef int (*Stage2_fn)(unsigned hIsp, void *pkt, unsigned inDesc,
+                         unsigned *local);
+typedef int (*Stage3_fn)(unsigned hIsp, unsigned inDesc, unsigned counter,
+                         unsigned local);
+typedef int (*Stage4_fn)(unsigned hIsp, unsigned mode, unsigned outDesc,
+                         unsigned a4, unsigned stack5);
 typedef int (*NvIspGetStatus_fn)(unsigned hIsp, unsigned statusId,
                                  void *value, unsigned *size);
 typedef int (*NvIspClose_fn)(unsigned hIsp);
@@ -280,6 +291,23 @@ static void print_gate(const char *tag, unsigned hIsp)
     printf("\n");
 }
 
+/* crash isolation: a stage that faults must name itself before the
+   process goes -- the whole point of per-stage calls is knowing WHO
+   failed. Unbuffered stdout plus a controlled _exit(70). */
+static const char *stage_now;
+static void stage_segv(int sig)
+{
+    static const char m1[] = "[stage-crash] ";
+    static const char m2[] = " CRASHED (fatal signal) -- controlled exit\n";
+    (void)sig;
+    if (stage_now != 0) {
+        write(1, m1, sizeof(m1) - 1);
+        write(1, stage_now, strlen(stage_now));
+    }
+    write(1, m2, sizeof(m2) - 1);
+    _exit(70);
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -365,6 +393,12 @@ int main(int argc, char **argv)
     int ctxp_n = 0;
     unsigned stage_off[STAGE_SLOTS];
     int stage_n = 0;
+    /* per-stage submission: stages=0 whole call (default), stages=1234
+       runs stages individually; pkt2/pkt3 are ProcessFrame's own
+       register arguments 3 and 4 */
+    char stages_spec[8] = "0";
+    unsigned pkt2 = 0, pkt3 = 0;
+    struct sigaction sa;
     /* n<slot>=<val> -- put the NUMBER itself into stack slot +00/+04/
        +08/+0c (the live log shows the stock passes sensor geometry
        there as numbers: 3280/2460). Defaults for +08/+0c follow the
@@ -697,6 +731,52 @@ int main(int argc, char **argv)
                 printf("[0] bad init state '%s'\n", colon + 1);
                 return 1;
             }
+            continue;
+        }
+        if (strncmp(tok, "stages=", 7) == 0) {
+            /* stages=0 whole ProcessFrame (default); stages=1234 runs
+               stages individually, ascending, each printed separately */
+            const char *sp = tok + 7;
+            if (strcmp(sp, "0") == 0)
+                continue;
+            if (*sp == '\0') {
+                printf("[0] empty stages spec\n");
+                return 1;
+            }
+            {
+                const char *q = sp;
+                char prev = '0';
+                while (*q) {
+                    if (*q < '1' || *q > '4' || *q <= prev) {
+                        printf("[0] bad stages '%s': ascending digits "
+                               "1..4, or 0\n", sp);
+                        return 1;
+                    }
+                    prev = *q;
+                    q++;
+                }
+            }
+            snprintf(stages_spec, sizeof(stages_spec), "%s", sp);
+            continue;
+        }
+        if (strncmp(tok, "pkt2=", 5) == 0) {
+            char *e11 = 0;
+            long v = strtol(tok + 5, &e11, 0);
+            if (e11 == tok + 5 || *e11 != '\0' || v < 0) {
+                printf("[0] bad pkt2 '%s'\n", argv[ai]);
+                return 1;
+            }
+            pkt2 = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "pkt3=", 5) == 0) {
+            char *e12 = 0;
+            long v = strtol(tok + 5, &e12, 0);
+            if (e12 == tok + 5 || *e12 != '\0' || v < 0) {
+                printf("[0] bad pkt3 '%s'\n", argv[ai]);
+                return 1;
+            }
+            pkt3 = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "wait=", 5) == 0) {
@@ -1144,6 +1224,33 @@ round_trip_end:;
     printf("rc=0x%x hIsp=0x%x\n", (unsigned)rc, hIsp);
     if (rc != 0)
         return 1;
+
+    /* [5b] the stage table, address AND file offset (base printed at
+       [3]). Expected offsets per the frame read: st1 0x3044, st2 0x2af0,
+       st3 0x4380, st4 0x1eb8. A mismatch means we are not calling the
+       functions we think we are. */
+    {
+        static const unsigned soffs[4] = { 0x130c, 0x1308, 0x12d4, 0x1304 };
+        static const unsigned sexp[4] = { 0x3044, 0x2af0, 0x4380, 0x1eb8 };
+        static const char snames[4][4] = { "st1", "st2", "st3", "st4" };
+        int q;
+        printf("[5b] stage table (base 0x%x):\n", nvisp_base);
+        for (q = 0; q < 4; q++) {
+            unsigned p = *(unsigned *)((unsigned)hIsp + soffs[q]);
+            unsigned off = p ? ((p & ~1u) - nvisp_base) : 0;
+            printf("[5b]   %s ctx+0x%x = 0x%08x file+0x%x -- expected "
+                   "file+0x%x %s\n",
+                   snames[q], soffs[q], p, off, sexp[q],
+                   off == sexp[q] ? "MATCH" : "MISMATCH");
+        }
+    }
+
+    /* crash isolation for the per-stage calls */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = stage_segv;
+    sigaction(SIGSEGV, &sa, 0);
+    sigaction(SIGBUS, &sa, 0);
+    sigaction(SIGILL, &sa, 0);
 
     /* [6] configure, mode 1: the stock's sixteen selector words
        (CLI-overridable, cfg=), size 64 in. The size AFTER the call
@@ -1661,22 +1768,85 @@ round_trip_end:;
                        aux_on[i] ? "on" : "off");
             printf("\n");
             printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=%u, "
-                   "in@+0x10=%p, +0x14=%s=%p) -> calling...\n",
+                   "in@+0x10=%p, +0x14=%s=%p)\n",
                    hIsp, pf_mode, desc_in,
                    slot14_aux ? "aux" : "desc",
                    slot14_aux ? (void *)slot14_buf : (void *)desc_out);
-            rc = nvIspProcessFrame(hIsp, pf_mode, 0, 0,
-                                   aux_on[0] ? (unsigned)bufs[0] : 0,
-                                   aux_on[1] ? (unsigned)bufs[1] : 0,
-                                   aux_on[2] ? (unsigned)bufs[2] : 0,
-                                   aux_on[3] ? (unsigned)bufs[3] : 0,
-                                   (unsigned)desc_in,
-                                   slot14_aux ? (unsigned)slot14_buf
-                                              : (unsigned)desc_out,
-                                   aux_on[4] ? (unsigned)bufs[4] : 0,
-                                   aux_on[5] ? (unsigned)bufs[5] : 0,
-                                   aux_on[6] ? (unsigned)bufs[6] : 0);
-            printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
+
+            if (stages_spec[0] != '0') {
+                /* per-stage submission: call the stages the library
+                   would call, in its order, printing each return code.
+                   Packet = {mode, r2, r3}; st.2 writes into our local;
+                   st.3 gets the frame counter from ctx+0x1254 plus the
+                   local's value; st.4 takes the fifth argument on the
+                   stack (C handles it with a 5-param prototype). A
+                   nonzero rc stops the chain where the library would. */
+                unsigned pkt[3] = { pf_mode, pkt2, pkt3 };
+                unsigned local_var = 0;
+                unsigned counter = *(unsigned *)((unsigned)hIsp + 0x1254) + 1;
+                int q, stop = 0;
+                static const char sn2[5][4] = { "st1", "st2", "st3",
+                                                "st4" };
+
+                printf("[12] per-stage run: stages=%s pkt={0x%x,0x%x,0x%x} "
+                       "counter=%u\n",
+                       stages_spec, pkt[0], pkt[1], pkt[2], counter);
+                for (q = 0; q < (int)strlen(stages_spec) && !stop; q++) {
+                    int stg = stages_spec[q] - '0';
+                    switch (stg) {
+                    case 1:
+                        stage_now = "st1";
+                        rc = ((Stage1_fn)*(unsigned *)((unsigned)hIsp +
+                              0x130c))((unsigned)hIsp, pkt,
+                                       (unsigned)desc_in);
+                        break;
+                    case 2:
+                        stage_now = "st2";
+                        rc = ((Stage2_fn)*(unsigned *)((unsigned)hIsp +
+                              0x1308))((unsigned)hIsp, pkt,
+                                       (unsigned)desc_in, &local_var);
+                        break;
+                    case 3:
+                        stage_now = "st3";
+                        rc = ((Stage3_fn)*(unsigned *)((unsigned)hIsp +
+                              0x12d4))((unsigned)hIsp, (unsigned)desc_in,
+                                       counter, local_var);
+                        break;
+                    default:
+                        stage_now = "st4";
+                        rc = ((Stage4_fn)*(unsigned *)((unsigned)hIsp +
+                              0x1304))((unsigned)hIsp, pkt[0],
+                                       (unsigned)desc_out,
+                                       aux_on[4] ? (unsigned)bufs[4] : 0,
+                                       aux_on[5] ? (unsigned)bufs[5] : 0);
+                        break;
+                    }
+                    printf("[12] %s -> rc=0x%x\n", sn2[stg - 1],
+                           (unsigned)rc);
+                    if (stg == 2)
+                        printf("[12] st2 local = 0x%x\n", local_var);
+                    if (rc != 0) {
+                        printf("[12] library would stop here "
+                               "(nonzero rc)\n");
+                        stop = 1;
+                    }
+                }
+                stage_now = 0;
+            } else {
+                rc = nvIspProcessFrame(hIsp, pf_mode, 0, 0,
+                                       aux_on[0] ? (unsigned)bufs[0] : 0,
+                                       aux_on[1] ? (unsigned)bufs[1] : 0,
+                                       aux_on[2] ? (unsigned)bufs[2] : 0,
+                                       aux_on[3] ? (unsigned)bufs[3] : 0,
+                                       (unsigned)desc_in,
+                                       slot14_aux ? (unsigned)slot14_buf
+                                                  : (unsigned)desc_out,
+                                       aux_on[4] ? (unsigned)bufs[4] : 0,
+                                       aux_on[5] ? (unsigned)bufs[5] : 0,
+                                       aux_on[6] ? (unsigned)bufs[6] : 0);
+                printf("    ProcessFrame returned rc=0x%x\n",
+                       (unsigned)rc);
+            }
 
             /* post-call state of EVERY buffer we hand over, with the
                changed-word list: a "fix-and-repeat" answer (rc=10

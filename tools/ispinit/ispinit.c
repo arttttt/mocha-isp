@@ -65,7 +65,7 @@ typedef int (*NvIspGetStatus_fn)(unsigned hIsp, unsigned statusId,
                                  void *value, unsigned *size);
 typedef int (*NvIspClose_fn)(unsigned hIsp);
 
-int main(void)
+int main(int argc, char **argv)
 {
     void *nvrm;
     void *nvisp;
@@ -78,9 +78,24 @@ int main(void)
     unsigned hIsp = 0;
     unsigned value = 0;
     unsigned size = 4;
+    unsigned rate = 0x003fffffu;
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /*
+     * Optional rate argument: "ispinit [rate]". Control experiment -- the
+     * first run read 600000 (0x927c0) after we asked for the max, which
+     * proves life only if a smaller request comes back as requested.
+     * strtol, no frills; anything unparseable keeps the default.
+     */
+    if (argc > 1) {
+        char *end = 0;
+        long v = strtol(argv[1], &end, 0);
+        if (end != argv[1] && *end == '\0' && v > 0)
+            rate = (unsigned)v;
+    }
+    printf("[0] requested rate = 0x%x\n", rate);
 
     /* [1] libnvrm -- gives us NvRmOpen, the only way to a device handle */
     printf("[1] dlopen(\"%s\") -> ", nvrm_path);
@@ -134,10 +149,12 @@ int main(void)
     if (rc != 0)
         return 1;
 
-    /* [6] set a nonzero rate: the zero cache would answer the next
-       read with zero and hide whether the ISP is alive at all */
-    printf("[6] NvIspSetIspClockRate(hIsp=0x%x, rate=0x003fffff) -> ", hIsp);
-    rc = nvIspSetIspClockRate(hIsp, 0x003fffffu);
+    /* [6] set the requested rate: the zero cache would answer the next
+       read with zero and hide whether the ISP is alive at all; the max
+       is clipped by the clock tree (600000 of 0x3fffff), and a smaller
+       request must come back as requested -- that is the control */
+    printf("[6] NvIspSetIspClockRate(hIsp=0x%x, rate=0x%x) -> ", hIsp, rate);
+    rc = nvIspSetIspClockRate(hIsp, rate);
     printf("rc=0x%x\n", (unsigned)rc);
 
     /* [7] status id 6, 4 bytes in, actual size out; must be the rate

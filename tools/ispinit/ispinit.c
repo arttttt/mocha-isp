@@ -83,6 +83,14 @@ typedef int (*NvRmMemHandleCreate_fn)(unsigned param0, void **out,
                                       unsigned size);
 typedef int (*NvRmMemHandleAllocAttr_fn)(unsigned size, void *attrs,
                                          void **out);
+typedef int (*NvRmMemWriteStrided_fn)(unsigned handle, void *bufPtr,
+                                      unsigned bufStride, unsigned offset,
+                                      unsigned memStride, unsigned widthBytes,
+                                      unsigned numRows, unsigned x8);
+typedef int (*NvRmMemReadStrided_fn)(unsigned handle, void *bufPtr,
+                                     unsigned bufStride, unsigned offset,
+                                     unsigned memStride, unsigned widthBytes,
+                                     unsigned numRows, unsigned x8);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
 typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
@@ -116,6 +124,8 @@ int main(int argc, char **argv)
     NvRmOpen_fn nvRmOpen;
     NvRmMemHandleCreate_fn nvRmMemHandleCreate;
     NvRmMemHandleAllocAttr_fn nvRmMemHandleAllocAttr;
+    NvRmMemWriteStrided_fn nvRmMemWriteStrided;
+    NvRmMemReadStrided_fn nvRmMemReadStrided;
     NvIspOpen_fn nvIspOpen;
     NvIspSetConfiguration_fn nvIspSetConfiguration;
     NvIspProcessFrame_fn nvIspProcessFrame;
@@ -132,6 +142,13 @@ int main(int argc, char **argv)
                                  working value is the device VALUE (1 in
                                  our runs), used when unset */
     int a1_set = 0;
+    /* round-trip control knobs, rt=<key>:<val> on the command line */
+    int rt_on = 1;
+    unsigned rt_w = 8, rt_h = 8;          /* pixels */
+    unsigned rt_bs = 0x100, rt_ms = 0x100;/* host / nvmap row stride */
+    unsigned rt_wb = 0, rt_nr = 0;        /* 0 = follow w*h and h */
+    unsigned rt_off = 0;                  /* offset into the nvmap buffer */
+    unsigned rt_x8 = 0;                   /* 0 = auto: memStride*numRows */
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     int aux_on[3] = {1, 1, 1}; /* slots +18, +1c, +20 */
@@ -185,6 +202,45 @@ int main(int argc, char **argv)
         char *e1 = 0, *e2 = 0;
         long idx, val;
 
+        if (strncmp(tok, "rt=", 3) == 0) {
+            /* rt=on|off, or rt=<key>:<val> with keys
+               w,h (pixels), bs (host row stride), ms (nvmap row
+               stride), wb (widthBytes), nr (numRows), off (nvmap
+               offset), x8 (unknown 8th arg; 0 = auto ms*nr) */
+            char *rest = tok + 3;
+            char *colon;
+            char *e3 = 0;
+            long v;
+            unsigned *dst = 0;
+            if (strcmp(rest, "on") == 0) { rt_on = 1; continue; }
+            if (strcmp(rest, "off") == 0) { rt_on = 0; continue; }
+            colon = strchr(rest, ':');
+            if (colon == 0) {
+                printf("[0] bad rt '%s', use rt=on|off or rt=<key>:<val>\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            v = strtol(colon + 1, &e3, 0);
+            if (e3 == colon + 1 || *e3 != '\0' || v < 0) {
+                printf("[0] bad rt value in '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (strcmp(rest, "w") == 0) dst = &rt_w;
+            else if (strcmp(rest, "h") == 0) dst = &rt_h;
+            else if (strcmp(rest, "bs") == 0) dst = &rt_bs;
+            else if (strcmp(rest, "ms") == 0) dst = &rt_ms;
+            else if (strcmp(rest, "wb") == 0) dst = &rt_wb;
+            else if (strcmp(rest, "nr") == 0) dst = &rt_nr;
+            else if (strcmp(rest, "off") == 0) dst = &rt_off;
+            else if (strcmp(rest, "x8") == 0) dst = &rt_x8;
+            else {
+                printf("[0] bad rt key '%s'\n", argv[ai]);
+                return 1;
+            }
+            *dst = (unsigned)v;
+            continue;
+        }
         if (strncmp(tok, "a18=", 4) == 0 || strncmp(tok, "a1c=", 4) == 0 ||
             strncmp(tok, "a20=", 4) == 0) {
             /* a<slot>=<idx>:<val|ptr> -- set one word of an aux buffer;
@@ -347,6 +403,10 @@ int main(int argc, char **argv)
         (NvRmMemHandleCreate_fn)dlsym(nvrm, "NvRmMemHandleCreate");
     nvRmMemHandleAllocAttr =
         (NvRmMemHandleAllocAttr_fn)dlsym(nvrm, "NvRmMemHandleAllocAttr");
+    nvRmMemWriteStrided =
+        (NvRmMemWriteStrided_fn)dlsym(nvrm, "NvRmMemWriteStrided");
+    nvRmMemReadStrided =
+        (NvRmMemReadStrided_fn)dlsym(nvrm, "NvRmMemReadStrided");
     nvIspOpen = (NvIspOpen_fn)dlsym(nvisp, "NvIspOpen");
     nvIspSetConfiguration =
         (NvIspSetConfiguration_fn)dlsym(nvisp, "NvIspSetConfiguration");
@@ -379,6 +439,114 @@ int main(int argc, char **argv)
     printf("rc=%d dev=%p\n", rc, dev);
     if (rc != 0)
         return 1;
+
+    /*
+     * [5] ROUND TRIP: allocate, write a known pattern, read it back,
+     * compare. Touches NO ISP state -- this validates the memory path
+     * alone and settles empirically whether an explicit mapping is
+     * needed for direct Write/Read (impl-2 says the stock maps; if the
+     * plain Strided calls agree without one, we do not need it).
+     *
+     * Expected and received words both print, so a mismatch shows its
+     * SHAPE -- a shift, a byte order, a stride -- instead of a bare
+     * verdict. Everything is CLI-tunable: rt=w:8 rt=h:8 rt=bs:0x100
+     * rt=ms:0x100 rt=wb:16 rt=nr:8 rt=off:0 rt=x8:... (x8 unset in the
+     * decode; wrappers pass the size there, so 0 means auto = ms*nr).
+     */
+    if (rt_on) {
+        static NvRmMemHandleAllocAttr_fn alloc_fn;
+        unsigned attrs_rt[8] = { 0, 0, 0x20, 2, 0x40000u, 0, 0, 0 };
+        void *memh_rt = 0;
+        unsigned char *stage = 0;
+        unsigned char *back = 0;
+        unsigned wb = rt_wb ? rt_wb : rt_w * 2;
+        unsigned nr = rt_nr ? rt_nr : rt_h;
+        unsigned x8 = rt_x8 ? rt_x8 : rt_ms * nr;
+        unsigned region = rt_ms * nr;
+        unsigned bad = 0, first_bad = 0xffffffffu;
+        int k;
+
+        if (rt_wb == 0 && wb > rt_bs)
+            wb = rt_bs; /* the pattern cannot write past its own row */
+        for (k = 0; k < 8; k++)
+            if (attr_set[k])
+                attrs_rt[k] = attr_val[k];
+
+        printf("[5] round trip: w=%u h=%u bs=0x%x ms=0x%x wb=%u nr=%u "
+               "off=0x%x x8=0x%x\n",
+               rt_w, rt_h, rt_bs, rt_ms, wb, nr, rt_off, x8);
+
+        if (nvRmMemWriteStrided == 0 || nvRmMemReadStrided == 0) {
+            printf("[5] Strided symbols missing -- round trip skipped\n");
+        } else {
+            alloc_fn = nvRmMemHandleAllocAttr;
+            printf("[5] NvRmMemHandleAllocAttr(dev=0x%x, attrs, &memh_rt) "
+                   "-> ", (unsigned)dev);
+            rc = alloc_fn((unsigned)dev, attrs_rt, &memh_rt);
+            printf("rc=0x%x memh_rt=%p\n", (unsigned)rc, memh_rt);
+
+            stage = malloc(region > rt_bs * nr ? region : rt_bs * nr + 16);
+            back = malloc(region + 16);
+            if (memh_rt == 0 || rc != 0 || stage == 0 || back == 0) {
+                printf("[5] allocation failed -- round trip skipped\n");
+            } else {
+                unsigned sum = bayer_fill(stage, rt_w, rt_h, rt_bs, 2, order);
+                printf("[5] pattern: bayer_fill(%s) checksum=0x%x\n",
+                       order_names[order], sum);
+
+                rc = nvRmMemWriteStrided((unsigned)memh_rt, stage, rt_bs,
+                                         rt_off, rt_ms, wb, nr, x8);
+                printf("[5] NvRmMemWriteStrided -> rc=0x%x\n", (unsigned)rc);
+
+                memset(back, 0xEE, region);
+                rc = nvRmMemReadStrided((unsigned)memh_rt, back, rt_bs,
+                                        rt_off, rt_ms, wb, nr, x8);
+                printf("[5] NvRmMemReadStrided -> rc=0x%x\n", (unsigned)rc);
+
+                for (k = 0; k < (int)region; k++) {
+                    if (stage[k] != back[k]) {
+                        bad++;
+                        if (first_bad == 0xffffffffu)
+                            first_bad = (unsigned)k;
+                    }
+                }
+
+                {
+                    unsigned ew[8], rw[8];
+                    int m;
+                    for (m = 0; m < 8; m++) {
+                        int b = m * 4;
+                        ew[m] = (unsigned)stage[b] |
+                                ((unsigned)stage[b + 1] << 8) |
+                                ((unsigned)stage[b + 2] << 16) |
+                                ((unsigned)stage[b + 3] << 24);
+                        rw[m] = (unsigned)back[b] |
+                                ((unsigned)back[b + 1] << 8) |
+                                ((unsigned)back[b + 2] << 16) |
+                                ((unsigned)back[b + 3] << 24);
+                    }
+                    printf("[5] expected:");
+                    for (m = 0; m < 8; m++)
+                        printf(" %08x", ew[m]);
+                    printf("\n");
+                    printf("[5] received:");
+                    for (m = 0; m < 8; m++)
+                        printf(" %08x", rw[m]);
+                    printf("\n");
+                }
+
+                if (bad == 0) {
+                    printf("[5] ROUND TRIP PASSED: %u bytes identical\n",
+                           region);
+                } else {
+                    printf("[5] ROUND TRIP FAILED: %u of %u bytes differ, "
+                           "first at byte 0x%x (row %u, col %u)\n",
+                           bad, region, first_bad,
+                           first_bad / rt_ms, (first_bad % rt_ms) / 4);
+                }
+            }
+        }
+    }
 
     /* [5] open instance 1. On failure the library cleans up after
        itself; we release nothing here, that would be a double free. */

@@ -78,7 +78,7 @@ echo "-- configuration words (cfg=/cfg2=)"
 check "cfg=0:2"                1 4194303 rggb cfg=0:2
 check "cfg=15:0xd"             1 4194303 rggb cfg=15:0xd
 check "cfg multiple"           1 4194303 rggb cfg=0:2 cfg=3:5
-check "cfg2:5"                 1 4194303 rggb cfg2:5
+check "cfg2=5"                 1 4194303 rggb cfg2=5
 check "cfg=16:1 rejected"      0 4194303 rggb cfg=16:1
 check "cfg junk rejected"      0 4194303 rggb cfg=junk
 

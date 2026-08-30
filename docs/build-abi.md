@@ -27,6 +27,16 @@ device that holds the only working camera we have.
 Rather than test whether the old linker tolerates it, we removed the
 condition.
 
+**Since measured, in a place where being wrong was cheap.** `ispinit` is a
+standalone executable, so it was built the ordinary way -- crt0, libc, and
+the versioned `@LIBC` references the NDK emits -- and the 4.4 linker loaded
+it and ran it without complaint.
+
+So the rule stands for the shim but its reason has narrowed: the linker
+handles versioning, we simply have not tested it *inside mediaserver*, and
+that process holds the only working camera we have. For anything standalone,
+build it normally.
+
 ## Linking without the sysroot
 
 Link against SONAME-only stubs instead of the NDK sysroot:

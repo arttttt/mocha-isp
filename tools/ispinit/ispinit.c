@@ -47,6 +47,9 @@
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
+#ifndef HOST_ARGTEST
+#include <sys/ucontext.h>
+#endif
 
 #include "bayer_gen.h"
 
@@ -296,16 +299,110 @@ static void print_gate(const char *tag, unsigned hIsp)
    process goes -- the whole point of per-stage calls is knowing WHO
    failed. Unbuffered stdout plus a controlled _exit(70). */
 static const char *stage_now;
+
+/* module ranges for PC/LR attribution; scanned once at startup so the
+   handler itself does no file I/O */
+#ifndef HOST_ARGTEST
+static unsigned mod_start[3], mod_end[3];
+static const char *mod_names[3] = {
+    "libnvisp_v3.so", "libnvrm.so", "libnvrm_graphics.so"
+};
+
+static void scan_modules(void)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    char line[512];
+
+    if (f == 0)
+        return;
+    while (fgets(line, sizeof(line), f) != 0) {
+        unsigned lo, hi;
+        int i;
+        if (sscanf(line, "%x-%x", &lo, &hi) != 2)
+            continue;
+        for (i = 0; i < 3; i++) {
+            if (strstr(line, mod_names[i]) == 0)
+                continue;
+            if (mod_end[i] == 0) {
+                mod_start[i] = lo;
+                mod_end[i] = hi;
+            } else {
+                if (lo < mod_start[i])
+                    mod_start[i] = lo;
+                if (hi > mod_end[i])
+                    mod_end[i] = hi;
+            }
+        }
+    }
+    fclose(f);
+}
+#endif
+
+static void hex_write(unsigned v)
+{
+    static const char dig[] = "0123456789abcdef";
+    int i;
+
+    for (i = 28; i >= 0; i -= 4) {
+        char c = dig[(v >> i) & 0xf];
+        write(1, &c, 1);
+    }
+}
+
+/* which loaded module an address belongs to: PC inside libnvisp_v3 ->
+   plain data deref (pc - base = file offset); PC == 0 -> call through
+   a null function pointer, and LR says who called; PC inside
+   libnvrm_graphics -> the fault is inside NvRmStream* */
+static void print_named(unsigned a)
+{
+#ifndef HOST_ARGTEST
+    int i;
+    for (i = 0; i < 3; i++) {
+        if (mod_end[i] != 0 && a >= mod_start[i] && a < mod_end[i]) {
+            static const char lb[] = " (";
+            write(1, lb, sizeof(lb) - 1);
+            write(1, mod_names[i], strlen(mod_names[i]));
+            write(1, "+0x", 3);
+            hex_write(a - mod_start[i]);
+            write(1, ")", 1);
+            return;
+        }
+    }
+#else
+    (void)a;
+#endif
+}
+
 static void stage_segv(int sig, siginfo_t *info, void *uc)
 {
     static const char m1[] = "[stage-crash] ";
     static const char m2[] = " CRASHED (fatal signal) fault-addr=0x";
+    static const char nl[] = "\n";
+#ifndef HOST_ARGTEST
+    ucontext_t *u = (ucontext_t *)uc;
+    static const char rlbl[] = " pc=0x";
+    static const char lbl2[] = " lr=0x";
+    static const char lbl3[] = " sp=0x";
+    static const char lbl0[] = " r0=0x";
+    static const char lbl1[] = " r1=0x";
+    static const char lbl2x[] = " r2=0x";
+    static const char lbl3x[] = " r3=0x";
+    unsigned pc = u != 0 ? u->uc_mcontext.arm_pc : 0;
+    unsigned lr = u != 0 ? u->uc_mcontext.arm_lr : 0;
+    unsigned sp = u != 0 ? u->uc_mcontext.arm_sp : 0;
+    unsigned r0 = u != 0 ? u->uc_mcontext.arm_r0 : 0;
+    unsigned r1 = u != 0 ? u->uc_mcontext.arm_r1 : 0;
+    unsigned r2 = u != 0 ? u->uc_mcontext.arm_r2 : 0;
+    unsigned r3 = u != 0 ? u->uc_mcontext.arm_r3 : 0;
+#else
+    (void)info;
+    (void)uc;
+#endif
     static const char m3[] = " -- controlled exit\n";
     static const char dig[] = "0123456789abcdef";
     unsigned a = info != 0 ? (unsigned)(unsigned long)info->si_addr : 0;
     int i;
-    (void)sig;
-    (void)uc;
+
     write(1, m1, sizeof(m1) - 1);
     if (stage_now != 0)
         write(1, stage_now, strlen(stage_now));
@@ -314,6 +411,29 @@ static void stage_segv(int sig, siginfo_t *info, void *uc)
         char c = dig[(a >> i) & 0xf];
         write(1, &c, 1);
     }
+#ifndef HOST_ARGTEST
+    write(1, rlbl, sizeof(rlbl) - 1);
+    hex_write(pc);
+    print_named(pc);
+    if (pc == 0) {
+        static const char z[] = " [call through NULL]";
+        write(1, z, sizeof(z) - 1);
+    }
+    write(1, lbl2, sizeof(lbl2) - 1);
+    hex_write(lr);
+    print_named(lr);
+    write(1, lbl3, sizeof(lbl3) - 1);
+    hex_write(sp);
+    write(1, lbl0, sizeof(lbl0) - 1);
+    hex_write(r0);
+    write(1, lbl1, sizeof(lbl1) - 1);
+    hex_write(r1);
+    write(1, lbl2x, sizeof(lbl2x) - 1);
+    hex_write(r2);
+    write(1, lbl3x, sizeof(lbl3x) - 1);
+    hex_write(r3);
+#endif
+    write(1, nl, sizeof(nl) - 1);
     write(1, m3, sizeof(m3) - 1);
     _exit(70);
 }
@@ -981,6 +1101,9 @@ int main(int argc, char **argv)
     }
     printf("[0] requested rate = 0x%x, order = %s\n", rate,
            order_names[order]);
+#ifndef HOST_ARGTEST
+    scan_modules();
+#endif
 
     /*
      * [gen] Generator self-test on a HOST staging buffer: FIRST, before

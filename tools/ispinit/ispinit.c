@@ -55,11 +55,29 @@
 static const char nvrm_path[] = "libnvrm.so";
 static const char nvisp_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
+/*
+ * The stock's configuration words, verbatim from the live dump
+ * (out/hook-config.txt, identical for both instances):
+ *   mode 1, size 64: sixteen words of format selectors;
+ *   mode 2, size 4:  the single word 2.
+ * Cross-checked twice: the hook dump and the lead's mail agree word for
+ * word. A typo here is a wrong format with no visible cause.
+ */
+static const unsigned cfg_mode1[16] = {
+    0x00000001, 0x00000007, 0x00000009, 0x0000000a,
+    0x00000003, 0x00000000, 0x00000006, 0x00000008,
+    0x00000011, 0x0000000f, 0x0000000c, 0x0000000e,
+    0x0000000b, 0x00000000, 0x00000010, 0x0000000d,
+};
+static const unsigned cfg_mode2 = 2;
+
 /* --- the five calls --- */
 
 typedef int (*NvRmOpen_fn)(void **out);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
+typedef int (*NvIspSetConfiguration_fn)(unsigned hIsp, unsigned mode,
+                                        const void *buf, unsigned *size);
 typedef int (*NvIspSetIspClockRate_fn)(unsigned hIsp, unsigned rate);
 typedef int (*NvIspGetStatus_fn)(unsigned hIsp, unsigned statusId,
                                  void *value, unsigned *size);
@@ -119,17 +137,20 @@ int main(int argc, char **argv)
     /* [3] the symbols; a miss here is printed and fatal */
     nvRmOpen = (NvRmOpen_fn)dlsym(nvrm, "NvRmOpen");
     nvIspOpen = (NvIspOpen_fn)dlsym(nvisp, "NvIspOpen");
+    nvIspSetConfiguration =
+        (NvIspSetConfiguration_fn)dlsym(nvisp, "NvIspSetConfiguration");
     nvIspSetIspClockRate =
         (NvIspSetIspClockRate_fn)dlsym(nvisp, "NvIspSetIspClockRate");
     nvIspGetStatus = (NvIspGetStatus_fn)dlsym(nvisp, "NvIspGetStatus");
     nvIspClose = (NvIspClose_fn)dlsym(nvisp, "NvIspClose");
 
-    printf("[3] dlsym: NvRmOpen=%p NvIspOpen=%p SetIspClockRate=%p "
-           "GetStatus=%p Close=%p\n",
-           nvRmOpen, nvIspOpen, nvIspSetIspClockRate, nvIspGetStatus,
-           nvIspClose);
-    if (nvRmOpen == 0 || nvIspOpen == 0 || nvIspSetIspClockRate == 0 ||
-        nvIspGetStatus == 0 || nvIspClose == 0) {
+    printf("[3] dlsym: NvRmOpen=%p NvIspOpen=%p SetConfiguration=%p "
+           "SetIspClockRate=%p GetStatus=%p Close=%p\n",
+           nvRmOpen, nvIspOpen, nvIspSetConfiguration, nvIspSetIspClockRate,
+           nvIspGetStatus, nvIspClose);
+    if (nvRmOpen == 0 || nvIspOpen == 0 || nvIspSetConfiguration == 0 ||
+        nvIspSetIspClockRate == 0 || nvIspGetStatus == 0 ||
+        nvIspClose == 0) {
         printf("    dlerror: %s\n", dlerror());
         return 1;
     }
@@ -149,24 +170,41 @@ int main(int argc, char **argv)
     if (rc != 0)
         return 1;
 
-    /* [6] set the requested rate: the zero cache would answer the next
+    /* [6] configure, mode 1: the stock's sixteen selector words, size 64
+       in. The size AFTER the call matters: rc 10 means the library
+       disagreed and wrote the size it wants -- the fix-and-retry
+       mechanism. We print what it said instead of guessing. */
+    size = 64;
+    printf("[6] NvIspSetConfiguration(hIsp=0x%x, mode=1, cfg16, &size=64) "
+           "-> ", hIsp);
+    rc = nvIspSetConfiguration(hIsp, 1, cfg_mode1, &size);
+    printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
+
+    /* [7] configure, mode 2: the single word 2, size 4 in */
+    size = 4;
+    printf("[7] NvIspSetConfiguration(hIsp=0x%x, mode=2, &cfg_mode2, "
+           "&size=4) -> ", hIsp);
+    rc = nvIspSetConfiguration(hIsp, 2, &cfg_mode2, &size);
+    printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
+
+    /* [8] set the requested rate: the zero cache would answer the next
        read with zero and hide whether the ISP is alive at all; the max
        is clipped by the clock tree (600000 of 0x3fffff), and a smaller
        request must come back as requested -- that is the control */
-    printf("[6] NvIspSetIspClockRate(hIsp=0x%x, rate=0x%x) -> ", hIsp, rate);
+    printf("[8] NvIspSetIspClockRate(hIsp=0x%x, rate=0x%x) -> ", hIsp, rate);
     rc = nvIspSetIspClockRate(hIsp, rate);
     printf("rc=0x%x\n", (unsigned)rc);
 
-    /* [7] status id 6, 4 bytes in, actual size out; must be the rate
+    /* [9] status id 6, 4 bytes in, actual size out; must be the rate
        just written, not zero */
     size = 4;
-    printf("[7] NvIspGetStatus(hIsp=0x%x, id=6, &value, size=4) -> ", hIsp);
+    printf("[9] NvIspGetStatus(hIsp=0x%x, id=6, &value, size=4) -> ", hIsp);
     rc = nvIspGetStatus(hIsp, 6, &value, &size);
     printf("rc=0x%x size=%u value=0x%x\n", (unsigned)rc, size, value);
 
-    /* [8] hand it back, completely: NvIspClose releases everything
+    /* [10] hand it back, completely: NvIspClose releases everything
        itself, including the host1x channel. */
-    printf("[8] NvIspClose(hIsp=0x%x) -> ", hIsp);
+    printf("[10] NvIspClose(hIsp=0x%x) -> ", hIsp);
     rc = nvIspClose(hIsp);
     printf("rc=0x%x\n", (unsigned)rc);
 

@@ -85,6 +85,35 @@ echo "-- attribute overrides"
 check "attr=4:0x40000" 1 4194303 rggb attr=4:0x40000
 check "attr=4:0x800 attr=2:0x100" 1 4194303 rggb attr=4:0x800 attr=2:0x100
 
+echo "-- declared output lines exist in SOURCE (not only in comments)"
+src="$DIR/ispinit.c"
+declare_fail=0
+while IFS= read -r tag; do
+    [ -z "$tag" ] && continue
+    if grep -qF "\"$tag" "$src"; then
+        echo "  OK   $tag"
+    else
+        echo "  FAIL tag not in any printf/print_first_words: $tag"
+        declare_fail=$((declare_fail+1))
+    fi
+done <<'TAGS'
+[0] requested rate
+[1] dlopen
+[4] NvRmOpen
+[5] round trip
+[5] ROUND TRIP
+[10] attrs
+[11] desc_in
+[11] desc_out
+[11] NvRmMemWrite(hops)
+[11] input-after-write first words
+[11] output-after-alloc first words
+[12] NvIspProcessFrame
+[12] output-after-submit first words
+[13] NvIspClose
+TAGS
+fail=$((fail+declare_fail))
+
 echo "-- defaults and a1 positional"
 check "bare"           1 4194303
 check "positional 1"   1 4194303 rggb 1

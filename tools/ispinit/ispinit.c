@@ -924,6 +924,49 @@ round_trip_end:;
                            bufs[i][k]);
                 printf("\n");
             }
+            /*
+             * [11b] fill the INPUT buffer with the generated Bayer --
+             * the buffer the ISP actually reads. Found order hops =
+             * (handle, offset, ptr, size), offset 0, size stride*height,
+             * so rows land in nvmap as bayer_fill laid them out. Then
+             * state 2 of 3: read it back and compare byte-for-byte
+             * with what we sent. (Commit 2b521e1 claimed this block;
+             * a silent patch failure left it out -- the presence rule
+             * in argtest.sh now catches that class.)
+             */
+            {
+                unsigned pat_bytes = gs * gh;
+                unsigned char *pat = malloc(pat_bytes);
+                unsigned char *chk = malloc(pat_bytes);
+                unsigned wrc, rrc, diff = 0;
+                int q;
+
+                if (pat == 0 || chk == 0) {
+                    printf("[11] pattern malloc failed -- input buffer "
+                           "stays as allocated\n");
+                } else {
+                    bayer_fill(pat, gw, gh, gs, 2, order);
+                    wrc = nvRmMemWrite((unsigned)memh_in, (void *)0,
+                                       (unsigned)pat, pat_bytes);
+                    printf("[11] NvRmMemWrite(hops) memh_in <- %u pattern "
+                           "bytes -> rc=0x%x\n", pat_bytes, (unsigned)wrc);
+
+                    memset(chk, 0xEE, pat_bytes);
+                    rrc = nvRmMemRead((unsigned)memh_in, (void *)0,
+                                      (unsigned)chk, pat_bytes);
+                    for (q = 0; q < (int)pat_bytes; q++)
+                        if (chk[q] != pat[q])
+                            diff++;
+                    print_first_words(
+                        "[11] input-after-write first words", chk, 8);
+                    printf("[11] input-after-write: rc=0x%x, %u of %u "
+                           "bytes differ from pattern\n",
+                           (unsigned)rrc, diff, pat_bytes);
+                }
+                free(pat);
+                free(chk);
+            }
+
             printf("[12] aux slots:");
             for (i = 0; i < 7; i++)
                 printf(" +%s=%p(%s)", aux_names[i],

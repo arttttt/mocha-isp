@@ -86,6 +86,17 @@ static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 #define SHIM_DEREF_IDX_CFG     21
 
 /*
+ * NvIspProcessFrame, bindings-table index 5. Its r1 is the processing
+ * mode: the stock always shows 2 (the ordinary path); the owner
+ * suspects the from-memory mode is never used at all. To CHECK that
+ * cheaply rather than believe it, a call with r1 != 2 bypasses the
+ * budget and logs whatever the frame count is -- capped at 20 lines
+ * per process so an unexpected stream cannot flood logcat.
+ */
+#define SHIM_IDX_PROCESSFRAME  5
+static unsigned pf_odd_logged;
+
+/*
  * --- the intervention gate -------------------------------------------------
  *
  * Writing into a stranger's memory (the debug flag behind r2) is toggled by
@@ -313,9 +324,18 @@ void *shim_log_call(unsigned idx, unsigned *saved)
         hook_real_cache[idx] = t;
     }
 
-    /* budget: log only the first 4 calls per binding */
+    /*
+     * Budget: four logged calls per binding. The ProcessFrame exception:
+     * r1 != 2 logs regardless of the budget -- the point is to catch a
+     * nonstandard mode no matter how many ordinary frames ran before --
+     * but at most 20 times per process.
+     */
     if (shim_budget[idx] >= 4) {
-        return hook_real_cache[idx];
+        int bypass = (idx == SHIM_IDX_PROCESSFRAME && saved[1] != 2 &&
+                      pf_odd_logged < 20);
+        if (!bypass)
+            return hook_real_cache[idx];
+        pf_odd_logged++;
     }
     shim_budget[idx]++;
 

@@ -81,7 +81,7 @@ static const unsigned cfg_mode2 = 2;
 typedef int (*NvRmOpen_fn)(void **out);
 typedef int (*NvRmMemHandleCreate_fn)(unsigned param0, void **out,
                                       unsigned size);
-typedef int (*NvRmMemHandleAllocAttr_fn)(void *memHandle, void *attrs,
+typedef int (*NvRmMemHandleAllocAttr_fn)(unsigned size, void *attrs,
                                          void **out);
 typedef int (*NvIspOpen_fn)(unsigned devHandle, unsigned instance,
                             unsigned *hIsp);
@@ -350,21 +350,28 @@ int main(int argc, char **argv)
      */
 
     /*
-     * [10] TWO steps, not one. NVMAP_IOC_ALLOC does not create a handle,
-     * it allocates memory for an ALREADY created one; creation is
-     * NvRmMemHandleCreate (NVMAP_IOC_CREATE: size in, handle out).
+     * [10] ONE call, like the stock: libnvisp imports exactly three
+     * memory functions -- AllocAttr, Free, Read. Neither Create nor
+     * Alloc. AllocAttr is "create with attributes":
      *
-     * FIRST ARGUMENT of AllocAttr is the handle from Create -- the third
-     * answer to this question, and the first one that EXPLAINS what we
-     * saw instead of just matching a code. The chain, three independent
-     * sources: we passed &dev (an address, meaningless as a kernel fd);
-     * nvmap_handle_get_from_fd found no handle -> -EINVAL (kernel
-     * source); libnvrm's errno table maps EINVAL(22) -> 0xb (library
-     * decode); we saw rc=0xb (live run). The ioctl fd itself comes from
-     * a libnvrm global, not from the argument -- which is why &dev had
-     * no effect. (NvIspOpen, one call away, still takes the device
-     * handle VALUE because its NvRmChannelOpen never reads param_1:
-     * different functions, different argument shapes, both correct.)
+     *   NvRmMemHandleAllocAttr(SIZE, attrs, &memh)
+     *
+     * first argument SIZE, third the handle out. strace confirms the
+     * shape: AllocAttr sends NVMAP_IOC_CREATE, whose struct carries the
+     * size at offset 0 and returns the handle at offset 4.
+     *
+     * This also explains the 0xb runs without any fd story: our first
+     * arguments were &dev, then a Create handle -- both meaningless AS
+     * SIZES, and nvmap answers -EINVAL to a bogus size, which libnvrm's
+     * errno table maps EINVAL(22) -> 0xb, what we saw. Three sizes tried
+     * in attrs[4] (0x800/0xffc/0x1000) changed nothing because the size
+     * never lived there.
+     *
+     * The TWO-STEP variant (NvRmMemHandleCreate then AllocAttr with the
+     * handle) is kept below under ISPINIT_TWO_STEP_CREATE: it is the
+     * only verified-working allocation code we have in this area, and
+     * the kernel does have the two-command path -- the stock simply does
+     * not walk it.
      *
      * No free yet: first a clean submission, then paired teardown.
      */
@@ -398,6 +405,17 @@ int main(int argc, char **argv)
                    attr_set[k] ? "*" : "");
         printf("\n");
 
+        printf("[10] size=%u (first argument, CLI-overridable)\n", mem_size);
+
+#ifndef ISPINIT_TWO_STEP_CREATE
+        printf("[10] NvRmMemHandleAllocAttr(size=%u, attrs[8], &memh) -> ",
+               mem_size);
+        rc = nvRmMemHandleAllocAttr((void *)mem_size, attrs, &memh);
+        printf("rc=0x%x memh=%p\n", (unsigned)rc, memh);
+#else
+        /* the kernel's two-command path, kept for reference: the stock
+           does not walk it, but it is our only verified-working code
+           in this area */
         printf("[10] NvRmMemHandleCreate(0, &memh, size=%u) -> ", mem_size);
         rc = nvRmMemHandleCreate(0, &memh, mem_size);
         printf("rc=0x%x memh=%p\n", (unsigned)rc, memh);
@@ -408,6 +426,7 @@ int main(int argc, char **argv)
             rc = nvRmMemHandleAllocAttr(memh, attrs, &alloc_out);
             printf("rc=0x%x out=%p\n", (unsigned)rc, alloc_out);
         }
+#endif
 
         if (rc != 0 || memh == 0) {
             printf("    alloc failed -- skipping submission, closing\n");

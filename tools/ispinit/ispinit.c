@@ -135,6 +135,9 @@ int main(int argc, char **argv)
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
     int aux_on[3] = {1, 1, 1}; /* slots +18, +1c, +20 */
+    unsigned aux_val[3][44];        /* word values for a18/a1c/a20 */
+    unsigned char aux_set[3][44] = {{0}};
+    unsigned char aux_isptr[3][44] = {{0}}; /* value was 'ptr' */
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -182,6 +185,42 @@ int main(int argc, char **argv)
         char *e1 = 0, *e2 = 0;
         long idx, val;
 
+        if (strncmp(tok, "a18=", 4) == 0 || strncmp(tok, "a1c=", 4) == 0 ||
+            strncmp(tok, "a20=", 4) == 0) {
+            /* a<slot>=<idx>:<val|ptr> -- set one word of an aux buffer;
+               several allowed; idx decimal or hex, 0..43; 'ptr' puts the
+               address of a shared zeroed buffer into the word (for the
+               stock's pointer at +14 of the +1c structure) */
+            char *colon;
+            long idx, val;
+            int which = (tok[1] == '1' && tok[2] == '8') ? 0
+                      : (tok[1] == '1' && tok[2] == 'c') ? 1 : 2;
+            colon = strchr(tok + 4, ':');
+            if (colon == 0) {
+                printf("[0] bad aux word '%s', use a<slot>=<idx>:<val|ptr>\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            idx = strtol(tok + 4, &e1, 0);
+            if (e1 == tok + 4 || *e1 != '\0' || idx < 0 || idx > 43) {
+                printf("[0] bad aux word index '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (strcmp(colon + 1, "ptr") == 0) {
+                aux_isptr[which][idx] = 1;
+                aux_set[which][idx] = 1;
+            } else {
+                val = strtol(colon + 1, &e2, 0);
+                if (e2 == colon + 1 || *e2 != '\0') {
+                    printf("[0] bad aux word value '%s'\n", argv[ai]);
+                    return 1;
+                }
+                aux_val[which][idx] = (unsigned)val;
+                aux_set[which][idx] = 1;
+            }
+            continue;
+        }
         if (strncmp(tok, "aux=", 4) == 0) {
             /* aux=<hexslot>:on|off -- fill one of the three remaining
                stack slots (+18, +1c, +20) with a zeroed buffer, or pass
@@ -421,8 +460,20 @@ int main(int argc, char **argv)
         unsigned aux18[44] = {0};  /* stack +18 */
         unsigned aux1c[44] = {0};  /* stack +1c */
         unsigned aux20[44] = {0};  /* stack +20 */
+        unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
-        int k;
+        int i, k;
+        static const char aux_names[3][3] = { "18", "1c", "20" };
+
+        for (i = 0; i < 3; i++) {
+            unsigned *buf = i == 0 ? aux18 : i == 1 ? aux1c : aux20;
+            for (k = 0; k < 44; k++) {
+                if (aux_isptr[i][k])
+                    buf[k] = (unsigned)ptr_target;
+                else if (aux_set[i][k])
+                    buf[k] = aux_val[i][k];
+            }
+        }
 
         for (k = 0; k < 8; k++) {
             attrs_in[k] = attrs_base[k];
@@ -485,6 +536,13 @@ int main(int argc, char **argv)
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
                for instance), the log shows exactly where it stopped. */
+            for (i = 0; i < 3; i++) {
+                unsigned *buf = i == 0 ? aux18 : i == 1 ? aux1c : aux20;
+                printf("[11] aux%s=", aux_names[i]);
+                for (k = 0; k < 16; k++)
+                    printf("%s%02x:%08x", k != 0 ? "," : "+", k * 4, buf[k]);
+                printf("\n");
+            }
             printf("[12] aux slots: +18=%p(%s) +1c=%p(%s) +20=%p(%s)\n",
                    aux_on[0] ? (void *)aux18 : (void *)0,
                    aux_on[0] ? "on" : "off",

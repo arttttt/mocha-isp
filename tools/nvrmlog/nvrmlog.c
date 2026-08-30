@@ -37,20 +37,29 @@
 typedef int (*AllocAttr_fn)(unsigned a1, void *attrs, void **out);
 
 static void *real_handle;
-static AllocAttr_fn real_fn;
 
-int NvRmMemHandleAllocAttr(unsigned a1, void *attrs, void **out)
+/*
+ * Lazy resolver against the real libnvrm.so. Cached per function; the
+ * library handle is opened once process-wide.
+ */
+static void *resolve_real(const char *name, void **cache)
 {
-    int rc;
-
-    /* resolve the real function once, lazily */
-    if (real_fn == 0) {
+    if (*cache == 0) {
         if (real_handle == 0)
             real_handle = dlopen("libnvrm.so", NVRMLOG_DLOPEN_FLAGS);
         if (real_handle != 0)
-            real_fn = (AllocAttr_fn)dlsym(real_handle,
-                                          "NvRmMemHandleAllocAttr");
+            *cache = dlsym(real_handle, name);
     }
+    return *cache;
+}
+
+int NvRmMemHandleAllocAttr(unsigned a1, void *attrs, void **out)
+{
+    static AllocAttr_fn real_fn;
+    int rc;
+
+    real_fn = (AllocAttr_fn)resolve_real("NvRmMemHandleAllocAttr",
+                                         (void **)&real_fn);
 
     printf("[nvrmlog] AllocAttr arg1=0x%x attrs=%p out=%p\n",
            a1, attrs, (void *)out);
@@ -89,5 +98,55 @@ int NvRmMemHandleAllocAttr(unsigned a1, void *attrs, void **out)
     rc = real_fn(a1, attrs, out);
     printf("[nvrmlog]   -> rc=0x%x memh=%p\n", (unsigned)rc,
            out != 0 ? *out : 0);
+    return rc;
+}
+
+/*
+ * NvRmMemRead: libnvisp imports it, so live calls occur during normal
+ * ISP operation. Arity unestablished -- four words printed and forwarded
+ * as-is (ARM AAPCS ignores extra registers harmlessly; we print the
+ * first four, the shape will be visible from the values).
+ */
+int NvRmMemRead(unsigned a1, unsigned a2, unsigned a3, unsigned a4)
+{
+    static int (*real_fn)(unsigned, unsigned, unsigned, unsigned);
+    int rc;
+
+    real_fn = (int (*)(unsigned, unsigned, unsigned, unsigned))
+        resolve_real("NvRmMemRead", (void **)&real_fn);
+
+    printf("[nvrmlog] Read a1=0x%x a2=0x%x a3=0x%x a4=0x%x\n",
+           a1, a2, a3, a4);
+
+    if (real_fn == 0) {
+        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
+        return 0xb;
+    }
+    rc = real_fn(a1, a2, a3, a4);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
+    return rc;
+}
+
+/*
+ * NvRmMemHandleFree: the paired teardown -- captured so we see WHEN the
+ * stock frees surfaces and with which handle (our own teardown waits
+ * for a clean submission first).
+ */
+int NvRmMemHandleFree(unsigned a1)
+{
+    static int (*real_fn)(unsigned);
+    int rc;
+
+    real_fn = (int (*)(unsigned))resolve_real("NvRmMemHandleFree",
+                                              (void **)&real_fn);
+
+    printf("[nvrmlog] HandleFree a1=0x%x\n", a1);
+
+    if (real_fn == 0) {
+        printf("[nvrmlog]   real function UNAVAILABLE -- returning 0xb\n");
+        return 0xb;
+    }
+    rc = real_fn(a1);
+    printf("[nvrmlog]   -> rc=0x%x\n", (unsigned)rc);
     return rc;
 }

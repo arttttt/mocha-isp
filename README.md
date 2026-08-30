@@ -137,6 +137,23 @@ offset, which the library feeds to `NvRmStreamPushReloc`; the kernel
 resolves the real address, in the ISP's own SMMU domain, when the command is
 submitted. That is why hardcoding one would be meaningless as well as wrong.
 
+### Getting data in and out
+
+`NvRmMemWrite(handle, offset, ptr, size)` and `NvRmMemRead` with the same
+shape: a buffer written from the CPU and read back byte for byte, 64, 512
+and 2048 bytes, with no mapping step at all.
+
+The argument order was found by enumeration, not by reading. Six
+permutations, one run each, one of them passed -- against a disassembly that
+had the middle pair the other way round. The same enumeration settled the
+question of whether the stock's `MMAP` step is needed for us: it is not.
+
+That is the rule this cost us a day to learn. Where the space of
+possibilities is small and closed, enumerate it. Reading the disassembly
+produces one candidate and no way to tell whether it is right; five such
+candidates in a row were wrong, and each was refuted by hardware in a single
+run.
+
 The stock stack never uses it. The hook was changed to log any call whose
 mode is not 2 outside the budget, and the camera was driven through preview,
 three full-resolution stills and a video: three JPEGs written, and four

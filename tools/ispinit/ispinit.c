@@ -158,10 +158,13 @@ int main(int argc, char **argv)
     char rt_order[5] = "hpos";            /* simple-mode argument order */
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
-    int aux_on[3] = {1, 1, 1}; /* slots +18, +1c, +20 */
-    unsigned aux_val[3][44];        /* word values for a18/a1c/a20 */
-    unsigned char aux_set[3][44] = {{0}};
-    unsigned char aux_isptr[3][44] = {{0}}; /* value was 'ptr' */
+    /* seven stack slots: +00 +04 +08 +0c +18 +1c +20. The first four
+       default OFF (zeros -- the historical behavior, their role is the
+       open question), the last three default ON. */
+    int aux_on[7] = {0, 0, 0, 0, 1, 1, 1};
+    unsigned aux_val[7][44];
+    unsigned char aux_set[7][44] = {{0}};
+    unsigned char aux_isptr[7][44] = {{0}}; /* value was 'ptr' */
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -268,16 +271,32 @@ int main(int argc, char **argv)
             *dst = (unsigned)v;
             continue;
         }
-        if (strncmp(tok, "a18=", 4) == 0 || strncmp(tok, "a1c=", 4) == 0 ||
-            strncmp(tok, "a20=", 4) == 0) {
-            /* a<slot>=<idx>:<val|ptr> -- set one word of an aux buffer;
-               several allowed; idx decimal or hex, 0..43; 'ptr' puts the
+        if (tok[0] == 'a' && tok[3] == '=' &&
+            ((tok[1] >= '0' && tok[1] <= '9') ||
+             (tok[1] >= 'a' && tok[1] <= 'f')) &&
+            ((tok[2] >= '0' && tok[2] <= '9') ||
+             (tok[2] >= 'a' && tok[2] <= 'f'))) {
+            /* a<slot>=<idx>:<val|ptr> -- set one word of an aux buffer
+               (slot two hex digits: 00 04 08 0c 18 1c 20); several
+               allowed; idx decimal or hex, 0..43; 'ptr' puts the
                address of a shared zeroed buffer into the word (for the
                stock's pointer at +14 of the +1c structure) */
+            static const unsigned aux_slots[7] = {
+                0x00, 0x04, 0x08, 0x0c, 0x18, 0x1c, 0x20
+            };
             char *colon;
-            long idx, val;
-            int which = (tok[1] == '1' && tok[2] == '8') ? 0
-                      : (tok[1] == '1' && tok[2] == 'c') ? 1 : 2;
+            long idx, val, slot;
+            int which = -1;
+            for (int wi = 0; wi < 7; wi++)
+                if (aux_slots[wi] ==
+                    (unsigned)strtol(tok + 1, 0, 16))
+                    which = wi;
+            if (which < 0) {
+                printf("[0] unknown aux slot in '%s'\n", argv[ai]);
+                return 1;
+            }
+            slot = 0; /* reserved */
+            (void)slot;
             colon = strchr(tok + 4, ':');
             if (colon == 0) {
                 printf("[0] bad aux word '%s', use a<slot>=<idx>:<val|ptr>\n",
@@ -311,28 +330,31 @@ int main(int argc, char **argv)
             char *colon = strchr(tok + 4, ':');
             long slot;
             int *flag;
+            static const unsigned aux_slots[7] = {
+                0x00, 0x04, 0x08, 0x0c, 0x18, 0x1c, 0x20
+            };
+            int wi, hit = -1;
             if (colon == 0) {
                 printf("[0] bad aux '%s', use aux=<hexslot>:on|off\n",
                        argv[ai]);
                 return 1;
             }
             *colon = '\0';
-            slot = strtol(tok + 4, &e1, 16); /* slots are hex offsets:
-                                                18, 1c, 20 ("0x" ok too) */
+            slot = strtol(tok + 4, &e1, 16); /* slots are hex offsets
+                                                ("0x" prefix ok too) */
             if (e1 == tok + 4 || *e1 != '\0') {
                 printf("[0] bad aux slot '%s'\n", argv[ai]);
                 return 1;
             }
-            if (slot == 0x18)
-                flag = &aux_on[0];
-            else if (slot == 0x1c)
-                flag = &aux_on[1];
-            else if (slot == 0x20)
-                flag = &aux_on[2];
-            else {
-                printf("[0] unknown aux slot 0x%lx, use 18|1c|20\n", slot);
+            for (wi = 0; wi < 7; wi++)
+                if (aux_slots[wi] == (unsigned)slot)
+                    hit = wi;
+            if (hit < 0) {
+                printf("[0] unknown aux slot 0x%lx, use "
+                       "00|04|08|0c|18|1c|20\n", slot);
                 return 1;
             }
+            flag = &aux_on[hit];
             if (strcmp(colon + 1, "on") == 0)
                 *flag = 1;
             else if (strcmp(colon + 1, "off") == 0)
@@ -696,21 +718,20 @@ round_trip_end:;
         unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
                                         record size */
         unsigned desc_out[44] = {0};
-        unsigned aux18[44] = {0};  /* stack +18 */
-        unsigned aux1c[44] = {0};  /* stack +1c */
-        unsigned aux20[44] = {0};  /* stack +20 */
+        unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
         unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
         unsigned a1;
         int i, k;
-        static const char aux_names[3][3] = { "18", "1c", "20" };
+        static const char aux_names[7][3] = {
+            "00", "04", "08", "0c", "18", "1c", "20"
+        };
 
-        for (i = 0; i < 3; i++) {
-            unsigned *buf = i == 0 ? aux18 : i == 1 ? aux1c : aux20;
+        for (i = 0; i < 7; i++) {
             for (k = 0; k < 44; k++) {
                 if (aux_isptr[i][k])
-                    buf[k] = (unsigned)ptr_target;
+                    bufs[i][k] = (unsigned)ptr_target;
                 else if (aux_set[i][k])
-                    buf[k] = aux_val[i][k];
+                    bufs[i][k] = aux_val[i][k];
             }
         }
 
@@ -775,29 +796,33 @@ round_trip_end:;
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
                for instance), the log shows exactly where it stopped. */
-            for (i = 0; i < 3; i++) {
-                unsigned *buf = i == 0 ? aux18 : i == 1 ? aux1c : aux20;
+            for (i = 0; i < 7; i++) {
+                if (!aux_on[i])
+                    continue;
                 printf("[11] aux%s=", aux_names[i]);
                 for (k = 0; k < 16; k++)
-                    printf("%s%02x:%08x", k != 0 ? "," : "+", k * 4, buf[k]);
+                    printf("%s%02x:%08x", k != 0 ? "," : "+", k * 4,
+                           bufs[i][k]);
                 printf("\n");
             }
-            printf("[12] aux slots: +18=%p(%s) +1c=%p(%s) +20=%p(%s)\n",
-                   aux_on[0] ? (void *)aux18 : (void *)0,
-                   aux_on[0] ? "on" : "off",
-                   aux_on[1] ? (void *)aux1c : (void *)0,
-                   aux_on[1] ? "on" : "off",
-                   aux_on[2] ? (void *)aux20 : (void *)0,
-                   aux_on[2] ? "on" : "off");
+            printf("[12] aux slots:");
+            for (i = 0; i < 7; i++)
+                printf(" +%s=%p(%s)", aux_names[i],
+                       aux_on[i] ? (void *)bufs[i] : (void *)0,
+                       aux_on[i] ? "on" : "off");
+            printf("\n");
             printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, "
                    "in@+0x10=%p, out@+0x14=%p) -> calling...\n",
                    hIsp, desc_in, desc_out);
             rc = nvIspProcessFrame(hIsp, 1, 0, 0,
-                                   0, 0, 0, 0,   /* stack +00..+0c: library ignores */
+                                   aux_on[0] ? (unsigned)bufs[0] : 0,
+                                   aux_on[1] ? (unsigned)bufs[1] : 0,
+                                   aux_on[2] ? (unsigned)bufs[2] : 0,
+                                   aux_on[3] ? (unsigned)bufs[3] : 0,
                                    (unsigned)desc_in, (unsigned)desc_out,
-                                   aux_on[0] ? (unsigned)aux18 : 0,
-                                   aux_on[1] ? (unsigned)aux1c : 0,
-                                   aux_on[2] ? (unsigned)aux20 : 0);
+                                   aux_on[4] ? (unsigned)bufs[4] : 0,
+                                   aux_on[5] ? (unsigned)bufs[5] : 0,
+                                   aux_on[6] ? (unsigned)bufs[6] : 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
         }
     }

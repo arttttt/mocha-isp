@@ -134,6 +134,7 @@ int main(int argc, char **argv)
     int a1_set = 0;
     unsigned attr_val[8];
     unsigned attr_set[8] = {0};
+    int aux_on[3] = {1, 1, 1}; /* slots +18, +1c, +20 */
     int rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -181,6 +182,45 @@ int main(int argc, char **argv)
         char *e1 = 0, *e2 = 0;
         long idx, val;
 
+        if (strncmp(tok, "aux=", 4) == 0) {
+            /* aux=<hexslot>:on|off -- fill one of the three remaining
+               stack slots (+18, +1c, +20) with a zeroed buffer, or pass
+               a deliberate NULL; default is all on */
+            char *colon = strchr(tok + 4, ':');
+            long slot;
+            int *flag;
+            if (colon == 0) {
+                printf("[0] bad aux '%s', use aux=<hexslot>:on|off\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            slot = strtol(tok + 4, &e1, 16); /* slots are hex offsets:
+                                                18, 1c, 20 ("0x" ok too) */
+            if (e1 == tok + 4 || *e1 != '\0') {
+                printf("[0] bad aux slot '%s'\n", argv[ai]);
+                return 1;
+            }
+            if (slot == 0x18)
+                flag = &aux_on[0];
+            else if (slot == 0x1c)
+                flag = &aux_on[1];
+            else if (slot == 0x20)
+                flag = &aux_on[2];
+            else {
+                printf("[0] unknown aux slot 0x%lx, use 18|1c|20\n", slot);
+                return 1;
+            }
+            if (strcmp(colon + 1, "on") == 0)
+                *flag = 1;
+            else if (strcmp(colon + 1, "off") == 0)
+                *flag = 0;
+            else {
+                printf("[0] bad aux state '%s', use on|off\n", colon + 1);
+                return 1;
+            }
+            continue;
+        }
         if (strncmp(tok, "attr=", 5) == 0)
             tok += 5;
         colon = strchr(tok, ':');
@@ -378,6 +418,9 @@ int main(int argc, char **argv)
         unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
                                         record size */
         unsigned desc_out[44] = {0};
+        unsigned aux18[44] = {0};  /* stack +18 */
+        unsigned aux1c[44] = {0};  /* stack +1c */
+        unsigned aux20[44] = {0};  /* stack +20 */
         unsigned a1;
         int k;
 
@@ -442,13 +485,22 @@ int main(int argc, char **argv)
             /* [12] the submission itself. The intent line goes out
                before the call: if the call never returns (a fence wait,
                for instance), the log shows exactly where it stopped. */
+            printf("[12] aux slots: +18=%p(%s) +1c=%p(%s) +20=%p(%s)\n",
+                   aux_on[0] ? (void *)aux18 : (void *)0,
+                   aux_on[0] ? "on" : "off",
+                   aux_on[1] ? (void *)aux1c : (void *)0,
+                   aux_on[1] ? "on" : "off",
+                   aux_on[2] ? (void *)aux20 : (void *)0,
+                   aux_on[2] ? "on" : "off");
             printf("[12] NvIspProcessFrame(hIsp=0x%x, mode=1, "
-                   "in@+0x10=%p, out@+0x14=%p, aux=zeros) -> calling...\n",
+                   "in@+0x10=%p, out@+0x14=%p) -> calling...\n",
                    hIsp, desc_in, desc_out);
             rc = nvIspProcessFrame(hIsp, 1, 0, 0,
                                    0, 0, 0, 0,   /* stack +00..+0c: library ignores */
                                    (unsigned)desc_in, (unsigned)desc_out,
-                                   0, 0, 0);
+                                   aux_on[0] ? (unsigned)aux18 : 0,
+                                   aux_on[1] ? (unsigned)aux1c : 0,
+                                   aux_on[2] ? (unsigned)aux20 : 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
         }
     }

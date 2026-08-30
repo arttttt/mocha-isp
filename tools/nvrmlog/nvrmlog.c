@@ -16,7 +16,7 @@
  * the log; there is no way to "proceed" there anyway.
  *
  * Note on coverage: calls made through the dynamic linker's symbol
- * resolution (libnvisp -> libnvrm) go through this interceptor. A call
+ * resolution (libnvisp_v3 -> libnvrm) go through this interceptor. A call
  * made through dlsym(libnvrm_handle, ...) -- as ispinit itself does --
  * resolves to the REAL symbol and bypasses us; ispinit prints its own
  * line for that call, so the comparison still lands in one log.
@@ -102,7 +102,7 @@ int NvRmMemHandleAllocAttr(unsigned a1, void *attrs, void **out)
 }
 
 /*
- * NvRmMemRead: libnvisp imports it, so live calls occur during normal
+ * NvRmMemRead: libnvisp_v3 imports it, so live calls occur during normal
  * ISP operation. Arity unestablished -- four words printed and forwarded
  * as-is (ARM AAPCS ignores extra registers harmlessly; we print the
  * first four, the shape will be visible from the values).

@@ -137,6 +137,17 @@ offset, which the library feeds to `NvRmStreamPushReloc`; the kernel
 resolves the real address, in the ISP's own SMMU domain, when the command is
 submitted. That is why hardcoding one would be meaningless as well as wrong.
 
+The stock stack never uses it. The hook was changed to log any call whose
+mode is not 2 outside the budget, and the camera was driven through preview,
+three full-resolution stills and a video: three JPEGs written, and four
+`ProcessFrame` calls, all of them mode 2. Not one call in the memory mode.
+ZSL appears in the logs but is evidently implemented without a second pass
+through the ISP.
+
+So there is nothing to watch. The memory mode exists in the library and has
+to be assembled by hand -- which changes what a gap in the analysis costs:
+it used to mean "read it off the device", and now it means "guess".
+
 
 ## Why not a memory dump
 

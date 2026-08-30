@@ -37,6 +37,16 @@ def read(path):
         tags = [t.entry.d_tag for t in dyn.iter_tags()] if dyn else []
         return funcs, objs, undef, tags
 
+def elf_symtab(path):
+    """name -> st_value for defined functions in .symtab (locals included)."""
+    with open(path, 'rb') as fh:
+        elf = ELFFile(fh)
+        sec = elf.get_section_by_name('.symtab')
+        if not sec:
+            return {}
+        return {s.name: s['st_value'] for s in sec.iter_symbols()
+                if s.name and s['st_info']['type'] == 'STT_FUNC'}
+
 sf, so_, su, st = read(shim_path)
 rf, ro, ru, rt = read(real_path)
 
@@ -69,6 +79,27 @@ print(f"4. undefined symbols: {sorted(su) if su else '(none)'}")
 if extra:
     fails.append(f"unexpected undefined symbols: {sorted(extra)}")
 
+# 5. Every symbol our assembly defines must carry the Thumb bit. The stubs and
+#    trampolines are hand-written Thumb; a symbol without bit 0 makes `bx` and
+#    `blx` switch the core to ARM, and Thumb bytes executed as ARM run off into
+#    nothing. That is exactly how the second deployment died, and it passed
+#    every other check here on the way. The C functions are a different case:
+#    this toolchain emits them as ARM (`.code 32`), so their addresses are
+#    correctly even -- checking them would fail on correct code.
+sym = elf_symtab(shim_path)
+asm_funcs = {n: v for n, v in sym.items() if n.startswith('tramp_')} 
+exported  = {n: v for n, v in sym.items() if n in sf}
+not_thumb = sorted([n for n, v in {**asm_funcs, **exported}.items() if v and not (v & 1)])
+print(f"5. Thumb bit: {len(asm_funcs)} trampolines + {len(exported)} exported stubs")
+if not asm_funcs or not exported:
+    fails.append("no trampolines or no exported stubs found -- this check saw nothing")
+elif not_thumb:
+    print(f"   NOT THUMB: {not_thumb[:8]}")
+    fails.append(f"{len(not_thumb)} assembly symbol(s) lack the Thumb bit; "
+                 "bx/blx to them switches the core to ARM")
+else:
+    print("   every trampoline and stub is Thumb-marked")
+
 print()
 if fails:
     for f in fails:
@@ -79,13 +110,13 @@ PY
 SYMS=$?
 [ "$SYMS" = 0 ] || exit 1
 
-# 5. The trampoline epilogue must restore the argument registers before it
+# 6. The trampoline epilogue must restore the argument registers before it
 #    drops the saved r12. Getting this backwards leaves sp and lr correct
 #    while every argument shifts by one register -- the kind of corruption
 #    that looks fine in a trace of sp alone. It has been reverted twice by
 #    restructurings that fixed something else, so it is checked here, in the
 #    artifact, rather than trusted to survive.
-echo "5. trampoline epilogue order"
+echo "6. trampoline epilogue order"
 
 OBJDUMP=${OBJDUMP:-objdump}
 DIS=$("$OBJDUMP" --triple=thumbv7-none-linux-androideabi -d "$SO" 2>/dev/null)

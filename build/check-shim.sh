@@ -215,4 +215,55 @@ STUBS=$?
 [ "$STUBS" = 0 ] || exit 1
 
 echo
+
+# 8. A helper that exists only to be called from assembly must actually be
+#    called from assembly. `used` keeps such a function alive through the
+#    compiler, so a build where the assembly side was never written links
+#    cleanly, exports everything, and passes every check above -- while the
+#    feature it was written for is simply absent. That is not a hypothetical:
+#    a stage-2 hook was reported as implemented, and shipped with its C half
+#    present, its assembly half missing, and both gates green.
+echo "8. assembly-only helpers are reachable from assembly"
+
+python3 - "$SO" <<'PY'
+import sys, re, subprocess
+from elftools.elf.elffile import ELFFile
+
+path = sys.argv[1]
+with open(path, 'rb') as fh:
+    names = {s.name for s in ELFFile(fh).get_section_by_name('.symtab').iter_symbols()}
+
+# Helpers whose only caller is hand-written assembly. Absent ones are skipped:
+# a stage that has not been written yet is not a failure, a stage written
+# only halfway is.
+HELPERS = ['shim_resolve', 'shim_log_call']
+
+dis = subprocess.run(
+    ['objdump', '--triple=thumbv7-none-linux-androideabi', '-d', path],
+    capture_output=True, text=True)
+if dis.returncode != 0 or not dis.stdout:
+    print("   cannot disassemble -- check skipped, and a skipped check is not a pass")
+    sys.exit(1)
+
+fails = []
+for h in HELPERS:
+    if h not in names:
+        print(f"   {h:16s} not built into this artifact -- skipped")
+        continue
+    n = len(re.findall(rf'\bblx?\s+0x[0-9a-f]+ <{h}>', dis.stdout))
+    print(f"   {h:16s} call sites: {n}")
+    if n == 0:
+        fails.append(h)
+
+if fails:
+    print(f"\nFAIL: {', '.join(fails)} is defined but nothing calls it.")
+    print("      The C half of the feature is present and the assembly half")
+    print("      is missing, so the build behaves as if the feature were")
+    print("      never added.")
+    sys.exit(1)
+PY
+HELPERS=$?
+[ "$HELPERS" = 0 ] || exit 1
+
+echo
 echo "All invariants hold."

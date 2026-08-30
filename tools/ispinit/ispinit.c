@@ -45,6 +45,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bayer_gen.h"
+
 /*
  * dlopen flags are the bionic 4.4 values, NOT the NDK header values: on
  * this device RTLD_NOW is 0 and RTLD_GLOBAL is 2, while the r21e header
@@ -73,75 +75,6 @@ static const unsigned cfg_mode1[16] = {
 };
 static const unsigned cfg_mode2 = 2;
 
-/* --- the Bayer generator ------------------------------------------------- */
-
-/*
- * RAW10 sample packing: 10 bits, LSB-aligned in two bytes, little-endian.
- * THE parameterizable spot: a different packing changes only this
- * function, nothing else.
- */
-static void bayer_put10(unsigned char *p, unsigned v)
-{
-    v &= 0x3ffu;
-    p[0] = (unsigned char)(v & 0xff);
-    p[1] = (unsigned char)((v >> 8) & 0x03);
-}
-
-/*
- * Fill buf with a synthetic Bayer frame.
- *
- *   width, height  in pixels
- *   stride         bytes per row, >= width*bpp; the TAIL of each row
- *                  (width*bpp .. stride) is ZEROED -- predictable, and
- *                  it visually separates rows on the output image
- *   bpp            bytes per sample (2 for RAW10-as-u16, see bayer_put10)
- *   order          0=RGGB 1=BGGR 2=GRBG 3=GBRG
- *
- * Returns a u32 checksum (sum of all sample values).
- *
- * The pattern: every 2x2 tile carries four DISTINCT position codes
- * (R=0x11, Gr=0x22, Gb=0x33, B=0x44), and the frame splits into four
- * brightness quadrants (+0x000/+0x100/+0x200/+0x300, quadrant =
- * qy*2+qx). Sixteen distinct values total, max 0x344 < 0x3ff: the
- * mosaic order reads straight off the output image, and a flip or a
- * mirror shows as an obvious quadrant swap -- unlike a checkerboard,
- * which only proves that something happened.
- */
-static unsigned bayer_fill(unsigned char *buf, unsigned width, unsigned height,
-                           unsigned stride, unsigned bpp, unsigned order)
-{
-    /* [row][col] within the 2x2 tile -> position (0=R 1=Gr 2=Gb 3=B) */
-    static const unsigned char orders[4][4] = {
-        {0, 1, 2, 3}, /* RGGB */
-        {3, 2, 1, 0}, /* BGGR */
-        {1, 0, 3, 2}, /* GRBG */
-        {2, 3, 1, 0}, /* GBRG */
-    };
-    static const unsigned pos_code[4] = {0x11, 0x22, 0x33, 0x44};
-    unsigned sum = 0;
-    unsigned x, y;
-
-    if (order > 3)
-        order = 0;
-    for (y = 0; y < height; y++) {
-        unsigned char *row = buf + (unsigned)y * stride;
-        for (x = 0; x < width; x++) {
-            unsigned pos = orders[order][(y & 1) * 2 + (x & 1)];
-            unsigned quadrant = ((y >= height / 2) << 1) | (x >= width / 2);
-            unsigned v = pos_code[pos] + (quadrant << 8);
-            if (bpp == 2)
-                bayer_put10(row + x * 2, v);
-            else if (bpp == 1)
-                row[x] = (unsigned char)(v >> 2); /* fallback: top 8 bits */
-            sum += v;
-        }
-        for (x = width * bpp; x < stride; x++)
-            row[x] = 0;
-    }
-    return sum;
-}
-
-static const char order_names[4][5] = { "rggb", "bggr", "grbg", "gbrg" };
 
 /* --- the five calls --- */
 
@@ -210,22 +143,56 @@ int main(int argc, char **argv)
 
     /* mosaic order, CLI-switchable like the rate: our sensor is SRGGB10
        per the kernel, but the ISP-visible order depends on readout
-       mirroring, so we will be cycling through them */
-    order = 4;
+       mirroring, so we will be cycling through them. Default RGGB when
+       the argument is absent; an explicit but unknown name is an error. */
+    order = 0;
     if (argc > 2) {
-        int k;
+        int k, found = 0;
         for (k = 0; k < 4; k++) {
-            if (strcmp(argv[2], order_names[k]) == 0)
+            if (strcmp(argv[2], order_names[k]) == 0) {
                 order = (unsigned)k;
+                found = 1;
+            }
         }
-    }
-    if (order == 4) {
-        printf("[0] bad order '%s', use rggb|bggr|grbg|gbrg\n",
-               argc > 2 ? argv[2] : "");
-        return 1;
+        if (!found) {
+            printf("[0] bad order '%s', use rggb|bggr|grbg|gbrg\n", argv[2]);
+            return 1;
+        }
     }
     printf("[0] requested rate = 0x%x, order = %s\n", rate,
            order_names[order]);
+
+    /*
+     * [gen] Generator self-test on a HOST staging buffer: FIRST, before
+     * anything that can crash -- it needs nothing but malloc, and its
+     * whole point is to be visible when everything else dies. 8x8
+     * stride 256 bpp 2 (the dummy geometry, deliberate): for RGGB the
+     * first four u32 words must be
+     *   00220011 00220011 01220111 01220111
+     * (row 0 spans four WORDS because stride is 256, not 16: pixels 4-7
+     * sit in quadrant 1, +0x100) and the checksum must be 0x6AA0 --
+     * permutation invariant, the same for all four orders. The numbers
+     * are asserted on the host by bayer_test.sh.
+     */
+    {
+        unsigned char *stage = malloc(4096);
+        if (stage == 0) {
+            printf("[gen] malloc failed -- generator untested\n");
+        } else {
+            unsigned sum = bayer_fill(stage, 8, 8, 256, 2, order);
+            unsigned w[4];
+            int k;
+            for (k = 0; k < 4; k++)
+                w[k] = (unsigned)stage[k * 4] |
+                       ((unsigned)stage[k * 4 + 1] << 8) |
+                       ((unsigned)stage[k * 4 + 2] << 16) |
+                       ((unsigned)stage[k * 4 + 3] << 24);
+            printf("[gen] bayer_fill(8x8, stride=256, bpp=2, order=%s) "
+                   "checksum=0x%x first=0x%08x 0x%08x 0x%08x 0x%08x\n",
+                   order_names[order], sum, w[0], w[1], w[2], w[3]);
+            free(stage);
+        }
+    }
 
     /* [1] libnvrm -- gives us NvRmOpen, the only way to a device handle */
     printf("[1] dlopen(\"%s\") -> ", nvrm_path);
@@ -369,35 +336,6 @@ int main(int argc, char **argv)
                                    0, 0, 0, 0,   /* stack +00..+0c: library ignores */
                                    (unsigned)desc, 0, 0, 0, 0);
             printf("    ProcessFrame returned rc=0x%x\n", (unsigned)rc);
-        }
-    }
-
-    /*
-     * [gen] Generator self-test on a HOST staging buffer: runs regardless
-     * of the RM allocation's fate, on the device and with hand-computable
-     * expectations. 8x8 stride 256 bpp 2 (the dummy geometry, deliberate):
-     * for RGGB the first four u32 words must be
-     *   00220011 00220011 00440033 00440033
-     * (row0 = R 0x011 / Gr 0x022 alternating in quadrant 0; row1 = Gb
-     * 0x033 / B 0x044) and the checksum must be 0x6AA0.
-     */
-    {
-        unsigned char *stage = malloc(4096);
-        if (stage == 0) {
-            printf("[gen] malloc failed -- generator untested\n");
-        } else {
-            unsigned sum = bayer_fill(stage, 8, 8, 256, 2, order);
-            unsigned w[4];
-            int k;
-            for (k = 0; k < 4; k++)
-                w[k] = (unsigned)stage[k * 4] |
-                       ((unsigned)stage[k * 4 + 1] << 8) |
-                       ((unsigned)stage[k * 4 + 2] << 16) |
-                       ((unsigned)stage[k * 4 + 3] << 24);
-            printf("[gen] bayer_fill(8x8, stride=256, bpp=2, order=%s) "
-                   "checksum=0x%x first=0x%08x 0x%08x 0x%08x 0x%08x\n",
-                   order_names[order], sum, w[0], w[1], w[2], w[3]);
-            free(stage);
         }
     }
 

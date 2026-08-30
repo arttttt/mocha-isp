@@ -47,6 +47,8 @@
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #ifndef HOST_ARGTEST
 #include <sys/ucontext.h>
 #endif
@@ -439,6 +441,51 @@ static void stage_segv(int sig, siginfo_t *info, void *uc)
     _exit(70);
 }
 
+/*
+ * Syncpoint visibility. The kernel ioctl is source-verified
+ * (include/linux/nvhost_ioctl.h):
+ *   NVHOST_IOCTL_CTRL_SYNCPT_READ = _IOWR('H', 1,
+ *       struct nvhost_ctrl_syncpt_read_args { u32 id; u32 value; })
+ * The divergence (min != max in dmesg) is otherwise invisible: debugfs
+ * is closed on the shipped kernel. Printed on EVERY run -- divergence
+ * is a validity condition of everything else we measure.
+ */
+static int sp_fd = -1;
+
+static int read_syncpt(unsigned id, unsigned *value)
+{
+    unsigned args[2] = { id, 0 };
+
+    if (sp_fd < 0)
+        return -1;
+    if (ioctl(sp_fd, 0xC0084801u, args) != 0)
+        return -1;
+    *value = args[1];
+    return 0;
+}
+
+static void print_syncpts(const char *tag, unsigned *out /* may be 0 */)
+{
+    static const unsigned ids[4] = { 32, 33, 34, 35 };
+    static const char *nm[4] = {
+        "ispa_memory", "ispa_stats", "ispa_stream", "ispa_loadv"
+    };
+    int i;
+
+    printf("%s:", tag);
+    for (i = 0; i < 4; i++) {
+        unsigned v = 0;
+        if (read_syncpt(ids[i], &v) == 0) {
+            printf(" %s(%u)=%u", nm[i], ids[i], v);
+            if (out != 0)
+                out[i] = v;
+        } else {
+            printf(" %s(%u)=ERR", nm[i], ids[i]);
+        }
+    }
+    printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     void *nvrm;
@@ -521,6 +568,7 @@ int main(int argc, char **argv)
     unsigned hset_manual = 0;
     /* stock init-chain steps, each toggleable: init=<name>:off */
     int surfswap = 0;    /* surfswap=on: swap the +0x08/+0x10 surfaces */
+    unsigned sp_pre[4];  /* syncpoint values before the submission */
     int st_create = 1, st_sattr = 1, st_stats = 1;
     int st_apply = 1, st_setattr = 1, st_destroy = 1;
     unsigned din_val[44], dout_val[44];  /* descriptor word overrides */
@@ -1417,6 +1465,13 @@ round_trip_end:;
         }
     }
 
+    /* [5c] syncpoint read channel (kernel ioctl, source-verified) */
+    sp_fd = open("/dev/nvhost-ctrl", O_RDWR);
+    if (sp_fd < 0)
+        sp_fd = open("/dev/nvhost-ctrl", O_RDONLY);
+    printf("[5c] /dev/nvhost-ctrl fd=%d\n", sp_fd);
+    print_syncpts("[5c] syncpoints at open", 0);
+
     /* crash isolation for the per-stage calls */
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = stage_segv;
@@ -2044,6 +2099,14 @@ round_trip_end:;
                 snap14[k] = slot14_buf[k];
             }
 
+            print_syncpts("[sp pre-submit]", sp_pre);
+            {
+                static const unsigned ids[4] = { 32, 33, 34, 35 };
+                int q;
+                for (q = 0; q < 4; q++)
+                    read_syncpt(ids[q], &sp_pre[q]);
+            }
+
             printf("[12] aux slots:");
             for (i = 0; i < 7; i++)
                 printf(" +%s=%p(%s)", aux_names[i],
@@ -2184,6 +2247,39 @@ round_trip_end:;
                 print_state_diff("[12b] post fenceB ", z16, fenceB, 16);
             }
 
+            /* syncpoints after the call, per-id deltas, and the fence
+               check: did the hardware reach the threshold the library
+               ordered? */
+            {
+                static const unsigned ids[4] = { 32, 33, 34, 35 };
+                unsigned post[4] = {0};
+                int q, reached = 0, fences = 0;
+
+                print_syncpts("[sp post-submit]", post);
+                printf("[sp delta]:");
+                for (q = 0; q < 4; q++)
+                    printf(" id%u=%+d", ids[q],
+                           (int)post[q] - (int)sp_pre[q]);
+                printf("\n");
+
+                for (q = 0; q < 2; q++) {
+                    unsigned *fb = q == 0 ? fenceA : fenceB;
+                    unsigned id = fb[0], thresh = fb[1], actual = 0;
+                    if (id == 0)
+                        continue;
+                    fences++;
+                    read_syncpt(id, &actual);
+                    printf("[sp-check] fence%s: id=%u thresh=%u actual=%u "
+                           "%s\n",
+                           q == 0 ? "A" : "B", id, thresh, actual,
+                           actual >= thresh ? "REACHED" : "NOT REACHED");
+                    if (actual >= thresh)
+                        reached++;
+                }
+                printf("[sp verdict]: %d of %d fences reached; deltas "
+                       "above -- zeros everywhere means converged\n",
+                       reached, fences);
+
             /* [12b] read the OUTPUT buffer back whatever the rc was:
                the first submission that works must meet the read side
                already in place. Poisoned with 0xEE first, so untouched
@@ -2320,3 +2416,4 @@ STAGE_HOOK(5)
 STAGE_HOOK(6)
 STAGE_HOOK(7)
 #endif /* HOST_ARGTEST */
+}

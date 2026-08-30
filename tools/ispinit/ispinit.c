@@ -223,6 +223,22 @@ int main(int argc, char **argv)
             if (strcmp(rest, "off") == 0) { rt_on = 0; continue; }
             if (strcmp(rest, "simple") == 0) { rt_simple = 1; continue; }
             if (strcmp(rest, "strided") == 0) { rt_simple = 0; continue; }
+            if (strncmp(rest, "order:", 6) == 0) {
+                /* simple-mode argument order, a permutation of hpos:
+                   h=handle p=ptr o=offset s=size. Lives BEFORE the
+                   generic numeric path: the value is a word, not a
+                   number, and the colon must survive for the match. */
+                const char *o = rest + 6;
+                if (strlen(o) != 4 || strspn(o, "hpos") != 4 ||
+                    o[0] == o[1] || o[0] == o[2] || o[0] == o[3] ||
+                    o[1] == o[2] || o[1] == o[3] || o[2] == o[3]) {
+                    printf("[0] bad rt order '%s', permutation of hpos\n",
+                           o);
+                    return 1;
+                }
+                memcpy(rt_order, o, 5);
+                continue;
+            }
             colon = strchr(rest, ':');
             if (colon == 0) {
                 printf("[0] bad rt '%s', use rt=on|off or rt=<key>:<val>\n",
@@ -235,22 +251,9 @@ int main(int argc, char **argv)
                 printf("[0] bad rt value in '%s'\n", argv[ai]);
                 return 1;
             }
-            if (strncmp(rest, "order:", 6) == 0) {
-                /* simple-mode argument order, a permutation of hpos:
-                   h=handle p=ptr o=offset s=size */
-                const char *o = rest + 6;
-                if (strlen(o) != 4 || strspn(o, "hpos") != 4 ||
-                    o[0] == o[1] || o[0] == o[2] || o[0] == o[3] ||
-                    o[1] == o[2] || o[1] == o[3] || o[2] == o[3]) {
-                    printf("[0] bad rt order '%s', permutation of hpos\n",
-                           o);
-                    return 1;
-                }
-                memcpy(rt_order, o, 5);
-                continue;
-            }
-            if (strcmp(rest, "size") == 0) dst = &rt_size;
-            if (strcmp(rest, "w") == 0) dst = &rt_w;
+            if (strcmp(rest, "size") == 0)
+                dst = &rt_size;
+            else if (strcmp(rest, "w") == 0) dst = &rt_w;
             else if (strcmp(rest, "h") == 0) dst = &rt_h;
             else if (strcmp(rest, "bs") == 0) dst = &rt_bs;
             else if (strcmp(rest, "ms") == 0) dst = &rt_ms;

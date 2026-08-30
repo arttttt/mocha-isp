@@ -83,10 +83,25 @@ all. So the handle is the literal value 1. Reading the disassembly as
 "pass the pointer" would have produced a silent failure; the live hook log
 said `r0=1` and settled it.
 
-Read back 600000 for a requested 4194303: something clamped it, and only the
-clock tree can. That is evidence, not yet proof -- a constant would look the
-same. The control is to request a value below the ceiling and see whether it
-comes back.
+The clock read-back is the proof that this reaches hardware, and it took a
+control to earn that word. Asking for different rates gives different
+answers:
+
+| requested (kHz) | read back |
+|---|---|
+| 4194303 | 600000 |
+| 600000 | 600000 |
+| 300000 | 420000 |
+| 100000 | 420000 |
+
+Two distinct values, so it is not a constant, and they behave like the steps
+of a clock tree: a ceiling at 600000 and a floor at 420000. The kernel's own
+table for this SoC carries `{ "isp", "pll_c4", 600000000 }` -- 600 MHz, the
+same ceiling, in Hz where we read kHz.
+
+So the number crosses from our process, through the stock library, into the
+clock tree, and comes back changed. That is what tells us the ISP is really
+there.
 
 
 ## Why not a memory dump

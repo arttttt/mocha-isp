@@ -478,12 +478,18 @@ void *shim_log_call(unsigned idx, unsigned *saved)
      * pointers x 16 words is 80 numbers per call; four calls would flood
      * logcat). Five pointers live at stack offsets +10..+20
      * (saved[10..14]): the library NULL-checks and dereferences them
-     * immediately after us, so reading 16 words through each non-null
-     * one is exactly what it is about to read. A zero prints as null,
+     * immediately after us, so reading words through each non-null one
+     * is exactly what it is about to read. A zero prints as null,
      * never silently: a null PAIR is legal there ("both or neither"),
      * and we must see which one is empty. Pointers found INSIDE the
      * descriptors are not followed -- we do not know they are pointers
      * yet, and a wrong read would kill mediaserver.
+     *
+     * +10 and +14 are dumped 44 words deep (0xb0 bytes, impl-2: the
+     * caller's record stride, stage reads reach 0x28, ptr14's live data
+     * fits inside): the input-frame descriptor with plane layout and
+     * crop lives there. The other three stay at 16 -- further out it is
+     * empty or uninteresting, and the log is heavy already.
      */
     if (idx == SHIM_DEREF_IDX_PF && pf_dumped < 2) {
         static const char ptr_lbl[5][7] = {
@@ -494,7 +500,8 @@ void *shim_log_call(unsigned idx, unsigned *saved)
         pf_dumped++;
         for (j = 0; j < 5; j++) {
             unsigned ptr = saved[10 + j];
-            char dmsg[320];
+            int nwords = (j <= 1) ? 44 : 16;
+            char dmsg[640];
             char *dw = dmsg;
             const char *q;
             int k;
@@ -506,7 +513,7 @@ void *shim_log_call(unsigned idx, unsigned *saved)
                 while (*q) *dw++ = *q++;
             } else {
                 const unsigned *dp = (const unsigned *)ptr;
-                for (k = 0; k < 16; k++) {
+                for (k = 0; k < nwords; k++) {
                     unsigned word = dp[k];
                     unsigned off = (unsigned)k * 4;
                     if (k != 0)

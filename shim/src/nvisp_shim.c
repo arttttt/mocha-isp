@@ -267,6 +267,7 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     *w++ = ']';
     *w++ = ' ';
     /* counter (decimal) */
+    call_counter++;
     w = shim_put_dec(w, call_counter);
     p = " r0=0x";
     while (*p) *w++ = *p++;

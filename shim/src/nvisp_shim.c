@@ -304,27 +304,79 @@ static char *shim_put_hex(char *w, unsigned long v)
     return w;
 }
 
-static char *shim_put_dec(char *w, unsigned v)
+/*
+ * Bounded message writer: EVERY append in the shim goes through these.
+ * Writes past the capacity are silently dropped and the string stays
+ * terminated -- an overflow here put saved registers and pointers on
+ * the stack behind the buffer, and mediaserver dereferenced our own
+ * hex digits (fault addrs 0x3733...., ASCII '73'). Never write to the
+ * buffer directly.
+ */
+static const char hexdig[] = "0123456789abcdef";
+
+typedef struct {
+    char *buf;
+    unsigned cap;
+    unsigned len;
+    int truncated;
+} shim_writer;
+
+static void w_ch(shim_writer *w, char c)
 {
-    char buf[12];
+    if (w->len + 1 < w->cap)
+        w->buf[w->len++] = c;
+    else
+        w->truncated = 1;
+}
+
+static void w_str(shim_writer *w, const char *s)
+{
+    while (*s) {
+        w_ch(w, *s);
+        s++;
+    }
+}
+
+static void w_hex(shim_writer *w, unsigned v)
+{
+    static const char dig[] = "0123456789abcdef";
+    int i;
+
+    for (i = 28; i >= 0; i -= 4)
+        w_ch(w, dig[(v >> i) & 0xf]);
+}
+
+static void w_dec(shim_writer *w, unsigned v)
+{
+    char tmp[12];
     int n = 0;
-    if (v == 0) { *w++ = '0'; return w; }
-    while (v > 0) { buf[n++] = '0' + (v % 10); v /= 10; }
-    while (n > 0) { *w++ = buf[--n]; }
-    return w;
+
+    if (v == 0) {
+        w_ch(w, '0');
+        return;
+    }
+    while (v != 0) {
+        tmp[n++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    while (n != 0)
+        w_ch(w, tmp[--n]);
+}
+
+static void w_end(shim_writer *w)
+{
+    w->buf[w->len < w->cap ? w->len : w->cap - 1] = 0;
+    if (w->truncated)
+        shim_log(SHIM_LOG_PRIO_ERROR, "msg truncated -- log line lost "
+                                      "characters, buffer too small");
 }
 
 __attribute__((used, visibility("hidden")))
 void *shim_log_call(unsigned idx, unsigned *saved)
 {
-    static const char hexdig[] = "0123456789abcdef";
-    /* 384: the base fields take ~90; the SetConfiguration dump adds up
-       to " size=4294967295 cfg=" + 16 eight-digit words + 15 commas
-       (~168). 192 could overflow on a full mode-1 dump. */
+    shim_writer W;
     char msg[384];
-    char *w = msg;
-    const char *p;
-    int i;
+    char line2[384];
 
     /* ensure the real library is loaded */
     if (real_handle == 0) {
@@ -347,10 +399,10 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     }
 
     /*
-     * Budget: four logged calls per binding. The ProcessFrame exception:
-     * r1 != 2 logs regardless of the budget -- the point is to catch a
-     * nonstandard mode no matter how many ordinary frames ran before --
-     * but at most 20 times per process.
+     * Budget: four logged calls per binding; HwSettingsSetAttribute
+     * gets 14 (the whole block set) and SetStats 8 (probe phase).
+     * The ProcessFrame exception: r1 != 2 logs regardless of the
+     * budget, at most 20 times per process.
      */
     if (shim_budget[idx] >=
         (idx == SHIM_IDX_HWSATTR ? SHIM_HWSATTR_BUDGET
@@ -365,243 +417,204 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     }
     shim_budget[idx]++;
 
-    /* build: "hook [Name] #<counter> r0=0x... r1=0x... r2=0x... r3=0x... sp0=0x..." */
-    p = "hook [";
-    while (*p) *w++ = *p++;
-    p = shim_bindings[idx].name;
-    while (*p) *w++ = *p++;
-    *w++ = ']';
-    *w++ = ' ';
-    /* counter (decimal) */
-    call_counter++;
-    w = shim_put_dec(w, call_counter);
-    p = " r0=0x";
-    while (*p) *w++ = *p++;
-    for (i = 28; i >= 0; i -= 4)
-        *w++ = hexdig[(saved[0] >> i) & 0xf];
-    p = " r1=0x";
-    while (*p) *w++ = *p++;
-    for (i = 28; i >= 0; i -= 4)
-        *w++ = hexdig[(saved[1] >> i) & 0xf];
-    p = " r2=0x";
-    while (*p) *w++ = *p++;
-    for (i = 28; i >= 0; i -= 4)
-        *w++ = hexdig[(saved[2] >> i) & 0xf];
     /*
-     * The one permitted dereference. r2 of NvIspSetAttribute is a
-     * known-valid input pointer at call time: arity (h, attrId, in*,
-     * &size), and the library reads through it right after us -- we read
-     * exactly what it is about to read. Four bytes, this binding only,
-     * inside the budget, never for any other binding: for the rest the
-     * arity or the pointer guarantee is unestablished, and a read through
-     * a non-pointer would kill mediaserver. The live log shows small
-     * integers (0x0, 0x1) in r2 of the HwSettings lookalike -- exactly
-     * why the binding is pinned by name and index above.
+     * Main line, worst case ~370 of 384: "hook [" + name (<=44) + "] " +
+     * counter (10) + four " rN=0x........" (4*14 = 56) + the SetAttribute
+     * val field (20) + " r3=0x........ sp0=0x........" (28). The
+     * SetConfiguration cfg dump and the ProcessFrame stack dump never
+     * appear on a hook line together with all of that -- but even stacked
+     * the writer just truncates instead of corrupting the stack.
+     */
+    W.buf = msg;
+    W.cap = sizeof(msg);
+    W.len = 0;
+    W.truncated = 0;
+    w_str(&W, "hook [");
+    w_str(&W, shim_bindings[idx].name);
+    w_ch(&W, ']');
+    w_ch(&W, ' ');
+    call_counter++;
+    w_dec(&W, call_counter);
+    w_str(&W, " r0=0x");
+    w_hex(&W, saved[0]);
+    w_str(&W, " r1=0x");
+    w_hex(&W, saved[1]);
+    w_str(&W, " r2=0x");
+    w_hex(&W, saved[2]);
+
+    /*
+     * The one permitted dereference: r2 of NvIspSetAttribute, known
+     * arity, library reads through it right after us. Guards in code:
+     * id 4 only, only over zero, pointer non-null, flag file present.
      */
     if (idx == SHIM_DEREF_IDX && saved[2] != 0) {
-        /* print what we READ, before any write: "val=<as found>" then
-           the arrow marks our write. Printing the post-write value (as
-           this code once did) makes "was 0, we set 1" indistinguishable
-           from "was 1, untouched" -- the print must precede the action. */
         unsigned v = *(const unsigned *)saved[2];
         int wrote = 0;
 
-        /*
-         * The intervention, first of its kind. Turn the library's debug
-         * flag ON, under all three guards in code, not in argument:
-         * only id 4 (the only id this call supports), only over a zero
-         * (a one means somebody enabled it before us -- leave it), only
-         * over a valid pointer, and only when the flag file exists.
-         * Our change must be visible in the log as ours: val=0x0 -> 0x1.
-         */
         if (intervention_enabled() && saved[1] == 4 && v == 0) {
             *(unsigned *)saved[2] = 1;
             wrote = 1;
         }
-        p = " val=0x";
-        while (*p) *w++ = *p++;
-        for (i = 28; i >= 0; i -= 4)
-            *w++ = hexdig[(v >> i) & 0xf];
-        if (wrote) {
-            p = " -> 0x1";
-            while (*p) *w++ = *p++;
-        }
+        w_str(&W, " val=0x");
+        w_hex(&W, v);
+        if (wrote != 0)
+            w_str(&W, " -> 0x1");
     }
 
     /*
-     * The SetConfiguration dump. Guards in code: both pointers non-null,
-     * size word read through r3 first, buffer read only for a sane size
-     * (0 < size <= 64 bytes), words = size/4, printed on one line as
-     * comma-separated 32-bit hex. Mode 1 should name 0x40 (16 words of
-     * format selectors), mode 2 a single word -- but we print what the
-     * size says, not what the analysis predicted.
+     * SetConfiguration dump: size word through r3, buffer only for a
+     * sane size (0 < size <= 64), cfg words are at most 16 -- one line.
      */
     if (idx == SHIM_DEREF_IDX_CFG && saved[2] != 0 && saved[3] != 0) {
         unsigned size = *(const unsigned *)saved[3];
-        p = " size=";
-        while (*p) *w++ = *p++;
-        w = shim_put_dec(w, size);
+        w_str(&W, " size=");
+        w_dec(&W, size);
         if (size != 0 && size <= 64) {
             unsigned nwords = size / 4;
             unsigned k;
-            p = " cfg=";
-            while (*p) *w++ = *p++;
+            w_str(&W, " cfg=");
             for (k = 0; k < nwords; k++) {
-                unsigned word = ((const unsigned *)saved[2])[k];
                 if (k != 0)
-                    *w++ = ',';
-                for (i = 28; i >= 0; i -= 4)
-                    *w++ = hexdig[(word >> i) & 0xf];
+                    w_ch(&W, ',');
+                w_hex(&W, ((const unsigned *)saved[2])[k]);
             }
         }
     }
-    p = " r3=0x";
-    while (*p) *w++ = *p++;
-    for (i = 28; i >= 0; i -= 4)
-        *w++ = hexdig[(saved[3] >> i) & 0xf];
-    /* stack candidate: saved[6] = the caller's original sp */
-    p = " sp0=0x";
-    while (*p) *w++ = *p++;
-    for (i = 28; i >= 0; i -= 4)
-        *w++ = hexdig[(saved[6] >> i) & 0xf];
+    w_str(&W, " r3=0x");
+    w_hex(&W, saved[3]);
+    w_str(&W, " sp0=0x");
+    w_hex(&W, saved[6]);
+    w_end(&W);
+    shim_log(SHIM_LOG_PRIO_INFO, msg);
+
     /*
-     * Caller-stack dump, ProcessFrame only: 13 words from the caller's
-     * original sp, each printed with its offset so a numbering shift
-     * cannot hide inside the list. Nothing dereferenced: the stack is
-     * ours and valid, we stop after reading the words themselves.
+     * Caller-stack dump, ProcessFrame only: 13 words with offsets.
+     * 13 x 13 + base ~110 fits 384; the writer truncates safely if a
+     * future edit grows it.
      */
     if (idx == SHIM_DEREF_IDX_PF) {
         int k;
-        p = " stack=";
-        while (*p) *w++ = *p++;
+        W.len = 0;
+        W.truncated = 0;
+        w_str(&W, " stack=");
         for (k = 0; k < 13; k++) {
-            unsigned word = saved[6 + k];
             unsigned off = (unsigned)k * 4;
             if (k != 0)
-                *w++ = ',';
-            *w++ = '+';
-            *w++ = hexdig[(off >> 4) & 0xf];
-            *w++ = hexdig[off & 0xf];
-            *w++ = ':';
-            for (i = 28; i >= 0; i -= 4)
-                *w++ = hexdig[(word >> i) & 0xf];
+                w_ch(&W, ',');
+            w_ch(&W, '+');
+            w_ch(&W, hexdig[(off >> 4) & 0xf]);
+            w_ch(&W, hexdig[off & 0xf]);
+            w_ch(&W, ':');
+            w_hex(&W, saved[6 + k]);
         }
+        w_end(&W);
+        shim_log(SHIM_LOG_PRIO_INFO, msg);
 
         /*
-         * The stage-3 gate, read from the LIVE session. Stage 3 starts
-         * by loading ctx+0x1318, dereferencing it, and bailing out
-         * when the first word of that object is zero; our own runs
-         * never reach it. The library reads exactly these fields right
-         * after us on its own path, so the reads are as safe as its
-         * own: handle null-checked, pointer null-checked, one word
-         * deep, inside the budget. The stock's live values tell us
-         * what the field must contain -- and whether it is even
-         * nonzero when the sensor path works.
+         * The stage-3 gate, read from the LIVE session (library reads
+         * exactly these right after us): ctx+0x1318 and the first word
+         * of the object behind it.
          */
         if (saved[0] != 0) {
             unsigned ctx1318 =
                 *(const unsigned *)((unsigned)saved[0] + 0x1318);
-            p = " ctx1318=0x";
-            while (*p) *w++ = *p++;
-            for (i = 28; i >= 0; i -= 4)
-                *w++ = hexdig[(ctx1318 >> i) & 0xf];
+            W.len = 0;
+            W.truncated = 0;
+            w_str(&W, " ctx1318=0x");
+            w_hex(&W, ctx1318);
             if (ctx1318 != 0) {
-                unsigned obj0 = *(const unsigned *)ctx1318;
-                p = " obj0=0x";
-                while (*p) *w++ = *p++;
-                for (i = 28; i >= 0; i -= 4)
-                    *w++ = hexdig[(obj0 >> i) & 0xf];
+                w_str(&W, " obj0=0x");
+                w_hex(&W, *(const unsigned *)ctx1318);
             } else {
-                p = " obj0=null";
-                while (*p) *w++ = *p++;
+                w_str(&W, " obj0=null");
             }
+            w_end(&W);
+            shim_log(SHIM_LOG_PRIO_INFO, msg);
         }
     }
 
     /*
-     * Buffer content dumps for the settings walk. HwSettingsSetAttribute
-     * (16): (hSettings, blockId, index, buf, &size) -- the size POINTER
-     * is the caller's first stack word (saved[6]). SetStats (29): same
-     * form. We print exactly size/4 words from buf, never past the
-     * caller's own size, pointers null-checked first -- this is
-     * mediaserver's address space.
+     * Settings-content dumps, split 16 words per line: the first line
+     * carries id/index/size, continuation lines carry the rest of the
+     * buffer. Sizes: HwSettingsSetAttribute -- the size POINTER in the
+     * caller's first stack word (saved[6]); SetStats -- where the size
+     * lives is unestablished, the known per-type sizes are used and
+     * marked. Reads never go past the caller's own size; pointers
+     * null-checked. This is mediaserver's address space.
      */
     if ((idx == SHIM_IDX_HWSATTR || idx == SHIM_IDX_SETSTATS) &&
         saved[3] != 0) {
         unsigned size;
         unsigned words;
-        unsigned q;
+        unsigned q, part;
+        const char *tag =
+            (idx == SHIM_IDX_HWSATTR) ? "hwsa" : "stats";
 
         if (idx == SHIM_IDX_HWSATTR) {
-            /* the size POINTER travels in the caller's first stack
-               word (saved[6]) -- read through it */
             size = (saved[6] != 0) ? *(const unsigned *)saved[6] : 0;
         } else {
-            /* SetStats: where the size lives is UNESTABLISHED (the
-               stack word saved[6] did not hold it in the captures).
-               Use the known per-type sizes instead, marked as such. */
             unsigned t = saved[1];
             size = (t == 1) ? 0x20 : (t == 2) ? 0x68
                  : (t == 3) ? 0x24 : (t == 4) ? 0x48 : 0;
         }
         if (size == 0) {
-            p = " stats: size unavailable -- content skipped";
-            while (*p) *w++ = *p++;
-            *w = 0;
+            W.len = 0;
+            W.truncated = 0;
+            w_str(&W, " stats: size unavailable -- content skipped");
+            w_end(&W);
+            shim_log(SHIM_LOG_PRIO_INFO, msg);
             return hook_real_cache[idx];
         }
         words = size / 4;
         if (words > 34)
             words = 34; /* the largest known block is 136 bytes */
-        p = (idx == SHIM_IDX_HWSATTR) ? " hwsa id=" : " stats id=";
-        while (*p) *w++ = *p++;
-        w = shim_put_dec(w, saved[1]);
-        p = " idx=";
-        while (*p) *w++ = *p++;
-        w = shim_put_dec(w, saved[2]);
-        p = " size=";
-        while (*p) *w++ = *p++;
-        w = shim_put_dec(w, size);
-        p = " buf=";
-        while (*p) *w++ = *p++;
-        for (q = 0; q < (int)words; q++) {
-            unsigned word = ((const unsigned *)saved[3])[q];
-            if (q != 0)
-                *w++ = ',';
-            for (i = 28; i >= 0; i -= 4)
-                *w++ = hexdig[(word >> i) & 0xf];
+
+        for (part = 0; part * 16 < words; part++) {
+            unsigned from = part * 16;
+            unsigned to = from + 16 <= words ? from + 16 : words;
+            W.len = 0;
+            W.truncated = 0;
+            if (part == 0) {
+                w_str(&W, " [");
+                w_str(&W, tag);
+                w_str(&W, "] id=");
+                w_dec(&W, saved[1]);
+                w_str(&W, " idx=");
+                w_dec(&W, saved[2]);
+                w_str(&W, " size=");
+                w_dec(&W, size);
+                w_str(&W, " buf=");
+            } else {
+                w_str(&W, " [");
+                w_str(&W, tag);
+                w_str(&W, " cont]");
+            }
+            for (q = from; q < to; q++) {
+                if (q != from)
+                    w_ch(&W, ',');
+                w_hex(&W, ((const unsigned *)saved[3])[q]);
+            }
+            w_end(&W);
+            shim_log(SHIM_LOG_PRIO_INFO, msg);
         }
 
         /* blocks 8 and 9 additionally carry heap POINTERS (counter
-           word, then addresses). They are printed AS-IS below -- the
-           shim never dereferences anything in mediaserver; the tables
+           word, then addresses). They are printed AS-IS -- the shim
+           never dereferences anything in mediaserver; the tables
            behind those pointers are read OUTSIDE the process with
            tools memread against /proc/<pid>/mem. (An in-process deref
            crashed mediaserver: a text fragment "7bcd" passed the
-           heap-range heuristic and was followed. Lesson recorded in
-           the commit that removes it.) */
+           heap-range heuristic and was followed. The real lesson came
+           later: the crash was the ctxst line overflowing its buffer.
+           Both reasons point the same way -- nothing extra runs in
+           mediaserver.) */
     }
-    *w = 0;
-
-    shim_log(SHIM_LOG_PRIO_INFO, msg);
 
     /*
-     * Descriptor dump, first two LOGGED ProcessFrame calls only (five
-     * pointers x 16 words is 80 numbers per call; four calls would flood
-     * logcat). Five pointers live at stack offsets +10..+20
-     * (saved[10..14]): the library NULL-checks and dereferences them
-     * immediately after us, so reading words through each non-null one
-     * is exactly what it is about to read. A zero prints as null,
-     * never silently: a null PAIR is legal there ("both or neither"),
-     * and we must see which one is empty. Pointers found INSIDE the
-     * descriptors are not followed -- we do not know they are pointers
-     * yet, and a wrong read would kill mediaserver.
-     *
-     * +10 and +14 are dumped 44 words deep (0xb0 bytes, impl-2: the
-     * caller's record stride, stage reads reach 0x28, ptr14's live data
-     * fits inside): the input-frame descriptor with plane layout and
-     * crop lives there. The other three stay at 16 -- further out it is
-     * empty or uninteresting, and the log is heavy already.
+     * Descriptor dump, first two LOGGED ProcessFrame calls. Five
+     * pointers, 44 words for +10/+14 and 16 for the rest, split into
+     * lines of 16 words each -- every line has its own writer and its
+     * own bounded buffer.
      */
     if (idx == SHIM_DEREF_IDX_PF && pf_dumped < 2) {
         static const char ptr_lbl[5][7] = {
@@ -613,113 +626,115 @@ void *shim_log_call(unsigned idx, unsigned *saved)
         for (j = 0; j < 5; j++) {
             unsigned ptr = saved[10 + j];
             int nwords = (j <= 1) ? 44 : 16;
-            char dmsg[640];
-            char *dw = dmsg;
-            const char *q;
-            int k;
+            int nlines = (nwords + 15) / 16;
+            int part;
 
-            q = ptr_lbl[j];
-            while (*q) *dw++ = *q++;
             if (ptr == 0) {
-                q = "null";
-                while (*q) *dw++ = *q++;
-            } else {
-                const unsigned *dp = (const unsigned *)ptr;
-                for (k = 0; k < nwords; k++) {
-                    unsigned word = dp[k];
-                    unsigned off = (unsigned)k * 4;
-                    if (k != 0)
-                        *dw++ = ',';
-                    *dw++ = '+';
-                    *dw++ = hexdig[(off >> 4) & 0xf];
-                    *dw++ = hexdig[off & 0xf];
-                    *dw++ = ':';
-                    for (i = 28; i >= 0; i -= 4)
-                        *dw++ = hexdig[(word >> i) & 0xf];
-                }
+                W.len = 0;
+                W.truncated = 0;
+                w_str(&W, " ");
+                w_str(&W, ptr_lbl[j]);
+                w_str(&W, "null");
+                w_end(&W);
+                shim_log(SHIM_LOG_PRIO_INFO, msg);
+                continue;
             }
-            *dw = 0;
-            shim_log(SHIM_LOG_PRIO_INFO, dmsg);
+            for (part = 0; part * 16 < nwords; part++) {
+                unsigned from = part * 16;
+                unsigned to = from + 16 <= (unsigned)nwords
+                                  ? from + 16
+                                  : (unsigned)nwords;
+                unsigned k;
+                W.len = 0;
+                W.truncated = 0;
+                w_str(&W, " ");
+                w_str(&W, ptr_lbl[j]);
+                if (part != 0) {
+                    w_str(&W, " cont");
+                    w_dec(&W, part + 1);
+                }
+                w_str(&W, " @0x");
+                w_hex(&W, ptr);
+                w_str(&W, " ");
+                for (k = from; k < to; k++) {
+                    if (k != from)
+                        w_ch(&W, ',');
+                    w_ch(&W, '+');
+                    w_ch(&W, hexdig[((k * 4) >> 4) & 0xf]);
+                    w_ch(&W, hexdig[(k * 4) & 0xf]);
+                    w_ch(&W, ':');
+                    w_hex(&W, ((const unsigned *)ptr)[k]);
+                }
+                w_end(&W);
+                shim_log(SHIM_LOG_PRIO_INFO, msg);
+            }
         }
 
         /*
          * Shared-stage context state, first two logged calls. Stages 3
          * and 4 do NOT branch by mode, so the stock's live values here
-         * are lawful samples for our memory-mode run: the stage-3
-         * relocation handle (+0x123c), the frame counter (+0x1254), the
-         * clocks (+0x1258/+0x125c), the gate object pointer and its
-         * +0x1660 window (48 words) -- the write-channel configuration.
-         * Reads follow pointers the library dereferences itself, null
-         * checks at every level, fixed offsets only.
+         * are lawful samples for our memory-mode run. Fixed offsets,
+         * null checks at every level, window split 3 x 16 words.
          */
         if (pf_ctx_logged < 2 && saved[0] != 0) {
-            static const char pre[] = "[ctxst]";
-            static const char ctxlbl[] = " ctx+0x123c=0x";
-            static const char cntlbl[] = " ctx+0x1254=";
-            static const char clk1[] = " +0x1258=";
-            static const char clk2[] = " +0x125c=";
-            unsigned c123c = *(const unsigned *)((unsigned)saved[0] + 0x123c);
-            unsigned c1254 = *(const unsigned *)((unsigned)saved[0] + 0x1254);
-            unsigned c1258 = *(const unsigned *)((unsigned)saved[0] + 0x1258);
-            unsigned c125c = *(const unsigned *)((unsigned)saved[0] + 0x125c);
-            unsigned objp = *(const unsigned *)((unsigned)saved[0] + 0x1318);
+            unsigned c123c =
+                *(const unsigned *)((unsigned)saved[0] + 0x123c);
+            unsigned c1254 =
+                *(const unsigned *)((unsigned)saved[0] + 0x1254);
+            unsigned c1258 =
+                *(const unsigned *)((unsigned)saved[0] + 0x1258);
+            unsigned c125c =
+                *(const unsigned *)((unsigned)saved[0] + 0x125c);
+            unsigned objp =
+                *(const unsigned *)((unsigned)saved[0] + 0x1318);
             unsigned obj0 = objp != 0 ? *(const unsigned *)objp : 0;
-            char lb[320];
-            char *t = lb;
-            const char *q;
-            int q3;
+            unsigned q3;
 
             pf_ctx_logged++;
 
-            t = lb;
-            q = pre; while (*q) *t++ = *q++;
-            q = ctxlbl; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(c123c >> i) & 0xf];
-            q = cntlbl; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(c1254 >> i) & 0xf];
-            q = clk1; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(c1258 >> i) & 0xf];
-            q = clk2; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(c125c >> i) & 0xf];
-            *t = 0;
-            shim_log(SHIM_LOG_PRIO_INFO, lb);
+            W.len = 0;
+            W.truncated = 0;
+            w_str(&W, " [ctxst] ctx+0x123c=0x");
+            w_hex(&W, c123c);
+            w_str(&W, " ctx+0x1254=");
+            w_hex(&W, c1254);
+            w_str(&W, " +0x1258=");
+            w_hex(&W, c1258);
+            w_str(&W, " +0x125c=");
+            w_hex(&W, c125c);
+            w_end(&W);
+            shim_log(SHIM_LOG_PRIO_INFO, msg);
 
-            t = lb;
-            q = pre; while (*q) *t++ = *q++;
-            q = " obj@0x"; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(objp >> i) & 0xf];
-            q = " obj0=0x"; while (*q) *t++ = *q++;
-            for (i = 28; i >= 0; i -= 4)
-                *t++ = hexdig[(obj0 >> i) & 0xf];
-            *t = 0;
-            shim_log(SHIM_LOG_PRIO_INFO, lb);
+            W.len = 0;
+            W.truncated = 0;
+            w_str(&W, " [ctxst] obj@0x");
+            w_hex(&W, objp);
+            w_str(&W, " obj0=0x");
+            w_hex(&W, obj0);
+            w_end(&W);
+            shim_log(SHIM_LOG_PRIO_INFO, msg);
 
             if (objp != 0) {
                 for (q3 = 0; q3 < 3; q3++) {
-                    int k4;
-                    t = lb;
-                    q = pre; while (*q) *t++ = *q++;
-                    q = " obj+0x1660:"; while (*q) *t++ = *q++;
+                    unsigned k4;
+                    W.len = 0;
+                    W.truncated = 0;
+                    w_str(&W, " [ctxst] obj+0x1660:");
                     for (k4 = 0; k4 < 16; k4++) {
-                        unsigned w = *(const unsigned *)(objp + 0x1660 +
-                                                         (q3 * 16 + k4) * 4);
-                        int j;
+                        unsigned w =
+                            *(const unsigned *)(objp + 0x1660 +
+                                                (q3 * 16 + k4) * 4);
                         if (k4 != 0)
-                            *t++ = ',';
-                        *t++ = '+';
-                        *t++ = hexdig[(((q3 * 16 + k4) * 4) >> 4) & 0xf];
-                        *t++ = hexdig[((q3 * 16 + k4) * 4) & 0xf];
-                        *t++ = ':';
-                        for (j = 28; j >= 0; j -= 4)
-                            *t++ = hexdig[(w >> j) & 0xf];
+                            w_ch(&W, ',');
+                        w_ch(&W, '+');
+                        w_ch(&W, hexdig[(((q3 * 16 + k4) * 4) >> 4) &
+                                        0xf]);
+                        w_ch(&W, hexdig[((q3 * 16 + k4) * 4) & 0xf]);
+                        w_ch(&W, ':');
+                        w_hex(&W, w);
                     }
-                    *t = 0;
-                    shim_log(SHIM_LOG_PRIO_INFO, lb);
+                    w_end(&W);
+                    shim_log(SHIM_LOG_PRIO_INFO, msg);
                 }
             }
         }

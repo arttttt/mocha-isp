@@ -94,6 +94,13 @@ echo "-- pointer-following context dumps (ctxp=)"
 check "ctxp=0x1318:16"         1 4194303 rggb ctxp=0x1318:16
 check "ctxp junk rejected"     0 4194303 rggb ctxp=junk
 
+echo "-- stage hooks (stage=)"
+check "stage=0x12c8:on"        1 4194303 rggb stage=0x12c8:on
+check "stage four"             1 4194303 rggb stage=0x12c8:on stage=0x12cc:on stage=0x12d0:on stage=0x12d4:on
+check "stage junk rejected"    0 4194303 rggb stage=junk
+check "stage no-on rejected"   0 4194303 rggb stage=0x12c8
+check "stage unaligned rejected" 0 4194303 rggb stage=0x12c9:on
+
 echo "-- context dumps (ctx=)"
 check "ctx=0x1200:32"          1 4194303 rggb ctx=0x1200:32
 check "ctx two regions"        1 4194303 rggb ctx=0x1200:64 ctx=0x1300:64
@@ -129,6 +136,8 @@ done <<'TAGS'
 [3] libnvisp_v3 base
 [9b] ctx+0x%x
 [9b] ctxp+0x%x
+[9c] stage
+[end] stage
 [4] NvRmOpen
 [5] round trip
 [5] ROUND TRIP

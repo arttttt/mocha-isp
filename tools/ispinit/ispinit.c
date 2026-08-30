@@ -194,6 +194,8 @@ static const void *stage_hook_syms[STAGE_SLOTS] = {
 };
 static unsigned stage_hook_orig[STAGE_SLOTS];   /* table value we replaced */
 static unsigned stage_hook_fired[STAGE_SLOTS];
+static unsigned stage_installed[STAGE_SLOTS];
+static unsigned stage_installed_off[STAGE_SLOTS];
 static unsigned stage_cur;                      /* slot currently entered */
 
 /*
@@ -238,6 +240,8 @@ static void stage_post(unsigned rc)
 static const void *stage_hook_syms[STAGE_SLOTS] = { 0 };
 static unsigned stage_hook_orig[STAGE_SLOTS];
 static unsigned stage_hook_fired[STAGE_SLOTS];
+static unsigned stage_installed[STAGE_SLOTS];
+static unsigned stage_installed_off[STAGE_SLOTS];
 static unsigned stage_cur;
 
 #endif /* HOST_ARGTEST */
@@ -313,6 +317,8 @@ int main(int argc, char **argv)
     int ctx_n = 0;
     unsigned ctxp_off[4], ctxp_cnt[4];
     int ctxp_n = 0;
+    unsigned stage_off[STAGE_SLOTS];
+    int stage_n = 0;
     unsigned char din_set[44] = {{0}};
     unsigned char dout_set[44] = {{0}};
     int rc;
@@ -525,6 +531,35 @@ int main(int argc, char **argv)
             ctx_off[ctx_n] = (unsigned)off;
             ctx_cnt[ctx_n] = (unsigned)cnt;
             ctx_n++;
+            continue;
+        }
+        if (strncmp(tok, "stage=", 6) == 0) {
+            /* stage=<off>:on -- replace the handler-table entry at
+               ctx+<off> with one of our hooks (prints args, calls the
+               original, prints the return code, returns it unchanged).
+               Several entries allowed; enumeration of the table is the
+               point, so any word-aligned offset is accepted. */
+            char *colon;
+            char *e8 = 0;
+            long off;
+            colon = strchr(tok + 6, ':');
+            if (colon == 0 || strcmp(colon + 1, "on") != 0) {
+                printf("[0] bad stage '%s', use stage=<off>:on\n",
+                       argv[ai]);
+                return 1;
+            }
+            *colon = '\0';
+            off = strtol(tok + 6, &e8, 0);
+            if (e8 == tok + 6 || *e8 != '\0' || off < 0 || (off & 3) != 0) {
+                printf("[0] bad stage offset in '%s' (word-aligned)\n",
+                       argv[ai]);
+                return 1;
+            }
+            if (stage_n == STAGE_SLOTS) {
+                printf("[0] too many stage hooks (max %d)\n", STAGE_SLOTS);
+                return 1;
+            }
+            stage_off[stage_n++] = (unsigned)off;
             continue;
         }
         if (strncmp(tok, "ctxp=", 5) == 0) {
@@ -1072,6 +1107,32 @@ round_trip_end:;
         }
     }
 
+    /* [9c] install stage hooks, if any were requested */
+    if (stage_n != 0) {
+#ifndef HOST_ARGTEST
+        int k, i;
+        for (k = 0; k < stage_n; k++) {
+            unsigned *entry = (unsigned *)((unsigned)hIsp + stage_off[k]);
+            int slot = -1;
+            for (i = 0; i < STAGE_SLOTS; i++)
+                if (stage_installed[i] == 0) {
+                    slot = i;
+                    break;
+                }
+            if (slot < 0)
+                break;
+            stage_hook_orig[slot] = *entry;
+            *entry = (unsigned)stage_hook_syms[slot];
+            stage_installed[slot] = 1;
+            stage_installed_off[slot] = stage_off[k];
+            printf("[9c] stage: ctx+0x%x hooked (slot %u, orig 0x%08x)\n",
+                   stage_off[k], slot, stage_hook_orig[slot]);
+        }
+#else
+        printf("[9c] host build: stage interception unavailable\n");
+#endif
+    }
+
     /*
      * [10..12] submit the placeholder frame. First reproduce what the
      * hardware already accepted (the stock's 8x8 dummy: format 0x105a500c
@@ -1437,6 +1498,17 @@ round_trip_end:;
     printf("[13] NvIspClose(hIsp=0x%x) -> ", hIsp);
     rc = nvIspClose(hIsp);
     printf("rc=0x%x\n", (unsigned)rc);
+
+#ifndef HOST_ARGTEST
+    {
+        int k;
+        for (k = 0; k < STAGE_SLOTS; k++)
+            if (stage_installed[k] != 0)
+                printf("[end] stage[%u] ctx+0x%x: %s\n", k,
+                       stage_installed_off[k],
+                       stage_hook_fired[k] ? "FIRED" : "never called");
+    }
+#endif
 
     printf("done\n");
     return 0;

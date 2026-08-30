@@ -88,6 +88,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspCtrlInitialize\n"
     "shim_slot_NvIspCtrlInitialize: .word tramp_0\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_0\n"
+    "hook_0:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #0\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -122,6 +138,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspFlush\n"
     "shim_slot_NvIspFlush: .word tramp_1\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_1\n"
+    "hook_1:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #1\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -156,6 +188,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspCtrlCleanup\n"
     "shim_slot_NvIspCtrlCleanup: .word tramp_2\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_2\n"
+    "hook_2:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #2\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -190,6 +238,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspClose\n"
     "shim_slot_NvIspClose: .word tramp_3\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_3\n"
+    "hook_3:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #3\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -224,6 +288,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspOpen\n"
     "shim_slot_NvIspOpen: .word tramp_4\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_4\n"
+    "hook_4:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #4\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -258,6 +338,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspProcessFrame\n"
     "shim_slot_NvIspProcessFrame: .word tramp_5\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_5\n"
+    "hook_5:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #5\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -292,6 +388,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspSetAttribute\n"
     "shim_slot_NvIspSetAttribute: .word tramp_6\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_6\n"
+    "hook_6:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #6\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -326,6 +438,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspGetAttribute\n"
     "shim_slot_NvIspGetAttribute: .word tramp_7\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_7\n"
+    "hook_7:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #7\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -360,6 +488,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspGetStatus\n"
     "shim_slot_NvIspGetStatus: .word tramp_8\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_8\n"
+    "hook_8:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #8\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -394,6 +538,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspSetMemoryBandwidth\n"
     "shim_slot_NvIspSetMemoryBandwidth: .word tramp_9\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_9\n"
+    "hook_9:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #9\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -428,6 +588,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspUpdateEmcClock\n"
     "shim_slot_NvIspUpdateEmcClock: .word tramp_10\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_10\n"
+    "hook_10:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #10\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -462,6 +638,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspSetIspClockRate\n"
     "shim_slot_NvIspSetIspClockRate: .word tramp_11\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_11\n"
+    "hook_11:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #11\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -496,6 +688,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsDestroyClientHwSettingsList\n"
     "shim_slot_NvIspHwSettingsDestroyClientHwSettingsList: .word tramp_12\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_12\n"
+    "hook_12:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #12\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -530,6 +738,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsDestroy\n"
     "shim_slot_NvIspHwSettingsDestroy: .word tramp_13\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_13\n"
+    "hook_13:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #13\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -564,6 +788,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCreate\n"
     "shim_slot_NvIspHwSettingsCreate: .word tramp_14\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_14\n"
+    "hook_14:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #14\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -598,6 +838,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsClone\n"
     "shim_slot_NvIspHwSettingsClone: .word tramp_15\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_15\n"
+    "hook_15:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #15\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -682,6 +938,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspGetConfiguration\n"
     "shim_slot_NvIspGetConfiguration: .word tramp_17\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_17\n"
+    "hook_17:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #17\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -716,6 +988,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsGetAppliedSettings\n"
     "shim_slot_NvIspHwSettingsGetAppliedSettings: .word tramp_18\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_18\n"
+    "hook_18:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #18\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -750,6 +1038,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsGetAttribute\n"
     "shim_slot_NvIspHwSettingsGetAttribute: .word tramp_19\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_19\n"
+    "hook_19:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #19\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -784,6 +1088,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsApply\n"
     "shim_slot_NvIspHwSettingsApply: .word tramp_20\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_20\n"
+    "hook_20:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #20\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -818,6 +1138,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspSetConfiguration\n"
     "shim_slot_NvIspSetConfiguration: .word tramp_21\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_21\n"
+    "hook_21:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #21\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -852,6 +1188,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyGpp\n"
     "shim_slot_NvIspHwSettingsCopyGpp: .word tramp_22\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_22\n"
+    "hook_22:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #22\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -886,6 +1238,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyLensShading\n"
     "shim_slot_NvIspHwSettingsCopyLensShading: .word tramp_23\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_23\n"
+    "hook_23:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #23\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -920,6 +1288,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyDemosaic\n"
     "shim_slot_NvIspHwSettingsCopyDemosaic: .word tramp_24\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_24\n"
+    "hook_24:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #24\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -954,6 +1338,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyLumaEnhancement\n"
     "shim_slot_NvIspHwSettingsCopyLumaEnhancement: .word tramp_25\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_25\n"
+    "hook_25:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #25\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -988,6 +1388,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyOutputDownScaler\n"
     "shim_slot_NvIspHwSettingsCopyOutputDownScaler: .word tramp_26\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_26\n"
+    "hook_26:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #26\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1022,6 +1438,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspHwSettingsCopyBitwiseOperation\n"
     "shim_slot_NvIspHwSettingsCopyBitwiseOperation: .word tramp_27\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_27\n"
+    "hook_27:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #27\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1056,6 +1488,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspGetStats\n"
     "shim_slot_NvIspGetStats: .word tramp_28\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_28\n"
+    "hook_28:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #28\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1090,6 +1538,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvIspSetStats\n"
     "shim_slot_NvIspSetStats: .word tramp_29\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_29\n"
+    "hook_29:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #29\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1124,6 +1588,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_PopulateIspHwFunctions_T12x\n"
     "shim_slot_PopulateIspHwFunctions_T12x: .word tramp_30\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_30\n"
+    "hook_30:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #30\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1158,6 +1638,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvSFxFloat2Fixed\n"
     "shim_slot_NvSFxFloat2Fixed: .word tramp_31\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_31\n"
+    "hook_31:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #31\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1192,6 +1688,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvSFxFixed2Float\n"
     "shim_slot_NvSFxFixed2Float: .word tramp_32\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_32\n"
+    "hook_32:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #32\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1226,6 +1738,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraHwSettingsApply\n"
     "shim_slot_NvCameraHwSettingsApply: .word tramp_33\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_33\n"
+    "hook_33:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #33\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1260,6 +1788,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraHwSettingsUpdateDirty\n"
     "shim_slot_NvCameraHwSettingsUpdateDirty: .word tramp_34\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_34\n"
+    "hook_34:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #34\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1294,6 +1838,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraConvertDoubleToUFx\n"
     "shim_slot_NvCameraConvertDoubleToUFx: .word tramp_35\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_35\n"
+    "hook_35:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #35\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1328,6 +1888,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraConvertDoubleToSFx\n"
     "shim_slot_NvCameraConvertDoubleToSFx: .word tramp_36\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_36\n"
+    "hook_36:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #36\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1362,6 +1938,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraMatMult3x3\n"
     "shim_slot_NvCameraMatMult3x3: .word tramp_37\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_37\n"
+    "hook_37:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #37\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1396,6 +1988,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraGetBayerComponent\n"
     "shim_slot_NvCameraGetBayerComponent: .word tramp_38\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_38\n"
+    "hook_38:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #38\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1430,6 +2038,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_NvCameraConvertRGrGbBToTlTrBlBr\n"
     "shim_slot_NvCameraConvertRGrGbBToTlTrBlBr: .word tramp_39\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_39\n"
+    "hook_39:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #39\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(
     ".text\n"
     ".thumb\n"
@@ -1464,6 +2088,22 @@ __asm__(
     ".align 2\n"
     ".hidden shim_slot_IsBayerColorFormat\n"
     "shim_slot_IsBayerColorFormat: .word tramp_40\n");
+ __asm__(
+    ".text\n"
+    ".thumb\n"
+    ".align 2\n"
+    ".thumb_func\n"
+    ".hidden hook_40\n"
+    "hook_40:\n"
+    "  push {r0-r3, r12, lr}\n"
+    "  add  r1, sp, #0\n"
+    "  mov  r0, #40\n"
+    "  bl   shim_log_call\n"
+    "  mov  r12, r0\n"
+    "  pop  {r0-r3}\n"
+    "  add  sp, #4\n"
+    "  pop  {lr}\n"
+    "  bx   r12\n");
 __asm__(".text\n");
 
 struct shim_binding {

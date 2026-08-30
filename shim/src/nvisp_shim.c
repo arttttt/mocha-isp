@@ -468,6 +468,36 @@ void *shim_log_call(unsigned idx, unsigned *saved)
             for (i = 28; i >= 0; i -= 4)
                 *w++ = hexdig[(word >> i) & 0xf];
         }
+
+        /*
+         * The stage-3 gate, read from the LIVE session. Stage 3 starts
+         * by loading ctx+0x1318, dereferencing it, and bailing out
+         * when the first word of that object is zero; our own runs
+         * never reach it. The library reads exactly these fields right
+         * after us on its own path, so the reads are as safe as its
+         * own: handle null-checked, pointer null-checked, one word
+         * deep, inside the budget. The stock's live values tell us
+         * what the field must contain -- and whether it is even
+         * nonzero when the sensor path works.
+         */
+        if (saved[0] != 0) {
+            unsigned ctx1318 =
+                *(const unsigned *)((unsigned)saved[0] + 0x1318);
+            p = " ctx1318=0x";
+            while (*p) *w++ = *p++;
+            for (i = 28; i >= 0; i -= 4)
+                *w++ = hexdig[(ctx1318 >> i) & 0xf];
+            if (ctx1318 != 0) {
+                unsigned obj0 = *(const unsigned *)ctx1318;
+                p = " obj0=0x";
+                while (*p) *w++ = *p++;
+                for (i = 28; i >= 0; i -= 4)
+                    *w++ = hexdig[(obj0 >> i) & 0xf];
+            } else {
+                p = " obj0=null";
+                while (*p) *w++ = *p++;
+            }
+        }
     }
     *w = 0;
 

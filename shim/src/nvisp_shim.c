@@ -61,14 +61,15 @@ void *dlsym(void *handle, const char *symbol);
 static const char real_path[] = "/system/vendor/lib/libnvisp_v3.real.so";
 
 /*
- * Bindings-table index of NvIspHwSettingsSetAttribute (gen_passthrough.h).
- * The only binding whose r2 we may dereference: known arity (h, attrId,
- * in*, &size) and a known-valid input pointer at call time. Keep in sync
- * with the table order -- check-shim.sh catches a mismatch indirectly (the
- * log would name another function), but there is no static assert across
- * the generated asm.
+ * The one binding whose r2 we may dereference: NvIspSetAttribute, arity
+ * (h, attrId, in*, &size), input pointer, read by the library immediately
+ * after us. The pair below is checked against the bindings table by
+ * check-shim.sh (check 10). NOT NvIspHwSettingsSetAttribute (idx 16) --
+ * near-identical name, different function: its r2 is an index (the live
+ * log shows 0x0 and 0x1), and a read there would kill mediaserver.
  */
-#define SHIM_IDX_SETATTRIBUTE 16
+#define SHIM_DEREF_BINDING "NvIspSetAttribute"
+#define SHIM_DEREF_IDX     6
 
 static void *real_handle;
 static void *hook_real_cache[41];
@@ -278,15 +279,17 @@ void *shim_log_call(unsigned idx, unsigned *saved)
     for (i = 28; i >= 0; i -= 4)
         *w++ = hexdig[(saved[2] >> i) & 0xf];
     /*
-     * The one permitted dereference. r2 of NvIspHwSettingsSetAttribute is
-     * a known-valid input pointer at call time: arity (h, attrId, in*,
+     * The one permitted dereference. r2 of NvIspSetAttribute is a
+     * known-valid input pointer at call time: arity (h, attrId, in*,
      * &size), and the library reads through it right after us -- we read
      * exactly what it is about to read. Four bytes, this binding only,
-     * inside the budget (two calls per run), never for any other binding:
-     * for the rest the arity or the pointer guarantee is unestablished,
-     * and a read through a non-pointer would kill mediaserver.
+     * inside the budget, never for any other binding: for the rest the
+     * arity or the pointer guarantee is unestablished, and a read through
+     * a non-pointer would kill mediaserver. The live log shows small
+     * integers (0x0, 0x1) in r2 of the HwSettings lookalike -- exactly
+     * why the binding is pinned by name and index above.
      */
-    if (idx == SHIM_IDX_SETATTRIBUTE && saved[2] != 0) {
+    if (idx == SHIM_DEREF_IDX && saved[2] != 0) {
         unsigned v = *(const unsigned *)saved[2];
         p = " val=0x";
         while (*p) *w++ = *p++;

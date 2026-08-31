@@ -251,6 +251,7 @@ int main(int argc, char **argv)
 "             --rgba-in                       input is RGBA, not bayer\n"
 "  ISP:       --isp-enable=0xN                reg 0x015 (default 0x7)\n"
 "             --stat-bytes=N                  readback scan budget, 0=all\n"
+"             --param-fill=0xWORD             fill the 0x100 DMA block (def 0)\n"
 "  Colour:    --curve=identity|scurve         tone curves (default identity)\n"
 "             --gpp-gain=0xWORD               0x600 words 12..14 (def 0x3fff0000)\n"
 "             --ccm=w0,w1,..,w7               push CCM 0x300/0x304 (default: off)\n"
@@ -276,6 +277,7 @@ int main(int argc, char **argv)
     uint32_t opt_e02_hi = 0;
     uint32_t opt_isp_enable = 0x00000007;   /* from blob gather RE */
     uint32_t opt_stat_bytes = 4u << 20;     /* readback scan budget per plane */
+    uint32_t opt_param_fill = 0;            /* word written across the 0x100 block */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -295,6 +297,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--in-fmt=", 9) == 0)     opt_in_fmt = strtoul(a + 9, 0, 16);
         else if (strncmp(a, "--isp-enable=", 13) == 0) opt_isp_enable = strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
+        else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
         else if (strcmp(a, "--rgba-in") == 0)         rgba_input = 1;
         else if (strncmp(a, "--curve=", 8) == 0)      opt_scurve = (strcmp(a + 8, "scurve") == 0);
@@ -508,10 +511,11 @@ int main(int argc, char **argv)
      * ISP reads demosaic/color-correction data from this address via reg 0x100.
      * For initial test: zero-fill (identity). */
     {
-        uint8_t zeros[4096];
-        memset(zeros, 0, sizeof(zeros));
-        nvmap_write(param_h, 0, zeros, 4096);
-        printf("Param block: zeroed 4096 bytes at IOVA 0x%08x\n", param_iova);
+        uint32_t fill[1024];
+        for (int i = 0; i < 1024; i++) fill[i] = opt_param_fill;
+        nvmap_write(param_h, 0, fill, 4096);
+        printf("Param block: 4096 bytes of 0x%08x at IOVA 0x%08x\n",
+               opt_param_fill, param_iova);
     }
 
     /* Load raw frame */

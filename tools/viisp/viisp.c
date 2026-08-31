@@ -298,6 +298,16 @@ struct nvmap_rw_handle {
 struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; };
 #define NVMAP_IOC_CREATE     _IOWR(NVMAP_IOC_MAGIC, 0, struct nvmap_create_handle)
 #define NVMAP_IOC_ALLOC      _IOW(NVMAP_IOC_MAGIC, 3, struct nvmap_alloc_handle)
+/* Allocation that names the memory's kind. Stock's output format is the
+ * block-linear one and it will not complete against an ordinary buffer --
+ * the ISP simply never writes. This is how a block-linear surface is asked
+ * for; the kind byte is what the format's top byte refers to. */
+struct nvmap_alloc_kind_handle {
+    uint32_t handle, heap_mask, flags, align;
+    uint8_t kind, comp_tags;
+};
+#define NVMAP_IOC_ALLOC_KIND \
+    _IOW(NVMAP_IOC_MAGIC, 100, struct nvmap_alloc_kind_handle)
 #define NVMAP_IOC_FREE       _IO(NVMAP_IOC_MAGIC, 4)
 #define NVMAP_IOC_WRITE      _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
 #define NVMAP_IOC_READ       _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
@@ -1106,6 +1116,24 @@ static int nvmap_alloc(uint32_t h) {
     if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC, &ah) < 0) { perror("nvmap alloc"); return -1; }
     return 0;
 }
+
+/* The same, but naming the memory's kind. Stock's output format is
+ * block-linear and the ISP never writes a byte against a surface that is
+ * not, which is why that format has always come back untouched here. */
+static int nvmap_alloc_kind(uint32_t h, unsigned kind) {
+    struct nvmap_alloc_kind_handle ak;
+    memset(&ak, 0, sizeof ak);
+    ak.handle = h;
+    ak.heap_mask = alloc_heap;
+    ak.flags = NVMAP_HANDLE_WRITE_COMBINE;
+    ak.align = 4096;
+    ak.kind = (uint8_t)kind;
+    if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC_KIND, &ak) < 0) {
+        printf("nvmap alloc kind 0x%02x: %s\n", kind, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
 static uint32_t nvmap_pin(uint32_t h) {
     struct nvmap_pin_handle ph = { h, 0, 1 };
     if (ioctl(nvmap_fd, NVMAP_IOC_PIN_MULT, &ph) < 0) { perror("nvmap pin"); return 0; }
@@ -1219,6 +1247,9 @@ int main(int argc, char **argv)
     int zero_init = 1;
     int isp_apply = 1;
     uint32_t opt_u_off = 0, opt_v_off = 0;
+    /* The kind to allocate the ISP's output as. Zero means an ordinary
+     * pitch-linear buffer; 0xFE is what the block-linear format wants. */
+    unsigned out_kind = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1284,6 +1315,8 @@ int main(int argc, char **argv)
             opt_u_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--v-off=", 8) == 0)
             opt_v_off = (uint32_t)strtoul(a + 8, 0, 16);
+        else if (strncmp(a, "--out-kind=", 11) == 0)
+            out_kind = (unsigned)strtoul(a + 11, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1453,8 +1486,11 @@ int main(int argc, char **argv)
         }
 
         out_h = nvmap_create(out_bytes);
-        if (out_h && nvmap_alloc(out_h) == 0)
-            out_iova = nvmap_pin(out_h);
+        if (out_h) {
+            int ok = out_kind ? nvmap_alloc_kind(out_h, out_kind)
+                              : nvmap_alloc(out_h);
+            if (ok == 0) out_iova = nvmap_pin(out_h);
+        }
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);

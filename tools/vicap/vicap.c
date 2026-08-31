@@ -1177,91 +1177,81 @@ int main(int argc, char **argv)
             goto readback;
         }
 
-        /* Now the shots, as the driver does them: re-arm the parser, arm the
-         * frame-start condition, write the trigger, and see whether the
-         * counter moves. Each attempt reports for itself. */
+        /* A trigger written while the sensor is part way through a frame
+         * captures only what is left of it: the first shot wrote rows 0 to
+         * 1704 and stopped, because that is how many lines remained. There
+         * is no register that says "wait for the boundary", so the shot is
+         * simply repeated until one lands in the blanking and the frame
+         * arrives whole. In practice the retry is the one right after the
+         * short frame ends, which is exactly where the boundary is.
+         *
+         * The fill pattern is what tells us: the last line losing it means
+         * the frame reached the bottom. A counter cannot tell us the same --
+         * the acknowledge condition fires a millisecond after it is armed,
+         * wherever the frame happens to be. */
+        uint8_t fill[64], tail[64];
+        memset(fill, 0xA5, sizeof fill);
+
         for (int shot = 0; shot < shots; shot++) {
-            uint32_t fs0 = syncpt_read(sp_id);
+            int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;
 
-            /* Clear the channel before every shot, the first included. The
-             * driver clears a single shot with a reset pulse; we were only
-             * doing it between shots, and the first one never started --
-             * the bring-up leaves the parser enabled part way through a
-             * frame, and the trigger lands somewhere it cannot use. */
-            vi_wr(base + VI_CSI_SW_RESET, 0xF);
-            vi_wr(base + VI_CSI_SW_RESET, 0x0);
-            vi_flush(0);
+            while (attempt < 8 && !done) {
+                uint32_t fs0 = syncpt_read(sp_id);
+                attempt++;
 
-            /* Wipe the buffer before the last shot, so what one frame writes
-             * can be counted rather than inferred. The first shot after
-             * configuration never starts, and its leftovers were what filled
-             * the rows the real frame stopped short of. */
-            if (refill && shot == shots - 1) {
-                uint32_t chunk = 64 * 1024;
-                void *p = malloc(chunk);
-                memset(p, 0xA5, chunk);
-                for (uint32_t o = 0; o < frame; o += chunk)
-                    nvmap_rw(buf_h, o, p, frame - o < chunk ? frame - o : chunk, 1);
-                free(p);
+                /* Wipe the whole buffer only when asked -- it is a ten
+                 * megabyte write -- but always the last line, since that is
+                 * the flag the wait watches. */
+                if (refill) {
+                    uint32_t chunk = 64 * 1024;
+                    void *p = malloc(chunk);
+                    memset(p, 0xA5, chunk);
+                    for (uint32_t o = 0; o < frame; o += chunk)
+                        nvmap_rw(buf_h, o, p,
+                                 frame - o < chunk ? frame - o : chunk, 1);
+                    free(p);
+                } else {
+                    nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
+                }
+
+                /* Channel reset, then the parser's own reset-and-enable, the
+                 * way the bring-up does it. Then arm and trigger, all in one
+                 * batch: every write of ours is an ioctl that has nvhost
+                 * claim and release the module, and doing that under a
+                 * running DMA cuts the picture. */
+                vi_wr(base + VI_CSI_SW_RESET, 0xF);
+                vi_wr(base + VI_CSI_SW_RESET, 0x0);
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
+                      << 8 | sp_id);
+                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+                vi_flush(0);
+
+                waited = 0;
+                while (syncpt_read(sp_id) == fs0 && waited < 400) {
+                    usleep(1000);
+                    waited++;
+                }
+                started = syncpt_read(sp_id) != fs0;
+
+                mwaited = 0;
+                while (mwaited < 300 && !done) {
+                    nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
+                    for (unsigned i = 0; i < sizeof tail; i++)
+                        if (tail[i] != 0xA5) { done = 1; break; }
+                    if (!done) { usleep(1000); mwaited++; }
+                }
             }
-
-            /* Everything the capture needs goes in ONE batch, the write
-             * acknowledge included. We used to arm that only after the frame
-             * had started, copying the driver's split across two threads --
-             * but the driver reaches VI through its own register window,
-             * while every write of ours is an ioctl that makes nvhost claim
-             * and release the module. Doing that in the middle of a running
-             * DMA is what cut the picture: the tear sat around row 1830, a
-             * fixed time into the frame rather than a fixed place in it. */
-            /* Reset the parser as well as the channel, the way the bring-up
-             * does it -- the reset command, then the enable. The channel
-             * reset alone left the parser latched onto a frame already in
-             * progress, so the first capture started and then ran out of
-             * frame before it reached the bottom of the buffer. */
-            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
-            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8
-                  | sp_id);
-            vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-            vi_flush(0);
-
-            int waited = 0;
-            while (syncpt_read(sp_id) == fs0 && waited < 400) {
-                usleep(1000);
-                waited++;
-            }
-            int started = syncpt_read(sp_id) != fs0;
-
-            /* Watch the buffer itself rather than a counter. Condition 12
-             * fires a millisecond after it is armed, wherever the frame
-             * happens to be, so whatever it means it is not the end of one,
-             * and stopping on it cut the capture a few dozen rows in. The
-             * last line losing its fill is the frame reaching the bottom,
-             * and reading the buffer goes nowhere near VI. */
-            /* Generous, because the frame takes far longer than the sensor's
-             * geometry says it should: four hundred milliseconds got the
-             * write to about row 900 of 1944. That is a real finding in its
-             * own right -- roughly one frame a second where the timings say
-             * fifteen -- but the picture comes out whole either way once we
-             * stop reading the buffer while it is still being filled. */
-            uint8_t tail[64];
-            int mwaited = 0, done = 0;
-            while (mwaited < 2500 && !done) {
-                nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
-                for (unsigned i = 0; i < sizeof tail; i++)
-                    if (tail[i] != 0xA5) { done = 1; break; }
-                if (!done) { usleep(1000); mwaited++; }
-            }
-            printf("  shot %d: start %s (%dms), reached the bottom %s (%dms),"
-                   " parser %08x, syncpt err %08x\n",
-                   shot, started ? "yes" : "NO", waited,
-                   done ? "yes" : "NO", mwaited,
+            printf("  frame %d: %s after %d attempt%s"
+                   " (start %dms, bottom %dms), parser %08x\n",
+                   shot, done ? "whole" : (started ? "SHORT" : "NEVER STARTED"),
+                   attempt, attempt == 1 ? "" : "s", waited, mwaited,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                               : T124_PP_A_PIXEL_PARSER_STATUS),
-                   vi_rd(TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR));
+                               : T124_PP_A_PIXEL_PARSER_STATUS));
         }
 
         /* Stop the capture before reading a single byte. The trigger bit

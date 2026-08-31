@@ -158,6 +158,12 @@ int main(int argc, char **argv)
         memcpy(st + 0x20, &(void *){ c16 }, 4);
         (void)coeff;
 
+        printf("block: enable=%u count=%u ptr=%08x  enable2=%u count2=%u"
+               " ptr2=%08x\n", st[0], *(uint32_t *)(st + 4),
+               *(uint32_t *)(st + 8), st[0x18], *(uint32_t *)(st + 0x1c),
+               *(uint32_t *)(st + 0x20));
+        fflush(stdout);
+
         uint32_t size = 0x40;
         int src = HwSettingsSetAttribute(hSet, 8, 0, (uint32_t)(uintptr_t)st,
                                          (uint32_t)(uintptr_t)&size);

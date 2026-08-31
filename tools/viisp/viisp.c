@@ -625,7 +625,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
                     uint32_t gpp_gain, int luma_lo,
                     uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
-                    int zero_init, int apply)
+                    int zero_init, int apply, uint32_t stats_ctrl)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
@@ -823,6 +823,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
 
     g[n++] = OP_INCR(0x900, 2);
     g[n++] = 0x00000001; g[n++] = 0x00000001;
+    /* The statistics control word. It has a name in the headers and nobody
+     * writes it -- not stock, not us, we only clear it -- and the stage it
+     * belongs to is silent here alongside the demosaic. Worth one value. */
+    if (stats_ctrl) { g[n++] = OP_INCR(0x902, 1); g[n++] = stats_ctrl; }
     g[n++] = OP_INCR(0x904, 2);
     g[n++] = 0x00005555; g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
@@ -1551,6 +1555,7 @@ int main(int argc, char **argv)
     int per_frame_cal = 1;
     int out_iovmm = 0;
     int isp_only = 0;
+    uint32_t stats_ctrl = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1622,6 +1627,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
         else if (strcmp(a, "--isp-only") == 0)     { isp_only = 1;
                                                      use_sensor = 0; }
+        else if (strncmp(a, "--stats-ctrl=", 13) == 0)
+            stats_ctrl = (uint32_t)strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1840,7 +1847,7 @@ int main(int argc, char **argv)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
                      isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase, zero_init, isp_apply);
+                     in_phase, zero_init, isp_apply, stats_ctrl);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

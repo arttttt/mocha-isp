@@ -1747,6 +1747,12 @@ readback:
         free(p);
         printf("ISP output: %u of %u bytes differ from the fill, %u"
                " non-zero\n", changed, out_bytes, nz);
+        /* Whether the ISP believes it did anything: the three conditions the
+         * per-frame gather arms. All still means it never ran. */
+        printf("ISP syncpoints: memory %u = %u, stats %u = %u,"
+               " read %u = %u\n", sp_mem, syncpt_read(sp_mem),
+               sp_stats, syncpt_read(sp_stats),
+               sp_loadv, syncpt_read(sp_loadv));
 
         if (dump) {
             FILE *f = fopen("/data/local/tmp/viisp_out.raw", "wb");

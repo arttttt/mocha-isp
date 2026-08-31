@@ -92,21 +92,47 @@ int main(int argc, char **argv)
      * write is the real entry point, so probe that -- an attribute number
      * the library knows will be accepted, one it does not will be refused,
      * and the pattern of the two maps the surface. */
-    /* One number per run when asked for one: a wrong guess about what the
-     * three payload words mean can take the process down, and losing the
-     * whole sweep to that would be a waste. */
-    unsigned first = 1, last = 16;
-    if (maxattr <= 16 && maxattr >= 1 && do_set) { first = maxattr; last = maxattr; }
-    printf("attributes the library accepts (it knows 1..16):\n");
-    unsigned ok = 0;
-    for (unsigned id = first; id <= last; id++) {
-        fflush(stdout);
-        int src = HwSettingsSetAttribute(hSet, id, 0, 0, 0);
-        printf("  attr %2u: rc=%d%s\n", id, src, src == 0 ? "  accepted" : "");
-        fflush(stdout);
-        if (src == 0) ok++;
+    if (do_set) {
+        /* Attribute 8 is the demosaic. Its handler sits in the slot at
+         * +0x12a4, and the case that loads that slot is the one attribute 8
+         * jumps to. The handler wants the third argument zero, the fourth a
+         * pointer to a sixty-four byte block and the fifth a pointer to its
+         * size -- it compares that size against 0x40 and, if it disagrees,
+         * writes 0x40 back and returns, which is the library telling the
+         * caller how big the block should have been.
+         *
+         * Inside the block: a byte at zero that decides whether the stage
+         * runs at all, a pointer at four to the nine coefficient words, and
+         * a second such pair at 0x18 and 0x1c. */
+        static uint32_t coeff[9] = {
+            0x3f3fcff3, 0x00000000, 0x04c1304c, 0x08220882, 0x00000000,
+            0x03d0f43d, 0x08621886, 0x01204812, 0x06e1b86e
+        };
+        uint8_t st[0x40];
+        memset(st, 0, sizeof st);
+        st[0] = 1;                                   /* run the stage */
+        memcpy(st + 4, &(void *){ coeff }, 4);
+        st[0x18] = 1;
+        memcpy(st + 0x1c, &(void *){ coeff }, 4);
+
+        uint32_t size = 0x40;
+        int src = HwSettingsSetAttribute(hSet, 8, 0, (uint32_t)(uintptr_t)st,
+                                         (uint32_t)(uintptr_t)&size);
+        printf("demosaic attribute: rc=%d, size now %u\n", src, size);
+
+        if (src == 0 && HwSettingsApply) {
+            int arc = HwSettingsApply(hIsp, hSet);
+            printf("HwSettingsApply: rc=%d\n", arc);
+        }
+    } else {
+        printf("attributes the library accepts (it knows 1..16):\n");
+        for (unsigned id = 1; id <= 16 && id <= maxattr; id++) {
+            fflush(stdout);
+            int src = HwSettingsSetAttribute(hSet, id, 0, 0, 0);
+            printf("  attr %2u: rc=%d\n", id, src);
+            fflush(stdout);
+        }
     }
-    printf("%u accepted\n", ok);
     (void)HwSettingsGetAttribute;
 
     if (HwSettingsDestroy) HwSettingsDestroy(hSet);

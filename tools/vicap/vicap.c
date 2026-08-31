@@ -1186,30 +1186,34 @@ int main(int argc, char **argv)
                 free(p);
             }
 
+            /* Everything the capture needs goes in ONE batch, the write
+             * acknowledge included. We used to arm that only after the frame
+             * had started, copying the driver's split across two threads --
+             * but the driver reaches VI through its own register window,
+             * while every write of ours is an ioctl that makes nvhost claim
+             * and release the module. Doing that in the middle of a running
+             * DMA is what cut the picture: the tear sat around row 1830, a
+             * fixed time into the frame rather than a fixed place in it. */
+            uint32_t mw0 = syncpt_read(sp_mw), mwa0 = syncpt_read(sp_cmd);
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
                   (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8
                   | sp_id);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_cmd);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
             vi_flush(0);
 
-            /* Wait for the frame to start, then -- and only then -- arm the
-             * acknowledge, which is what the driver's two threads do between
-             * them. Firing and sleeping a fixed time was leaving the buffer
-             * half written, because the shot lands wherever the sensor
-             * happens to be in its frame. */
+            /* From here until the frame is written, VI is left alone. The
+             * counters live behind the control node, which does not touch
+             * the module at all. */
             int waited = 0;
             while (syncpt_read(sp_id) == fs0 && waited < 400) {
                 usleep(1000);
                 waited++;
             }
             int started = syncpt_read(sp_id) != fs0;
-
-            uint32_t mw0 = syncpt_read(sp_mw), mwa0 = syncpt_read(sp_cmd);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_cmd);
-            vi_flush(0);
 
             int mwaited = 0;
             while (syncpt_read(sp_mw) == mw0 &&

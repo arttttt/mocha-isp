@@ -454,7 +454,9 @@ struct nvhost32_submit_args {
 #define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
+#define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008
 #define TEGRA_VI_CFG_CG_CTRL            0x0B8
+#define VI_CSI_SW_RESET                 0x000
 #define T124_PPA_FRAME_START            9
 #define T124_PPB_FRAME_START            10
 #define T124_MWA_ACK_DONE               6
@@ -631,7 +633,7 @@ int main(int argc, char **argv)
      * brings E up, which is the one that reads 0x110 back from it. */
     uint32_t phy_cil_cmd = 0x12020000;   /* brick E, one lane */
     int tpg = 0, shots = 8, piggyback = 0;
-    int hold = 0, dump_regs = 0, scan_cil = 0;
+    int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -655,6 +657,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
         else if (strncmp(a, "--shots=", 8) == 0)  shots = atoi(a + 8);
+        else if (strcmp(a, "--refill") == 0)      refill = 1;
+        else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
         else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }
@@ -1123,11 +1127,58 @@ int main(int argc, char **argv)
                n, rc, rc == 0 ? "ok" : strerror(errno));
         usleep(50000);
 
+        /* Which event numbers does this hardware actually raise? The two we
+         * use for the write acknowledge came from a header that says
+         * outright they were found by trial, and neither of them fires. So
+         * arm every condition in turn against one counter, take a shot, and
+         * let the ones that move name themselves. */
+        if (scan_cond) {
+            for (uint32_t cond = 0; cond < 32; cond++) {
+                uint32_t v0 = syncpt_read(sp_mw);
+                vi_wr(base + VI_CSI_SW_RESET, 0xF);
+                vi_wr(base + VI_CSI_SW_RESET, 0x0);
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, cond << 8 | sp_mw);
+                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+                vi_flush(0);
+                usleep(150000);
+                uint32_t v1 = syncpt_read(sp_mw);
+                printf("  condition %2u: %s\n", cond,
+                       v1 != v0 ? "FIRES" : "-");
+            }
+            goto readback;
+        }
+
         /* Now the shots, as the driver does them: re-arm the parser, arm the
          * frame-start condition, write the trigger, and see whether the
          * counter moves. Each attempt reports for itself. */
         for (int shot = 0; shot < shots; shot++) {
             uint32_t fs0 = syncpt_read(sp_id);
+
+            /* Clear the channel between shots the way the driver clears a
+             * single shot: a reset pulse on the channel. Without it the
+             * previous capture's state carries over, and the frame we read
+             * was torn -- the last shot writing part of the picture over
+             * what the one before it had left. */
+            if (shot) {
+                vi_wr(base + VI_CSI_SW_RESET, 0xF);
+                vi_wr(base + VI_CSI_SW_RESET, 0x0);
+                vi_flush(0);
+            }
+
+            /* Wipe the buffer before the last shot, so what one frame writes
+             * can be counted rather than inferred. The first shot after
+             * configuration never starts, and its leftovers were what filled
+             * the rows the real frame stopped short of. */
+            if (refill && shot == shots - 1) {
+                uint32_t chunk = 64 * 1024;
+                void *p = malloc(chunk);
+                memset(p, 0xA5, chunk);
+                for (uint32_t o = 0; o < frame; o += chunk)
+                    nvmap_rw(buf_h, o, p, frame - o < chunk ? frame - o : chunk, 1);
+                free(p);
+            }
 
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
@@ -1161,12 +1212,13 @@ int main(int argc, char **argv)
                 mwaited++;
             }
             printf("  shot %d: start %s (%dms), write B %s A %s (%dms),"
-                   " parser %08x\n",
+                   " parser %08x, syncpt err %08x\n",
                    shot, started ? "yes" : "NO", waited,
                    syncpt_read(sp_mw) != mw0 ? "yes" : "no",
                    syncpt_read(sp_cmd) != mwa0 ? "yes" : "no", mwaited,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                               : T124_PP_A_PIXEL_PARSER_STATUS));
+                               : T124_PP_A_PIXEL_PARSER_STATUS),
+                   vi_rd(TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR));
         }
 
         /* Now that the shots are away, arm the acknowledge -- the driver's

@@ -696,10 +696,14 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0x100, 4);
     stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
 
+    /* Only the conditions that have a counter behind them. Arming one
+     * against an id this channel does not own leaves the job waiting on
+     * something nothing will raise, and host1x eventually kills the
+     * channel -- which is exactly what happened. */
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (4u << 8) | sp_mem;
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (5u << 8) | sp_stats;
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (6u << 8) | sp_loadv;
+    if (sp_stats) { g[n++] = OP_NONINCR(0x000, 1); g[n++] = (5u << 8) | sp_stats; }
+    if (sp_loadv) { g[n++] = OP_NONINCR(0x000, 1); g[n++] = (6u << 8) | sp_loadv; }
 
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
@@ -955,23 +959,26 @@ int main(int argc, char **argv)
     } else {
         struct nvhost_set_nvmap_fd_args snf = { (uint32_t)nvmap_fd };
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &snf);
-        /* Four, as stock uses: one to sequence our own submits and three
-         * for the conditions the per-frame gather arms. */
+        /* This channel has exactly two, and the kernel prints their names
+         * when it dumps a stuck job: 36 is ispb_memory and 38 is
+         * ispb_stream. Handing the first one to our own sequencing
+         * increment and arming the output condition on 37 -- which belongs
+         * to nothing -- is what wedged the channel: the job sat waiting on
+         * a counter nobody would ever raise, and host1x timed it out.
+         *
+         * So the first is the output condition and the second sequences the
+         * submits. The stats and read conditions have no counter of their
+         * own here; they are left unarmed rather than aimed at someone
+         * else's. */
         struct nvhost_get_param_arg ip = { .param = 0, .value = 0 };
         if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            isp_sp = ip.value;
+            sp_mem = ip.value;
         ip.param = 1; ip.value = 0;
         if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            sp_mem = ip.value;
-        ip.param = 2; ip.value = 0;
-        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            sp_stats = ip.value;
-        ip.param = 3; ip.value = 0;
-        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            sp_loadv = ip.value;
-        if (!sp_mem) sp_mem = isp_sp;
-        if (!sp_stats) sp_stats = isp_sp;
-        if (!sp_loadv) sp_loadv = isp_sp;
+            isp_sp = ip.value;
+        if (!isp_sp) isp_sp = sp_mem;
+        sp_stats = 0;
+        sp_loadv = 0;
 
         /* The ISP's own clocks, at the rates the reprocess tool uses. */
         struct nvhost_clk_rate_args ic;
@@ -1771,10 +1778,9 @@ readback:
                " non-zero\n", changed, out_bytes, nz);
         /* Whether the ISP believes it did anything: the three conditions the
          * per-frame gather arms. All still means it never ran. */
-        printf("ISP syncpoints moved by: memory %+d, stats %+d, read %+d\n",
-               (int)(syncpt_read(sp_mem) - isp_base_mem),
-               (int)(syncpt_read(sp_stats) - isp_base_stats),
-               (int)(syncpt_read(sp_loadv) - isp_base_loadv));
+        printf("ISP output condition (syncpoint %u) moved by %+d\n",
+               sp_mem, (int)(syncpt_read(sp_mem) - isp_base_mem));
+        (void)isp_base_stats; (void)isp_base_loadv;
 
         /* The stats condition is the one that fires, so this is where to
          * look for proof that pixels reached the ISP at all. Numbers here

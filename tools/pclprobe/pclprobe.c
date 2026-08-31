@@ -52,6 +52,20 @@ struct nvc_param {
 #define PCLLK_IOCTL_PWR_RD    _IOR('o', 109, int)
 #define PCLLK_IOCTL_PARAM_RD  _IOWR('o', 141, struct nvc_param)
 
+/* The sensors also have their own legacy nodes, and those are the useful
+ * ones: the mode tables live in the kernel driver, so powering up and
+ * choosing a resolution needs nothing from NVIDIA's userspace at all.
+ * From the stock kernel's include/media/imx179.h. */
+struct sensor_mode {
+    int xres, yres;
+    uint32_t frame_length;
+    uint32_t coarse_time;
+    uint16_t gain;
+};
+#define SENSOR_IOCTL_SET_MODE   _IOW('o', 1, struct sensor_mode)
+#define SENSOR_IOCTL_GET_STATUS _IOR('o', 2, uint8_t)
+#define SENSOR_IOCTL_SET_POWER  _IOW('o', 20, uint32_t)
+
 static void try_ioctl(int fd, const char *what, unsigned long req, void *arg)
 {
     errno = 0;
@@ -65,6 +79,7 @@ int main(int argc, char **argv)
     const char *node = "/dev/camera.pcl";
     const char *sensor = "imx179";
     int bus = 2, addr = 0x10, power = -1;
+    int use_sensor_node = 0, mode_w = 1920, mode_h = 1080;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -73,12 +88,55 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--bus=", 6) == 0)    bus = atoi(a + 6);
         else if (strncmp(a, "--addr=", 7) == 0)   addr = (int)strtol(a + 7, 0, 0);
         else if (strncmp(a, "--power=", 8) == 0)  power = atoi(a + 8);
+        else if (strcmp(a, "--node") == 0)        use_sensor_node = 1;
+        else if (strncmp(a, "--mode=", 7) == 0)
+            sscanf(a + 7, "%dx%d", &mode_w, &mode_h);
         else { printf("unknown option %s\n", a); return 1; }
     }
     if (strcmp(sensor, "ov5693") == 0 && addr == 0x10) addr = 0x36;
 
     printf("=== pclprobe: %s, sensor %s on i2c-%d addr 0x%02x ===\n",
            node, sensor, bus, addr);
+
+    /* The sensor's own node first, when asked for: it needs no chip
+     * registration, because the driver already carries the tables. */
+    if (use_sensor_node) {
+        char sn[64];
+        snprintf(sn, sizeof sn, "/dev/%s", sensor);
+        int sfd = open(sn, O_RDWR);
+        printf("open %s: fd=%d%s%s\n", sn, sfd,
+               sfd < 0 ? " -- " : "", sfd < 0 ? strerror(errno) : "");
+        if (sfd < 0) return 1;
+
+        uint8_t st = 0;
+        try_ioctl(sfd, "GET_STATUS (before)", SENSOR_IOCTL_GET_STATUS, &st);
+        printf("  status: 0x%02x\n", st);
+
+        uint32_t on = 1;
+        try_ioctl(sfd, "SET_POWER on", SENSOR_IOCTL_SET_POWER, &on);
+
+        st = 0;
+        try_ioctl(sfd, "GET_STATUS (powered)", SENSOR_IOCTL_GET_STATUS, &st);
+        printf("  status: 0x%02x\n", st);
+
+        struct sensor_mode m;
+        memset(&m, 0, sizeof m);
+        m.xres = mode_w;
+        m.yres = mode_h;
+        m.frame_length = 0;
+        m.coarse_time = 0;
+        m.gain = 0;
+        printf("  setting mode %dx%d\n", m.xres, m.yres);
+        try_ioctl(sfd, "SET_MODE", SENSOR_IOCTL_SET_MODE, &m);
+
+        if (power == 0) {
+            uint32_t off = 0;
+            try_ioctl(sfd, "SET_POWER off", SENSOR_IOCTL_SET_POWER, &off);
+        }
+        close(sfd);
+        printf("=== done ===\n");
+        return 0;
+    }
 
     int fd = open(node, O_RDWR);
     if (fd < 0) {

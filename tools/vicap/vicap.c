@@ -533,7 +533,6 @@ int main(int argc, char **argv)
      * place, the missing piece is somewhere other than the CSI setup. */
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
-    if (front) mipi_calibrate_csie();
 
     if (front) {
         printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");
@@ -559,6 +558,13 @@ int main(int argc, char **argv)
         vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x007f0014);
         vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
+
+        /* Calibrate only now. The driver's order is pads out of deep power
+         * down, then the CSI and PHY brought up, and the calibration last
+         * -- trimming pads that have not been enabled yet is what a
+         * calibration that never finishes looks like. */
+        vi_flush("CSI bring-up");
+        mipi_calibrate_csie();
     } else {
     printf("bringing up the CSI receiver (port A, 4 lanes)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);

@@ -114,7 +114,12 @@ int main(int argc, char **argv)
          * the answer we were getting while passing addresses there. The
          * data itself is inline: the first array is taken from +0x08 and
          * the second from +0x20. */
-        uint8_t st[0x40];
+        /* Declared as sixty-four bytes because that is what the handler
+         * demands, but allocated with room to spare: past the count checks
+         * it reads the arrays inline, and sixteen entries starting at +0x20
+         * do not fit in sixty-four. Reading into our own slack is harmless;
+         * reading off the end of a tight buffer is what just killed it. */
+        uint8_t st[256];
         memset(st, 0, sizeof st);
         st[0] = 1;                                   /* run the stage */
         uint32_t nine = 9, sixteen = 16;

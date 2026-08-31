@@ -613,7 +613,8 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
-                    uint32_t gpp_gain, int luma_lo)
+                    uint32_t gpp_gain, int luma_lo,
+                    uint32_t in_dims, uint32_t in_mode)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -693,10 +694,17 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
 
     /* The input stage: dimensions, then the enable, then stride and format. */
     if (!(skip & 0x04)) {
+        /* 0x203 and 0x204 carry 0x00780078 in the driver for this sensor and
+         * 0x02000200 for the other -- a pair of sixteen-bit fields that have
+         * nothing to do with either sensor's dimensions, so what they mean
+         * is a guess. Both they and the pipeline mode in 0x200 are knobs:
+         * the April notes say a non-zero mode is what takes the block out of
+         * minimal processing, and minimal processing is exactly what we
+         * measure -- the mosaic arrives at the output intact. */
         g[n++] = OP_INCR(0x202, 3);
-        g[n++] = 0x00000001; g[n++] = 0x00780078; g[n++] = 0x00780078;
+        g[n++] = 0x00000001; g[n++] = in_dims; g[n++] = in_dims;
         g[n++] = OP_INCR(0x200, 2);
-        g[n++] = 0x00000001; g[n++] = 0x00000000;
+        g[n++] = in_mode; g[n++] = 0x00000000;
         g[n++] = OP_INCR(0x205, 4);
         g[n++] = 0x00000000; g[n++] = 0x000600c8;
         g[n++] = 0x000f000f; g[n++] = 0x00000000;
@@ -1126,6 +1134,7 @@ int main(int argc, char **argv)
     uint32_t isp_in_fmt = 0;
     uint32_t gpp_gain = 0x3fff0000;
     int luma_lo = 0;
+    uint32_t in_dims = 0x00780078, in_mode = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1177,6 +1186,10 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--gpp=", 6) == 0)
             gpp_gain = (uint32_t)strtoul(a + 6, 0, 16);
         else if (strcmp(a, "--luma-lo") == 0) luma_lo = 1;
+        else if (strncmp(a, "--in-dims=", 10) == 0)
+            in_dims = (uint32_t)strtoul(a + 10, 0, 16);
+        else if (strncmp(a, "--in-mode=", 10) == 0)
+            in_mode = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1343,7 +1356,7 @@ int main(int argc, char **argv)
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
-                     isp_skip, gpp_gain, luma_lo);
+                     isp_skip, gpp_gain, luma_lo, in_dims, in_mode);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

@@ -457,16 +457,16 @@ struct nvhost32_submit_args {
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008
 #define TEGRA_VI_CFG_CG_CTRL            0x0B8
 #define VI_CSI_SW_RESET                 0x000
-/* Measured, not taken from the header: arming every condition in turn and
- * taking a shot, the ones that move are 10 -- port B's frame start, which we
- * already relied on -- and 12. Six and seven, which the header gives for the
- * write acknowledge and admits were found by trial, never fire. Twelve sits
- * exactly where the pattern puts it: frame start for A and B is 9 and 10, so
- * write done for A and B is 11 and 12. */
+/* The 24.1 values. Sweeping the conditions here showed 10 moving -- port B's
+ * frame start, which we rely on -- and 12, while 6 and 7 stayed still; but
+ * that sweep only says an event did not arrive during one shot, which is
+ * equally what a capture that never finishes looks like. The driver these
+ * came from does complete captures, so they stand. Completion is watched in
+ * the buffer instead, which does not depend on getting this right. */
 #define T124_PPA_FRAME_START            9
 #define T124_PPB_FRAME_START            10
-#define T124_MWA_ACK_DONE               11
-#define T124_MWB_ACK_DONE               12
+#define T124_MWA_ACK_DONE               6
+#define T124_MWB_ACK_DONE               7
 
 #define BRICK_CLOCK_A_4X                (0x1 << 16)
 #define T124_CIL_PHY_CONTROL_DEFAULT    0x09
@@ -1209,25 +1209,24 @@ int main(int argc, char **argv)
             }
             int started = syncpt_read(sp_id) != fs0;
 
-            /* The baseline for the acknowledge has to be taken here, after
-             * our frame has started -- taking it before the trigger caught
-             * the previous frame's completion instead, which read as an
-             * instant acknowledge and had us stop the capture ten rows in. */
-            uint32_t mw0 = syncpt_read(sp_mw);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
-            vi_flush(0);
-
-            int mwaited = 0;
-            while (syncpt_read(sp_mw) == mw0 && mwaited < 400) {
-                usleep(1000);
-                mwaited++;
+            /* Watch the buffer itself rather than a counter. Condition 12
+             * fires a millisecond after it is armed, wherever the frame
+             * happens to be, so whatever it means it is not the end of one,
+             * and stopping on it cut the capture a few dozen rows in. The
+             * last line losing its fill is the frame reaching the bottom,
+             * and reading the buffer goes nowhere near VI. */
+            uint8_t tail[64];
+            int mwaited = 0, done = 0;
+            while (mwaited < 400 && !done) {
+                nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
+                for (unsigned i = 0; i < sizeof tail; i++)
+                    if (tail[i] != 0xA5) { done = 1; break; }
+                if (!done) { usleep(1000); mwaited++; }
             }
-            uint32_t mwa0 = mw0;    /* only the B side is armed now */
-            printf("  shot %d: start %s (%dms), write B %s A %s (%dms),"
+            printf("  shot %d: start %s (%dms), reached the bottom %s (%dms),"
                    " parser %08x, syncpt err %08x\n",
                    shot, started ? "yes" : "NO", waited,
-                   syncpt_read(sp_mw) != mw0 ? "yes" : "no",
-                   syncpt_read(sp_cmd) != mwa0 ? "yes" : "no", mwaited,
+                   done ? "yes" : "NO", mwaited,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
                                : T124_PP_A_PIXEL_PARSER_STATUS),
                    vi_rd(TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR));

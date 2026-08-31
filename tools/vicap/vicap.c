@@ -320,6 +320,16 @@ struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
     _IOW(NVHOST_IOCTL_MAGIC, 10, struct nvhost_clk_rate_args)
 #define NVHOST_IOCTL_CTRL_SYNCPT_READ \
     _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
+struct nvhost_ctrl_syncpt_incr_args { uint32_t id; };
+#define NVHOST_IOCTL_CTRL_SYNCPT_INCR \
+    _IOW(NVHOST_IOCTL_MAGIC, 2, struct nvhost_ctrl_syncpt_incr_args)
+
+/* host1x's own class, and the method that makes a channel stop until a
+ * syncpoint reaches a threshold. A job parked on this holds everything it
+ * pinned -- which is the point: the buffer's mapping into VI's address space
+ * belongs to the job, and the capture outlives it. */
+#define HOST1X_CLASS_ID             0x01
+#define HOST1X_WAIT_SYNCPT          0x08
 struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
 struct nvhost_cmdbuf { uint32_t mem, offset, words; };
 struct nvhost_reloc { uint32_t cmdbuf_mem, cmdbuf_offset, target, target_offset; };
@@ -730,6 +740,9 @@ int main(int argc, char **argv)
         sp_cmd = gp.value;
     printf("VI syncpoints: frame %u, memory write %u, command %u\n",
            sp_id, sp_mw, sp_cmd);
+    /* The threshold the parked job waits on; we raise the counter to it
+     * ourselves once the capture is finished with the buffer. */
+    uint32_t hold_thresh = 0;
 
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
@@ -1103,7 +1116,7 @@ int main(int argc, char **argv)
     {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
-        uint32_t g[10];
+        uint32_t g[16];
         int n = 0, addr_word;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
@@ -1113,6 +1126,19 @@ int main(int argc, char **argv)
         g[n++] = 0;                       /* the kernel fills this in */
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
         g[n++] = SINGLE_SHOT_CAPTURE;
+
+        /* Park the job here, on a counter nothing but us will move. The
+         * buffer's mapping into VI's address space belongs to this job, and
+         * until now the job finished immediately -- so the capture ran on
+         * afterwards against an address that was no longer translated, and
+         * the memory controller said so: a fault on the buffer's own base,
+         * and a picture that stops at whatever row it reached. */
+        hold_thresh = syncpt_read(sp_mw) + 1;
+        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+        g[n++] = (sp_mw << 24) | (hold_thresh & 0xFFFFFF);
+        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+
         /* Retire the command buffer on a syncpoint of its own. It used to
          * share one with the frame-start condition, so that counter moved
          * once per submit whether or not a frame ever started -- which is
@@ -1330,6 +1356,20 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
+
+        /* Release the parked job now that nothing is writing. Until this the
+         * buffer stayed mapped, which is the whole reason the job was
+         * parked. */
+        if (hold_thresh) {
+            int cfd = open("/dev/nvhost-ctrl", O_RDWR);
+            if (cfd >= 0) {
+                struct nvhost_ctrl_syncpt_incr_args ia = { sp_mw };
+                int irc = ioctl(cfd, NVHOST_IOCTL_CTRL_SYNCPT_INCR, &ia);
+                close(cfd);
+                printf("held mapping released: syncpoint %u to %u, rc=%d\n",
+                       sp_mw, hold_thresh, irc);
+            }
+        }
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
     usleep(200000);

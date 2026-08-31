@@ -312,6 +312,7 @@ int main(int argc, char **argv)
     int use_sensor = 1, dump = 0, front = 1;
     uint32_t image_def = 0x00200004;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
+    int hold = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -331,6 +332,7 @@ int main(int argc, char **argv)
             frame_length = (uint32_t)strtoul(a + 15, 0, 0);
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strncmp(a, "--gain=", 7) == 0)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
@@ -590,6 +592,12 @@ int main(int argc, char **argv)
             fclose(f);
             printf("saved /data/local/tmp/vicap.raw (%u bytes)\n", frame);
         }
+    }
+
+    if (hold > 0) {
+        printf("holding the sensor open for %d s -- probe it now\n", hold);
+        fflush(stdout);
+        sleep((unsigned)hold);
     }
 
     if (sfd >= 0) {

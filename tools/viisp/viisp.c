@@ -2486,7 +2486,11 @@ int main(int argc, char **argv)
                  * costs a reboot. Short and self-limiting instead. */
                 if (isp_fd >= 0 && out_iova) {
                     int w2 = 0;
-                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < 600) {
+                    /* A full-resolution frame writes at roughly three rows a
+                     * millisecond here, so it needs the better part of a
+                     * second -- six hundred milliseconds cut it off at
+                     * seventeen hundred rows of nineteen hundred. */
+                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < 2500) {
                         /* Re-map while we wait. Without this the larger
                          * frames fault on the output buffer part way
                          * through and never complete. */

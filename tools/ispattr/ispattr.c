@@ -29,13 +29,14 @@ int main(int argc, char **argv)
 {
     int instance = 2;          /* ISP-B; the other tool uses 1 for ISP-A */
     unsigned maxattr = 256;
-    int do_set = 0;
+    int do_set = 0, do_apply = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--instance=", 11) == 0) instance = atoi(a + 11);
         else if (strncmp(a, "--max=", 6) == 0)  maxattr = (unsigned)atoi(a + 6);
         else if (strcmp(a, "--set") == 0)       do_set = 1;
+        else if (strcmp(a, "--apply") == 0)     { do_set = 1; do_apply = 1; }
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -196,10 +197,24 @@ int main(int argc, char **argv)
                                          (uint32_t)(uintptr_t)&size);
         printf("demosaic attribute: rc=%d, size now %u\n", src, size);
 
-        if (src == 0 && HwSettingsApply) {
-            int arc = HwSettingsApply(hIsp, hSet);
-            printf("HwSettingsApply: rc=%d\n", arc);
+        /* The attribute is accepted. Applying is a separate question: the
+         * name that looks right, NvIspHwSettingsApply, shares an address
+         * with two getters, which is the shape of a stub. The emitter that
+         * actually walks the shadow blocks and pushes them is
+         * NvCameraHwSettingsApply, so try that -- and only when asked,
+         * since a wrong guess at its arguments takes the process down and
+         * the attribute call above is worth keeping. */
+        if (src == 0 && do_apply) {
+            int (*CameraApply)(void *, void *) =
+                dlsym(isp, "NvCameraHwSettingsApply");
+            printf("emitter at %p\n", (void *)CameraApply);
+            fflush(stdout);
+            if (CameraApply) {
+                int arc = CameraApply(hSet, hIsp);
+                printf("NvCameraHwSettingsApply: rc=%d\n", arc);
+            }
         }
+        (void)HwSettingsApply;
     } else {
         printf("attributes the library accepts (it knows 1..16):\n");
         for (unsigned id = 1; id <= 16 && id <= maxattr; id++) {

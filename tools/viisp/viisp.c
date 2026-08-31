@@ -805,8 +805,13 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
 
     memcpy(&g[n], isp_b_cal_data, words * 4);
     n += words;
+    /* The blob ends with 0x053 and 0x054 -- the work buffer's enable and its
+     * address. The driver patches a zero into the address and calls that
+     * what stock does, but the stock streaming trace carries a real pointer
+     * there. A pipeline handed a null scratch buffer has every reason to
+     * fall back to the least it can do, which is what we see. */
     g[n - 2] = 0x00000001;                /* 0x053 */
-    g[n - 1] = 0x00000000;                /* 0x054 */
+    g[n - 1] = work_iova;                 /* 0x054 */
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
     g[n++] = OP_IMM(0, sp);
 

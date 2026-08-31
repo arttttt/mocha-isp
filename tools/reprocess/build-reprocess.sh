@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SRC="$ROOT/tools/reprocess/reprocess.c"
+SRC="$ROOT/tools/reprocess/reprocess_pure.c"
 OUTDIR="$ROOT/build/out"
 NDK=/home/artem/Projects/toolchain/android-ndk-r21e
 CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi19-clang"

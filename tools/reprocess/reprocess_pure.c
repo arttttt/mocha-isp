@@ -153,42 +153,204 @@ static uint32_t nvmap_pin(uint32_t handle) {
     return (uint32_t)ph.addr;
 }
 
+/* ---- Output surface layout -------------------------------------------
+ * The number of planes is a property of the FORMAT, not a flag: the ISP
+ * takes one address triplet per plane (E04/E07/E0A = plane 1/2/3), so we
+ * push exactly as many as the format has.
+ *   0x43 RGBA    -- 1 plane,  interleaved, stride W*4
+ *   0xE7 NV12    -- 2 planes, Y + interleaved UV (UV row is W bytes)
+ *   0xE6 YUV420P -- 3 planes, Y + U + V (chroma row is W/2 bytes)
+ * Planes are packed in that order, each one page-aligned.
+ */
+#define ALIGN_UP(v,a) ((((uint32_t)(v)) + (a) - 1u) & ~((a) - 1u))
+
+struct out_layout {
+    uint32_t fmt;            /* full E02 word */
+    int      planes;         /* triplets we push */
+    uint32_t stride[3];
+    uint32_t offset[3];
+    uint32_t size[3];
+    uint32_t total;          /* bytes the output buffer must hold */
+    int      blocklinear;    /* nvmap kind 0xFE */
+};
+
+static void layout_build(struct out_layout *L, uint32_t fmt)
+{
+    uint32_t y_stride = ALIGN_UP(W, 64u);
+    uint32_t c_stride = ALIGN_UP(W / 2, 64u);
+
+    memset(L, 0, sizeof(*L));
+    L->fmt = fmt;
+    switch (fmt & 0xFF) {
+    case 0xE6:                                  /* YUV420 planar */
+        L->planes = 3;
+        L->stride[0] = y_stride;
+        L->stride[1] = c_stride;
+        L->stride[2] = c_stride;
+        L->size[0] = y_stride * H;
+        L->size[1] = c_stride * (H / 2);
+        L->size[2] = L->size[1];
+        L->blocklinear = 1;
+        break;
+    case 0xE7:                                  /* NV12: UV interleaved */
+        L->planes = 2;
+        L->stride[0] = y_stride;
+        L->stride[1] = y_stride;                /* one UV row = W bytes */
+        L->size[0] = y_stride * H;
+        L->size[1] = y_stride * (H / 2);
+        L->blocklinear = 1;
+        break;
+    default:                                    /* 0x43 and friends: packed */
+        L->planes = 1;
+        L->stride[0] = W * 4;
+        L->size[0] = W * 4 * H;
+        L->blocklinear = 0;
+        break;
+    }
+    uint32_t off = 0;
+    for (int i = 0; i < L->planes; i++) {
+        L->offset[i] = off;
+        off = ALIGN_UP(off + L->size[i], 4096u);
+    }
+    L->total = off;
+}
+
+static const char *plane_name(const struct out_layout *L, int i)
+{
+    if (L->planes == 1) return "packed";
+    if (i == 0) return "Y";
+    if (L->planes == 2) return "UV";
+    return i == 1 ? "U" : "V";
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("Usage: %s <raw_bayer_file> [format_hex] [isp_enable_hex] "
-               "[--width=N] [--height=N] [--yuv] [--nv12] [--nv12-layout] "
-               "[--rgba-in]\n"
-               "  defaults: 2592x1944\n", argv[0]);
+        printf(
+"Usage: %s <raw_bayer_file> [format_hex] [isp_enable_hex] [options]\n"
+"\n"
+"  Geometry:  --width=N --height=N            (default 2592x1944)\n"
+"  Output:    --out-fmt=0x43|0xe6|0xe7|<word> (default 0x43 RGBA)\n"
+"             --out-e02-hi=0xNNNN             high halfword of E02\n"
+"             --out-planes=N                  override triplet count (A/B)\n"
+"             --out-alloc=pitch|blocklinear   override nvmap kind\n"
+"             --uv-stride=N --uv-offset=N --v-offset=N\n"
+"             --out-e03=0xN                   output colour config\n"
+"  Input:     --in-fmt=0xN                    E33 code (default 0x10200024)\n"
+"             --in-swaprb                     swap R/B bayer sites in RAM\n"
+"             --rgba-in                       input is RGBA, not bayer\n"
+"  Colour:    --curve=identity|scurve         tone curves (default identity)\n"
+"             --gpp-gain=0xWORD               0x600 words 12..14 (def 0x3fff0000)\n"
+"             --ccm=w0,w1,..,w7               push CCM 0x300/0x304 (default: off)\n"
+"             --no-ls                         disable lens shading (0xD0A=0)\n"
+"  Legacy:    --yuv --nv12 --nv12-layout\n",
+            argv[0]);
         return 1;
     }
 
-    int use_yuv = 0, rgba_input = 0, nv12_mode = 0, nv12_layout = 0;
+    int rgba_input = 0;
+    int opt_planes = 0;                 /* 0 = from format */
+    int opt_alloc = -1;                 /* -1 = from format, 0 pitch, 1 blocklinear */
+    int opt_swaprb = 0, opt_no_ls = 0;
+    int opt_scurve = 0;                 /* default: identity curves */
+    uint32_t opt_uv_stride = 0, opt_uv_offset = 0, opt_v_offset = 0;
+    uint32_t opt_gpp_gain = 0x3fff0000;
+    uint32_t opt_e03 = 0;
+    uint32_t opt_in_fmt = 0;            /* 0 = from --rgba-in */
+    uint32_t ccm[8];
+    int have_ccm = 0;
+    uint32_t out_fmt = 0x43;            /* RGBA unless asked otherwise */
+    int have_e02_hi = 0;
+    uint32_t opt_e02_hi = 0;
+
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--width=", 8) == 0)
-            W = (unsigned)strtoul(argv[i] + 8, 0, 0);
-        if (strncmp(argv[i], "--height=", 9) == 0)
-            H = (unsigned)strtoul(argv[i] + 9, 0, 0);
-        if (strcmp(argv[i], "--yuv") == 0) use_yuv = 1;
-        if (strcmp(argv[i], "--rgba-in") == 0) rgba_input = 1;
-        /* --nv12 = format 0xE7 + 2 planes, same UV-stride buffer */
-        if (strcmp(argv[i], "--nv12") == 0) { use_yuv = 1; nv12_mode = 1; }
-        /* --nv12-layout = format 0xE7 + 2 planes + UV stride = Y stride */
-        if (strcmp(argv[i], "--nv12-layout") == 0) { use_yuv = 1; nv12_mode = 1; nv12_layout = 1; }
+        const char *a = argv[i];
+        if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
+        else if (strncmp(a, "--height=", 9) == 0) H = (unsigned)strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--out-fmt=", 10) == 0)   out_fmt = strtoul(a + 10, 0, 16);
+        else if (strncmp(a, "--out-e02-hi=", 13) == 0) {
+            opt_e02_hi = strtoul(a + 13, 0, 16); have_e02_hi = 1;
+        }
+        else if (strncmp(a, "--out-planes=", 13) == 0) opt_planes = atoi(a + 13);
+        else if (strncmp(a, "--out-alloc=", 12) == 0)
+            opt_alloc = (strcmp(a + 12, "blocklinear") == 0) ? 1 : 0;
+        else if (strncmp(a, "--uv-stride=", 12) == 0) opt_uv_stride = strtoul(a + 12, 0, 0);
+        else if (strncmp(a, "--uv-offset=", 12) == 0) opt_uv_offset = strtoul(a + 12, 0, 0);
+        else if (strncmp(a, "--v-offset=", 11) == 0)  opt_v_offset = strtoul(a + 11, 0, 0);
+        else if (strncmp(a, "--out-e03=", 10) == 0)   opt_e03 = strtoul(a + 10, 0, 16);
+        else if (strncmp(a, "--in-fmt=", 9) == 0)     opt_in_fmt = strtoul(a + 9, 0, 16);
+        else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
+        else if (strcmp(a, "--rgba-in") == 0)         rgba_input = 1;
+        else if (strncmp(a, "--curve=", 8) == 0)      opt_scurve = (strcmp(a + 8, "scurve") == 0);
+        else if (strncmp(a, "--gpp-gain=", 11) == 0)  opt_gpp_gain = strtoul(a + 11, 0, 16);
+        else if (strcmp(a, "--no-ls") == 0)           opt_no_ls = 1;
+        else if (strncmp(a, "--ccm=", 6) == 0) {
+            const char *q = a + 6;
+            int k = 0;
+            while (k < 8 && *q) {
+                ccm[k++] = strtoul(q, (char **)&q, 16);
+                if (*q == ',') q++;
+            }
+            if (k != 8) { printf("--ccm needs 8 hex words\n"); return 1; }
+            have_ccm = 1;
+        }
+        /* legacy flags, kept so old command lines still reproduce */
+        else if (strcmp(a, "--yuv") == 0)  out_fmt = 0x010000E6;
+        else if (strcmp(a, "--nv12") == 0) out_fmt = 0x010000E7;
+        else if (strcmp(a, "--nv12-layout") == 0) {
+            out_fmt = 0x010000E7;
+            opt_uv_stride = 0xffffffff;   /* marker: UV stride = Y stride */
+        }
+        else if (a[0] == '-') { printf("unknown option: %s\n", a); return 1; }
     }
+    /* positional format word still wins (legacy call sites) */
+    if (argc > 2 && argv[2][0] != '-') out_fmt = strtoul(argv[2], NULL, 16);
+    /* a bare low byte gets the default high halfword for that format */
+    if (out_fmt <= 0xFF && (out_fmt == 0xE6 || out_fmt == 0xE7)) out_fmt |= 0x01000000;
+    if (have_e02_hi) out_fmt = (out_fmt & 0x0000FFFF) | (opt_e02_hi << 16);
+
     if (W == 0 || H == 0 || (W & 1) || (H & 1)) {
         printf("bad geometry: --width/--height must be nonzero even numbers\n");
         return 1;
     }
-    {
-        unsigned in_size = W * H * BPP;
-        unsigned out_size = W * 4 * H;
-        printf("Geometry: W=%u H=%u BPP=%u in=%u out=%u\n",
-               W, H, BPP, in_size, out_size);
-    }
 
-    printf("=== ISP Pure Reprocess (no blobs)%s ===\n",
-           use_yuv ? " + YUV420" : "");
+    struct out_layout L;
+    layout_build(&L, out_fmt);
+    if (opt_uv_stride == 0xffffffff) opt_uv_stride = ALIGN_UP(W, 64u);
+    if (opt_planes > L.planes) {
+        /* asking for more triplets than the format has: the extra ones
+         * repeat plane 0, which is what the tool used to do for RGBA */
+        for (int i = L.planes; i < opt_planes && i < 3; i++) {
+            L.stride[i] = L.stride[0];
+            L.offset[i] = L.offset[0];
+            L.size[i]   = 0;
+        }
+        L.planes = opt_planes > 3 ? 3 : opt_planes;
+    } else if (opt_planes > 0) {
+        L.planes = opt_planes;
+    }
+    if (opt_uv_stride) L.stride[1] = opt_uv_stride;
+    if (opt_uv_offset) L.offset[1] = opt_uv_offset;
+    if (opt_v_offset)  L.offset[2] = opt_v_offset;
+    if (opt_alloc >= 0) L.blocklinear = opt_alloc;
+    {   /* the buffer must cover every plane we actually programmed */
+        uint32_t need = W * 4 * H;
+        for (int i = 0; i < L.planes; i++) {
+            uint32_t end = L.offset[i] + L.size[i];
+            if (end > need) need = end;
+        }
+        if (L.total < need) L.total = need;
+    }
+    printf("=== ISP Pure Reprocess (no blobs) ===\n");
+    printf("Geometry: W=%u H=%u BPP=%u in=%u\n", W, H, BPP, W * H * BPP);
+    printf("Output: fmt=0x%08x planes=%d alloc=%s total=%u\n",
+           L.fmt, L.planes, L.blocklinear ? "blocklinear" : "pitch", L.total);
+    for (int i = 0; i < L.planes; i++)
+        printf("  plane %d (%-6s) stride=%-6u offset=0x%06x size=%u\n",
+               i, plane_name(&L, i), L.stride[i], L.offset[i], L.size[i]);
+    printf("Colour: curve=%s gpp-gain=0x%08x ls=%s ccm=%s swaprb=%d\n",
+           opt_scurve ? "scurve" : "identity", opt_gpp_gain,
+           opt_no_ls ? "off" : "on", have_ccm ? "set" : "off", opt_swaprb);
 
     /* Open devices */
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
@@ -292,8 +454,8 @@ int main(int argc, char **argv)
            isp_fd, sp_memory, sp_stats, sp_loadv);
 
     /* Allocate buffers */
-    uint32_t out_size = W * 4 * H;
-    uint32_t in_size = rgba_input ? out_size : W * H * BPP;
+    uint32_t out_size = L.total;
+    uint32_t in_size = rgba_input ? (W * 4 * H) : (W * H * BPP);
     uint32_t in_h = nvmap_create(in_size);
     uint32_t out_h = nvmap_create(out_size);
     uint32_t work_h = nvmap_create(512 * 1024);  /* ISP work buffer */
@@ -301,8 +463,8 @@ int main(int argc, char **argv)
     uint32_t param_h = nvmap_create(4096); /* ISP demosaic parameter block */
     if (!in_h || !out_h || !work_h || !cmd_h || !param_h) { printf("alloc failed\n"); return 1; }
     nvmap_alloc(in_h); nvmap_alloc(work_h); nvmap_alloc(cmd_h); nvmap_alloc(param_h);
-    /* Output buffer: use blocklinear kind=0xFE if --yuv (stock uses blocklinear) */
-    if (use_yuv) {
+    /* Output buffer kind comes from the layout (--out-alloc overrides it) */
+    if (L.blocklinear) {
         if (nvmap_alloc_kind(out_h, 0xFE) < 0) {
             printf("blocklinear alloc failed, fallback to pitch\n");
             nvmap_alloc(out_h);
@@ -348,9 +510,26 @@ int main(int argc, char **argv)
     }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror("open raw"); return 1; }
-    uint8_t *raw_buf = malloc(in_size);
+    uint8_t *raw_buf = calloc(1, in_size);
     fread(raw_buf, 1, in_size, f);
     fclose(f);
+
+    /* --in-swaprb: exchange the two diagonal bayer sites in the 2x2 cell,
+     * i.e. BGGR <-> RGGB. The green sites are untouched. Lets us test the
+     * bayer phase without guessing an E33 code. */
+    if (opt_swaprb && !rgba_input) {
+        uint16_t *px = (uint16_t *)raw_buf;
+        for (unsigned y = 0; y + 1 < H; y += 2) {
+            uint16_t *r0 = px + (size_t)y * W;
+            uint16_t *r1 = r0 + W;
+            for (unsigned x = 0; x + 1 < W; x += 2) {
+                uint16_t t = r0[x];
+                r0[x] = r1[x + 1];
+                r1[x + 1] = t;
+            }
+        }
+        printf("Input: swapped R/B bayer sites (BGGR <-> RGGB)\n");
+    }
 
     int chunk = 65536;
     for (int off = 0; off < (int)in_size; off += chunk) {
@@ -361,8 +540,8 @@ int main(int argc, char **argv)
 
     /* Zero output */
     uint8_t *zeros = calloc(1, chunk);
-    for (int off = 0; off < out_size; off += chunk) {
-        int sz = (out_size - off < chunk) ? out_size - off : chunk;
+    for (uint32_t off = 0; off < out_size; off += chunk) {
+        uint32_t sz = (out_size - off < (uint32_t)chunk) ? out_size - off : (uint32_t)chunk;
         nvmap_write(out_h, off, zeros, sz);
     }
     free(zeros);
@@ -521,7 +700,8 @@ int main(int argc, char **argv)
     #include "isp_lens_shading.h"
     uint32_t cmd[2048];
     int n = 0;
-    int y_reloc = -1, u_reloc = -1, v_reloc = -1, in_reloc = -1;
+    int plane_reloc[3] = { -1, -1, -1 };
+    int in_reloc = -1;
     int work_reloc = -1;
 
     /* SETCLASS must be first — tells host1x which engine gets the commands */
@@ -591,8 +771,8 @@ int main(int argc, char **argv)
     cmd[n++] = 0x00000000; cmd[n++] = 0x00000000;
     cmd[n++] = 0x00000000; cmd[n++] = 0x00000000;
     cmd[n++] = 0x00000000; cmd[n++] = 0x00000000;
-    cmd[n++] = 0x3fff0000; cmd[n++] = 0x3fff0000;
-    cmd[n++] = 0x3fff0000; cmd[n++] = work_iova + 0x31000;
+    cmd[n++] = opt_gpp_gain; cmd[n++] = opt_gpp_gain;
+    cmd[n++] = opt_gpp_gain; cmd[n++] = work_iova + 0x31000;
 
     /* 0x650: tone curve enable */
     cmd[n++] = OP_INCR(0x650, 1);
@@ -613,30 +793,42 @@ int main(int argc, char **argv)
     cmd[n++] = 0x03cc01e6;  /* grid: 972x486 */
     cmd[n++] = 0x00000021;  /* mode */
 
-    /* Lens shading enable */
+    /* Lens shading enable (--no-ls turns the OV5693 table off) */
     cmd[n++] = OP_INCR(0xD0A, 1);
-    cmd[n++] = 1;
+    cmd[n++] = opt_no_ls ? 0 : 1;
 
     /* Lens shading table — 480 words from stock OV5693 */
     cmd[n++] = OP_NONINCR(0xD0B, LS_DATA_WORDS);
     for (int i = 0; i < LS_DATA_WORDS; i++)
         cmd[n++] = ls_data[i];
 
-    /* Tone curves — S-curve (shadows=1.0, mids ramp to 3.0, highlights=3.0) */
+    /* Tone curves. Default is identity (0x1000 = 1.0 everywhere): the old
+     * S-curve multiplied highlights by 3.0, which clips a channel to 255
+     * before we ever see its real value. --curve=scurve restores it. */
     for (int ch = 0; ch < 4; ch++) {
         cmd[n++] = OP_INCR(0x651 + ch * 2, 1);
         cmd[n++] = 0;
         cmd[n++] = OP_NONINCR(0x652 + ch * 2, 257);
         for (int i = 0; i < 257; i++) {
-            uint32_t val;
-            if (i < 64)
-                val = 0x1000;  /* 1.0 — shadows */
-            else if (i < 192)
-                val = 0x1000 + (i - 64) * 0x2000 / 128;  /* ramp 1.0→3.0 */
-            else
-                val = 0x3000;  /* 3.0 — highlights */
+            uint32_t val = 0x1000;                       /* 1.0 */
+            if (opt_scurve) {
+                if (i < 64)       val = 0x1000;
+                else if (i < 192) val = 0x1000 + (i - 64) * 0x2000 / 128;
+                else              val = 0x3000;
+            }
             cmd[n++] = val;
         }
+    }
+
+    /* Colour correction matrix — the tool never programmed 0x300/0x304, so
+     * the ISP ran with a zero matrix. Off by default (old behaviour). */
+    if (have_ccm) {
+        cmd[n++] = OP_INCR(0x300, 4);
+        for (int i = 0; i < 4; i++) cmd[n++] = ccm[i];
+        cmd[n++] = OP_INCR(0x304, 4);
+        for (int i = 4; i < 8; i++) cmd[n++] = ccm[i];
+        printf("CCM 0x300/0x304: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+               ccm[0], ccm[1], ccm[2], ccm[3], ccm[4], ccm[5], ccm[6], ccm[7]);
     }
 
     /* === MIUI-only register blocks (from stock camera gather #8) === */
@@ -655,59 +847,26 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE01, 1);
     cmd[n++] = ((H - 1) & 0x3FFF) << 16;
     cmd[n++] = OP_INCR(0xE02, 1);
-
-    /* YUV420 planar: stride=(W+63)&~63, UV stride=((W/2)+63)&~63 */
-    uint32_t y_stride = (W + 63) & ~(uint32_t)63;
-    uint32_t uv_stride = ((W / 2) + 63) & ~(uint32_t)63;
-    uint32_t y_size = y_stride * H;
-    uint32_t u_size = uv_stride * (H / 2);
-    uint32_t v_size = u_size;
-    printf("Planes: Y stride=%u size=%u | UV stride=%u U=%u V=%u\n",
-           y_stride, y_size, uv_stride, u_size, v_size);
-
-    uint32_t out_fmt;
-    if (nv12_mode)         out_fmt = 0x010000E7;   /* NV12 (2-plane interleaved) */
-    else if (use_yuv)      out_fmt = 0x010000E6;   /* YUV420P (3-plane) */
-    else                   out_fmt = 0x43;          /* R8G8B8A8 */
-    if (argc > 2 && argv[2][0] != '-') out_fmt = strtoul(argv[2], NULL, 16);
-    cmd[n++] = out_fmt;
-    printf("Output format: 0x%08x%s\n", out_fmt,
-           nv12_mode ? " (NV12)" : (use_yuv ? " (YUV420P)" : ""));
+    cmd[n++] = L.fmt;
     cmd[n++] = OP_INCR(0xE03, 1);
-    cmd[n++] = 0x00000000;            /* output color config (stock=0) */
+    cmd[n++] = opt_e03;               /* output colour config (stock=0) */
 
-    /* UV layout: NV12 has interleaved UV at Y stride (W bytes per row),
-     * YUV420P has separate U+V planes at UV stride (W/2 aligned 64). */
-    uint32_t uv_stride_used = nv12_layout ? y_stride : uv_stride;
-    uint32_t uv_offset_used = nv12_layout ? y_size
-                                          : (y_size + 4095u) & ~4095u;
-
-    /* Output Y surface */
-    cmd[n++] = OP_INCR(0xE04, 3);
-    y_reloc = n;
-    cmd[n++] = 0;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = use_yuv ? y_stride : W * 4;
-    /* U surface (in NV12 this is UV interleaved plane) */
-    cmd[n++] = OP_INCR(0xE07, 3);
-    u_reloc = n;
-    cmd[n++] = 0;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = use_yuv ? uv_stride_used : W * 4;
-    /* V surface — skip in NV12 (2-plane format, no separate V) */
-    if (!nv12_mode) {
-        cmd[n++] = OP_INCR(0xE0A, 3);
-        v_reloc = n;
-        cmd[n++] = 0;
+    /* One address triplet per plane the format has: E04/E07/E0A. */
+    static const uint32_t plane_reg[3] = { 0xE04, 0xE07, 0xE0A };
+    for (int pl = 0; pl < L.planes; pl++) {
+        cmd[n++] = OP_INCR(plane_reg[pl], 3);
+        plane_reloc[pl] = n;
+        cmd[n++] = 0;                 /* IOVA patched by reloc */
         cmd[n++] = 0x00000000;
-        cmd[n++] = use_yuv ? uv_stride : W * 4;
+        cmd[n++] = L.stride[pl];
     }
 
     /* Input: dims + format + surface + strip + trigger */
     cmd[n++] = OP_INCR(0xE31, 1);
     cmd[n++] = (H << 16) | W;
     cmd[n++] = OP_INCR(0xE33, 1);
-    uint32_t in_fmt = rgba_input ? 0x43 : 0x10200024;
+    uint32_t in_fmt = opt_in_fmt ? opt_in_fmt
+                                 : (rgba_input ? 0x43 : 0x10200024);
     cmd[n++] = in_fmt;
     printf("Input format: 0x%08x%s\n", in_fmt, rgba_input ? " (RGBA)" : " (BG10)");
     cmd[n++] = OP_INCR(0xE34, 3);
@@ -760,12 +919,8 @@ int main(int argc, char **argv)
     int nr = 0;
     relocs[nr] = (struct nvhost_reloc){ cmd_h, (work_reloc+1)*4, work_h, 0 };
     shifts[nr++].shift = 0;
-    relocs[nr] = (struct nvhost_reloc){ cmd_h, y_reloc*4, out_h, 0 };
-    shifts[nr++].shift = 0;
-    relocs[nr] = (struct nvhost_reloc){ cmd_h, u_reloc*4, out_h, use_yuv ? uv_offset_used : 0 };
-    shifts[nr++].shift = 0;
-    if (!nv12_mode) {
-        relocs[nr] = (struct nvhost_reloc){ cmd_h, v_reloc*4, out_h, use_yuv ? (uv_offset_used + u_size) : 0 };
+    for (int pl = 0; pl < L.planes; pl++) {
+        relocs[nr] = (struct nvhost_reloc){ cmd_h, plane_reloc[pl]*4, out_h, L.offset[pl] };
         shifts[nr++].shift = 0;
     }
     relocs[nr] = (struct nvhost_reloc){ cmd_h, in_reloc*4, in_h, 0 };
@@ -816,42 +971,84 @@ int main(int argc, char **argv)
         printf("Done (syncpt=%u val=%u)\n", sp_memory, wa.value);
     }
 
-    /* Read and check output */
-    uint8_t check[64];
-    nvmap_read(out_h, 0, check, 64);
-    int nz = 0;
-    for (int i = 0; i < 64; i++) if (check[i]) nz++;
-    printf("Output first 64 bytes: %d non-zero → ", nz);
-    for (int i = 0; i < 16; i++) printf("%02x ", check[i]);
-    printf("\n");
-
-    /* Check U plane for YUV */
-    if (use_yuv) {
-        uint8_t ucheck[64];
-        nvmap_read(out_h, uv_offset_used, ucheck, 64);
-        int unz = 0;
-        for (int i = 0; i < 64; i++) if (ucheck[i]) unz++;
-        printf("U plane first 64 bytes: %d non-zero → ", unz);
-        for (int i = 0; i < 16; i++) printf("%02x ", ucheck[i]);
-        printf("\n");
-    }
-
-    /* Dump full output */
-    int dump_size = use_yuv ? (int)(uv_offset_used + u_size + v_size)
-                         : (int)out_size;
-    char outpath[128];
-    snprintf(outpath, sizeof(outpath), "/data/local/tmp/isp_fmt_%08x.bin", out_fmt);
-    FILE *fp = fopen(outpath, "wb");
-    if (fp) {
+    /* Read back per plane: first bytes, a non-zero count and the byte range.
+     * For a packed RGBA plane report each channel separately -- "R is always
+     * 255, B never leaves 0..115" is the whole diagnosis in one line. */
+    {
         uint8_t *buf = malloc(chunk);
-        for (int off = 0; off < dump_size; off += chunk) {
-            int sz = (dump_size - off < chunk) ? dump_size - off : chunk;
-            nvmap_read(out_h, off, buf, sz);
-            fwrite(buf, 1, sz, fp);
+        for (int pl = 0; pl < L.planes; pl++) {
+            uint32_t sz = L.size[pl] ? L.size[pl] : chunk;
+            uint8_t head[16];
+            nvmap_read(out_h, L.offset[pl], head, 16);
+            printf("plane %d (%s) @0x%06x:", pl, plane_name(&L, pl), L.offset[pl]);
+            for (int i = 0; i < 16; i++) printf(" %02x", head[i]);
+            printf("\n");
+
+            uint32_t nz = 0;
+            uint32_t lo[4] = { 255, 255, 255, 255 }, hi[4] = { 0, 0, 0, 0 };
+            uint64_t sum[4] = { 0, 0, 0, 0 };
+            uint32_t cnt[4] = { 0, 0, 0, 0 };
+            int chans = (L.planes == 1 && (L.fmt & 0xFF) == 0x43) ? 4 : 1;
+            for (uint32_t off = 0; off < sz; off += chunk) {
+                uint32_t part = (sz - off < (uint32_t)chunk) ? sz - off : (uint32_t)chunk;
+                if (nvmap_read(out_h, L.offset[pl] + off, buf, part) < 0) break;
+                for (uint32_t i = 0; i < part; i++) {
+                    uint8_t v = buf[i];
+                    if (v) nz++;
+                    int c = chans == 4 ? (int)((off + i) & 3) : 0;
+                    if (v < lo[c]) lo[c] = v;
+                    if (v > hi[c]) hi[c] = v;
+                    sum[c] += v; cnt[c]++;
+                }
+            }
+            printf("  bytes=%u nonzero=%u (%.1f%%)\n", sz, nz,
+                   sz ? 100.0 * nz / sz : 0.0);
+            static const char *cn[4] = { "R", "G", "B", "A" };
+            for (int c = 0; c < chans; c++)
+                printf("  %s min=%u max=%u mean=%.1f\n",
+                       chans == 4 ? cn[c] : plane_name(&L, pl),
+                       lo[c], hi[c], cnt[c] ? (double)sum[c] / cnt[c] : 0.0);
         }
         free(buf);
-        fclose(fp);
-        printf("Saved to %s (%d bytes)\n", outpath, dump_size);
+    }
+
+    /* Dump: the whole surface, plus one file per plane so a multi-plane
+     * output can be looked at without slicing it by hand on the host. */
+    {
+        uint8_t *buf = malloc(chunk);
+        char outpath[160];
+        snprintf(outpath, sizeof(outpath),
+                 "/data/local/tmp/isp_%08x_%ux%u.bin", L.fmt, W, H);
+        FILE *fp = fopen(outpath, "wb");
+        if (fp) {
+            for (uint32_t off = 0; off < L.total; off += chunk) {
+                uint32_t sz = (L.total - off < (uint32_t)chunk) ? L.total - off : (uint32_t)chunk;
+                nvmap_read(out_h, off, buf, sz);
+                fwrite(buf, 1, sz, fp);
+            }
+            fclose(fp);
+            printf("Saved %s (%u bytes)\n", outpath, L.total);
+        }
+        if (L.planes > 1) {
+            for (int pl = 0; pl < L.planes; pl++) {
+                if (!L.size[pl]) continue;
+                snprintf(outpath, sizeof(outpath),
+                         "/data/local/tmp/isp_%08x_%ux%u_%s.bin",
+                         L.fmt, W, H, plane_name(&L, pl));
+                fp = fopen(outpath, "wb");
+                if (!fp) continue;
+                for (uint32_t off = 0; off < L.size[pl]; off += chunk) {
+                    uint32_t sz = (L.size[pl] - off < (uint32_t)chunk)
+                                ? L.size[pl] - off : (uint32_t)chunk;
+                    nvmap_read(out_h, L.offset[pl] + off, buf, sz);
+                    fwrite(buf, 1, sz, fp);
+                }
+                fclose(fp);
+                printf("Saved %s (%u bytes, stride %u)\n",
+                       outpath, L.size[pl], L.stride[pl]);
+            }
+        }
+        free(buf);
     }
 
     close(ctrl_fd);

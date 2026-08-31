@@ -186,6 +186,8 @@ struct out_layout {
     int      blocklinear;    /* nvmap kind 0xFE */
 };
 
+static uint32_t plane_align = 1;         /* --plane-align=N, 1 = packed */
+
 static void layout_build(struct out_layout *L, uint32_t fmt)
 {
     uint32_t y_stride = ALIGN_UP(W, 64u);
@@ -219,12 +221,17 @@ static void layout_build(struct out_layout *L, uint32_t fmt)
         L->blocklinear = 0;
         break;
     }
+    /* Planes are packed, not page-aligned. Measured: the hardware takes the
+     * addresses we give it for planes 1 and 2, but places plane 3 itself,
+     * immediately after plane 2 ends -- with a page-aligned layout we were
+     * reading the third plane 3 KB past where it was written. */
     uint32_t off = 0;
     for (int i = 0; i < L->planes; i++) {
         L->offset[i] = off;
-        off = ALIGN_UP(off + L->size[i], 4096u);
+        off += L->size[i];
+        if (plane_align > 1) off = ALIGN_UP(off, plane_align);
     }
-    L->total = off;
+    L->total = ALIGN_UP(off, 4096u);
 }
 
 /* Named after the FORMAT, not after how many triplets we happen to push:
@@ -344,6 +351,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
+        else if (strncmp(a, "--plane-align=", 14) == 0)
+            plane_align = (uint32_t)strtoul(a + 14, 0, 0);
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
         else if (strcmp(a, "--blk400-live") == 0)     opt_blk400_live = 1;

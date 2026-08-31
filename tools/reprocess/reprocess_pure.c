@@ -310,6 +310,7 @@ int main(int argc, char **argv)
     uint32_t opt_param_fill = 0;            /* word written across the 0x100 block */
     int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
+    int opt_teardown = 1;                   /* quiesce the ISP on the way out */
     int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     uint32_t r200[2], r202[3], r205[4];
@@ -336,6 +337,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
+        else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
         else if (strcmp(a, "--pipeline") == 0)        opt_pipeline = 1;
         else if (strncmp(a, "--r200=", 7) == 0) {
@@ -1288,6 +1290,56 @@ int main(int argc, char **argv)
             }
         }
         free(buf);
+    }
+
+    /* Put the ISP back down before we exit. The tool has always walked
+     * away with 0x015 still enabled and the input trigger still armed,
+     * leaving the block live with no one driving it -- which is the shape
+     * of a device that runs a couple of frames and then goes sluggish.
+     * Clearing the enable is the least we can do; --no-teardown skips it
+     * so the old behaviour stays measurable. */
+    if (opt_teardown) {
+        uint32_t td[8];
+        int t = 0;
+        td[t++] = OP_SETCLASS(ISP_CLASS, 0, 0);
+        td[t++] = OP_INCR(0xE30, 1);
+        td[t++] = 0x00000000;          /* disarm the input trigger */
+        td[t++] = OP_INCR(0x015, 1);
+        td[t++] = 0x00000000;          /* ISP_ENABLE off */
+
+        uint32_t td_h = nvmap_create(4096);
+        if (td_h) {
+            nvmap_alloc(td_h);
+            nvmap_write(td_h, 0, td, t * 4);
+            uint32_t g1[2] = { (4 << 28) | sp_memory, 0 };
+            nvmap_write(td_h, 256, g1, 8);
+
+            struct nvhost_cmdbuf tcb[2] = {
+                { td_h, 0, (uint32_t)t }, { td_h, 256, 2 }
+            };
+            struct nvhost_syncpt_incr tsi = { sp_memory, 1 };
+            uint32_t tcls[2] = { (uint32_t)ISP_CLASS, (uint32_t)ISP_CLASS };
+            struct nvhost_fence tf = { 0, 0 };
+            struct nvhost32_submit_args tsa;
+            memset(&tsa, 0, sizeof(tsa));
+            tsa.num_syncpt_incrs = 1;
+            tsa.num_cmdbufs = 2;
+            tsa.timeout = 5000;
+            tsa.syncpt_incrs = (uint32_t)(uintptr_t)&tsi;
+            tsa.cmdbufs = (uint32_t)(uintptr_t)tcb;
+            tsa.class_ids = (uint32_t)(uintptr_t)tcls;
+            tsa.fences = (uint32_t)(uintptr_t)&tf;
+            if (ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &tsa) < 0) {
+                perror("teardown submit");
+            } else {
+                struct nvhost_ctrl_syncpt_waitex_args tw = {
+                    .id = sp_memory, .thresh = tsa.fence, .timeout = 2000
+                };
+                ioctl(ctrl_fd, NVHOST_IOCTL_CTRL_SYNCPT_WAITEX, &tw);
+                printf("Teardown: 0xE30=0, 0x015=0\n");
+            }
+            nvmap_free(td_h);
+        }
     }
 
     /* Release the IOVMM before we go, in pin order's reverse. */

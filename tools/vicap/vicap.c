@@ -182,11 +182,40 @@ static int vi_reg(uint32_t off, uint32_t *val, int write)
     if (rc == 0 && !write) *val = values[0];
     return rc;
 }
-static int vi_wr(uint32_t off, uint32_t val)
+/* Writes go into a batch and leave together. nvhost powers the module for
+ * the duration of one ioctl and lets it go again afterwards, so a setup
+ * spread over forty separate calls is forty separate power-ups: the
+ * receiver never stays on long enough to lock, which is what a correct
+ * configuration that captures nothing looks like. One call keeps the whole
+ * sequence inside a single powered window. */
+#define VI_BATCH_MAX 64
+static uint32_t batch_off[VI_BATCH_MAX], batch_val[VI_BATCH_MAX];
+static int batch_n;
+
+static void vi_wr(uint32_t off, uint32_t val)
 {
-    uint32_t v = val;
-    int rc = vi_reg(off, &v, 1);
-    if (rc) printf("  WR 0x%03x = 0x%08x FAILED (%s)\n", off, val, strerror(errno));
+    if (batch_n >= VI_BATCH_MAX) { printf("  batch full, dropping 0x%03x\n", off); return; }
+    batch_off[batch_n] = off;
+    batch_val[batch_n] = val;
+    batch_n++;
+}
+
+static int vi_flush(const char *what)
+{
+    if (!batch_n) return 0;
+    struct regrdwr_args a;
+    memset(&a, 0, sizeof a);
+    a.id = 0;
+    a.num_offsets = (uint32_t)batch_n;
+    a.block_size = 4;
+    a.offsets = (uint32_t)(uintptr_t)batch_off;
+    a.values = (uint32_t)(uintptr_t)batch_val;
+    a.write = 1;
+    errno = 0;
+    int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a);
+    printf("  %s: %d registers in one call, rc=%d (%s)\n",
+           what, batch_n, rc, rc == 0 ? "ok" : strerror(errno));
+    batch_n = 0;
     return rc;
 }
 static uint32_t vi_rd(uint32_t off)
@@ -329,9 +358,7 @@ int main(int argc, char **argv)
         vi_wr(T124_CILE_PAD_CONFIG0, 0x0);
         vi_wr(T124_PHY_CILE_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
 
-        uint32_t cil = vi_rd(T124_CSI_PHY_CIL_COMMAND);
         vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x00000202);
-        printf("  PHY_CIL_COMMAND 0x%08x -> 0x00000202\n", cil);
 
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
               (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
@@ -411,17 +438,19 @@ int main(int argc, char **argv)
     vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
               CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
 
+    /* And the trigger goes in the same batch: the receiver has to still be
+     * powered and configured when the shot is fired, which is the whole
+     * reason for doing this in one call. */
+    vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+    vi_flush("setup + single shot");
+    usleep(200000);
+
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),
            vi_rd(base + VI_CSI_IMAGE_SIZE), vi_rd(base + VI_CSI_IMAGE_SIZE_WC));
     printf("readback: SURFACE0=0x%08x STRIDE=0x%08x PP=0x%08x\n",
            vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
            vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
-
-    /* Fire. */
-    printf("single shot...\n");
-    vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-    usleep(200000);
 
     uint32_t err = vi_rd(base + VI_CSI_ERROR_STATUS);
     printf("ERROR_STATUS = 0x%08x, SINGLE_SHOT = 0x%08x\n",

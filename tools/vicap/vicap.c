@@ -651,6 +651,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
+        else if (strncmp(a, "--shots=", 8) == 0)  shots = atoi(a + 8);
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
         else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }

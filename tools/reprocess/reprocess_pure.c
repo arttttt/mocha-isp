@@ -319,6 +319,7 @@ int main(int argc, char **argv)
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
     int opt_teardown = 1;                   /* quiesce the ISP on the way out */
     int opt_dump = 1;                       /* write the surface to a file */
+    int opt_demosaic_zero = 0;              /* 0x506 as stock sends it */
     int opt_in_shift = 0;                   /* restack samples in the container */
     int opt_blk400 = 0;                     /* 0x400 from the host settings */
     int opt_blk400_live = 0;                /* 0x400 as the hardware gets it */
@@ -351,6 +352,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
+        else if (strcmp(a, "--demosaic=zero") == 0)   opt_demosaic_zero = 1;
         else if (strncmp(a, "--plane-align=", 14) == 0)
             plane_align = (uint32_t)strtoul(a + 14, 0, 0);
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
@@ -923,17 +925,21 @@ int main(int argc, char **argv)
     cmd[n++] = 0x00000000;
     cmd[n++] = 0x00100000;
 
-    /* 0x506: demosaic (9 words) */
-    cmd[n++] = OP_INCR(0x506, 9);
-    cmd[n++] = 0x3f3fcff3;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = 0x04c1304c;
-    cmd[n++] = 0x08220882;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = 0x03d0f43d;
-    cmd[n++] = 0x08621886;
-    cmd[n++] = 0x01204812;
-    cmd[n++] = 0x06e1b86e;
+    /* 0x506: demosaic. The tool has always sent these nine words, in every
+     * run ever made -- and stock, which gets colour, sends nine zeros here
+     * and lets the hardware use its own defaults. So every measurement we
+     * have was taken with foreign demosaic coefficients loaded.
+     * --demosaic=zero sends what stock sends. */
+    {
+        static const uint32_t dm[9] = {
+            0x3f3fcff3, 0x00000000, 0x04c1304c, 0x08220882, 0x00000000,
+            0x03d0f43d, 0x08621886, 0x01204812, 0x06e1b86e
+        };
+        cmd[n++] = OP_INCR(0x506, 9);
+        for (int i = 0; i < 9; i++) cmd[n++] = opt_demosaic_zero ? 0 : dm[i];
+        printf("0x506 demosaic: %s\n", opt_demosaic_zero ? "zeros (as stock)"
+                                                         : "tool coefficients");
+    }
 
     /* 0x600: GPP config (16 words) */
     cmd[n++] = OP_INCR(0x600, 16);

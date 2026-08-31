@@ -614,16 +614,59 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
                     uint32_t gpp_gain, int luma_lo,
-                    uint32_t in_dims, uint32_t in_mode, uint32_t in_phase)
+                    uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
+                    int zero_init)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
-    uint32_t bytes = (words + 256) * 4;
+    /* Room for the zero-init as well as the blob: that clearing pass alone
+     * is fourteen hundred words. */
+    uint32_t bytes = (words + 2048) * 4;
     uint32_t cmd_h = nvmap_create((bytes + 4095) & ~4095u);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     uint32_t *g = malloc(bytes);
     unsigned n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* What the stock camera actually does when it opens this block, taken
+     * from its own trace on this device: it writes ZEROS into every one of
+     * these and nothing else. Not a single value we had been sending
+     * appears -- no pipeline mode, no processing channels, no demosaic
+     * coefficients, no gains, no curves. One word is non-zero in the whole
+     * of it, 0x91F, and it takes a two.
+     *
+     * And stock gets colour. So the demosaic runs on the hardware's own
+     * defaults, and what we were doing was overwriting them. Leaving those
+     * registers alone is not the same as clearing them -- whatever an
+     * earlier run left behind stays -- so this clears them the way stock
+     * does. */
+    if (zero_init) {
+        static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
+            { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
+            { 0x700, 16, 0 }, { 0x750, 16, 0 },
+            { 0xD00, 10, 0 }, { 0xD0A, 1, 0 }, { 0xD0B, 480, 1 },
+            { 0xD0C, 2, 0 }, { 0xD20, 6, 0 },
+            { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
+            { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
+            { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
+            { 0x910, 9, 0 }, { 0x919, 1, 0 }, { 0x91A, 9, 1 },
+            { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
+            { 0x91E, 9, 1 },
+            { 0x506, 9, 0 }, { 0x600, 16, 0 },
+            { 0x650, 1, 0 },
+            { 0x651, 1, 0 }, { 0x652, 257, 1 },
+            { 0x653, 1, 0 }, { 0x654, 257, 1 },
+            { 0x655, 1, 0 }, { 0x656, 257, 1 },
+            { 0x657, 1, 0 }, { 0x658, 257, 1 },
+        };
+        for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
+            g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
+                                 : OP_INCR(z[k].m, z[k].n);
+            for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
+        }
+        /* The one word stock leaves set. */
+        g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
+    }
 
     /* The DMA configuration, and this is one of the places where streaming
      * and reprocess genuinely differ. Stock streams into block-linear
@@ -1166,6 +1209,9 @@ int main(int argc, char **argv)
      * and what the rest of the field means has never been looked at -- it
      * is the one register on the VI side that describes the handover. */
     uint32_t ispintf = ISPINTF_CONFIG_ENABLE;
+    /* Clear the block the way stock clears it before anything else. On by
+     * default now: it is what the camera on this device actually does. */
+    int zero_init = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1225,6 +1271,7 @@ int main(int argc, char **argv)
             in_phase = (uint32_t)strtoul(a + 11, 0, 16);
         else if (strncmp(a, "--ispintf=", 10) == 0)
             ispintf = (uint32_t)strtoul(a + 10, 0, 16);
+        else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1348,12 +1395,17 @@ int main(int argc, char **argv)
          * output stays black. A gather cannot substitute; it has to be a
          * register write. */
         {
+            /* Stock writes ONE register directly, and it is 0xFC. Its whole
+             * PIO trace for a camera session is seven lines and every one of
+             * them is 0xFC=0x20 -- 0x54 never appears. We had been writing
+             * the pipeline mode there on the strength of a driver comment,
+             * so pass --isp-enable=0 to do as stock does and leave it alone. */
             uint32_t off[2] = { 0xFC, 0x54 };
             uint32_t val[2] = { 0x20, isp_enable };
             struct regrdwr_args ra;
             memset(&ra, 0, sizeof ra);
             ra.id = 0;
-            ra.num_offsets = 2;
+            ra.num_offsets = isp_enable ? 2 : 1;
             ra.block_size = 4;
             ra.offsets = (uint32_t)(uintptr_t)off;
             ra.values = (uint32_t)(uintptr_t)val;
@@ -1392,7 +1444,7 @@ int main(int argc, char **argv)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
                      isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase);
+                     in_phase, zero_init);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

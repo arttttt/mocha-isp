@@ -991,7 +991,7 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
                      uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-                     uint32_t in_fmt)
+                     uint32_t in_fmt, uint32_t work_iova)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -1005,6 +1005,17 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     uint32_t g[64];
     int n = 0, y_word, u_word, v_word, stats_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* The work buffer, renewed for every frame. Stock's calibration gather
+     * ends with this pair in all eight of its cycles -- enable and a real
+     * pointer -- so the block is handed its scratch memory again before
+     * each capture. We were setting it once at init and never again, and
+     * the clearing pass before that had turned it off. A pipeline running
+     * without scratch memory is a plausible reason for the stages that need
+     * it -- demosaic, statistics -- to stay quiet while tone and gain,
+     * which do not, keep working. */
+    g[n++] = OP_INCR(0x053, 2);
+    g[n++] = 0x00000001; g[n++] = work_iova;
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
@@ -2166,7 +2177,7 @@ int main(int argc, char **argv)
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
                               sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                              isp_in_fmt);
+                              isp_in_fmt, work_iova);
                 }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);

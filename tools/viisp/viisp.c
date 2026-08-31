@@ -1106,6 +1106,65 @@ static int isp_init_a(int fd, uint32_t sp)
     return rc;
 }
 
+/* Keep the output buffer mapped while the ISP writes it.
+ *
+ * The mapping belongs to the job that carried the relocation, and at 720p
+ * the frame lands inside that job's life. Larger frames do not: the memory
+ * controller faults on the output buffer and the capture never completes.
+ * Parking a job to hold the mapping is not an option -- it outlives the
+ * timeout the kernel allows and takes the channel with it.
+ *
+ * So instead: a short job that carries the same relocations and nothing
+ * else, submitted again and again. Each one is over in moments and cannot
+ * strand anything, and between them the mapping never lapses. */
+static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
+                         uint32_t u_off, uint32_t v_off, uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t g[24];
+    int n = 0, y_word, u_word, v_word, stats_word;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_INCR(0xE04, 3);
+    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0xE07, 3);
+    u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0xE0A, 3);
+    v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0x100, 4);
+    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_IMM(0, sp);
+    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+    struct nvhost_reloc rel[4] = {
+        { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
+        { cmd_h, (uint32_t)u_word * 4, out_h, u_off },
+        { cmd_h, (uint32_t)v_word * 4, out_h, v_off },
+        { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
+    };
+    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
+    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.num_relocs = 4;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.relocs = (uint32_t)(uintptr_t)rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    int rc = ioctl(fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 /* Put the block back to sleep. Without this it stays armed and writes a
  * later frame into a buffer we have already let go -- the memory controller
  * faults on it after the sensor has powered down, which is exactly where
@@ -2418,8 +2477,13 @@ int main(int argc, char **argv)
                 if (isp_fd >= 0 && out_iova) {
                     int w2 = 0;
                     while (syncpt_read(sp_mem) == isp_base_mem && w2 < 600) {
-                        usleep(1000);
-                        w2++;
+                        /* Re-map while we wait. Without this the larger
+                         * frames fault on the output buffer part way
+                         * through and never complete. */
+                        isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off,
+                                      isp_sp);
+                        usleep(2000);
+                        w2 += 2;
                     }
                     printf("  ISP wrote after %dms%s\n", w2,
                            syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");

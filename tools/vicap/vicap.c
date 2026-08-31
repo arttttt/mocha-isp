@@ -1194,6 +1194,46 @@ int main(int argc, char **argv)
         uint8_t fill[64];
         memset(fill, 0xA5, sizeof fill);
 
+        /* Arm the frame-start condition and block until it moves. Every use
+         * of this sits between frames, never during one. */
+        #define WAIT_FRAME_START(limit_ms) ({                                 \
+            uint32_t _b = syncpt_read(sp_id);                                 \
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,                                \
+                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)       \
+                  << 8 | sp_id);                                              \
+            vi_flush(0);                                                      \
+            int _w = 0;                                                       \
+            while (syncpt_read(sp_id) == _b && _w < (limit_ms)) {             \
+                usleep(500); _w++;                                            \
+            }                                                                 \
+            syncpt_read(sp_id) != _b ? _w : -1;                               \
+        })
+
+        /* A trigger written part way through a frame captures only what is
+         * left of it -- the first one wrote rows 0 to 1704, exactly the
+         * lines that remained. The whole frame comes from triggering in the
+         * blanking, and the blanking is narrow: the sensor's own registers
+         * put it at forty lines out of 1984, a millisecond and a half.
+         *
+         * So the frame period is measured first, from one start to the next,
+         * and the trigger is aimed just short of the following one. */
+        vi_wr(base + VI_CSI_SW_RESET, 0xF);
+        vi_wr(base + VI_CSI_SW_RESET, 0x0);
+        vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                  CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+        vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                  CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+        vi_flush(0);
+
+        int period = 0;
+        WAIT_FRAME_START(400);
+        for (int i = 0; i < 3; i++) {
+            int p = WAIT_FRAME_START(400);
+            if (p > 0 && (period == 0 || p < period)) period = p;
+        }
+        period = period > 0 ? period : 132;      /* half-millisecond ticks */
+        printf("  frame period: %d.%d ms\n", period / 2, (period % 2) * 5);
+
         for (int shot = 0; shot < shots; shot++) {
             int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;
 
@@ -1226,50 +1266,23 @@ int main(int argc, char **argv)
                  * frame -- eight attempts, eight short frames. Left alone,
                  * the parser finishes one capture at the end of a frame and
                  * the next trigger is already on the boundary. */
-                if (attempt == 1) {
-                    vi_wr(base + VI_CSI_SW_RESET, 0xF);
-                    vi_wr(base + VI_CSI_SW_RESET, 0x0);
-                    vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
-                }
-                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
-                      << 8 | sp_id);
+                /* Ride the frame we are in, wake just before it ends, and
+                 * write the trigger into the gap. The subtraction is what
+                 * matters: aim at the start we are about to reach, not the
+                 * one we just saw. */
+                waited = WAIT_FRAME_START(400);
+                started = waited >= 0;
+                if (!started) continue;
+                usleep((useconds_t)(period - 3) * 500);
+
                 vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
                 vi_flush(0);
 
-                waited = 0;
-                while (syncpt_read(sp_id) == fs0 && waited < 400) {
-                    usleep(1000);
-                    waited++;
-                }
-                started = syncpt_read(sp_id) != fs0;
-
-                /* Frames keep coming after the trigger -- the counter armed
-                 * for one increment gained ten over a two-attempt run -- so
-                 * the buffer is written over and over. That is what makes a
-                 * whole picture: let a couple of frames land, and every row
-                 * has been written by one of them.
-                 *
-                 * Then stop on a boundary. Waiting for the next frame start
-                 * and cutting there leaves the buffer holding the frame that
-                 * just finished, with only the millisecond of polling
-                 * latency -- a few dozen rows at the top -- belonging to the
-                 * one after it. */
-                usleep(settle * 1000);
-                uint32_t at = syncpt_read(sp_id);
-                mwaited = 0;
-                while (syncpt_read(sp_id) == at && mwaited < 200) {
-                    usleep(1000);
-                    mwaited++;
-                }
-                /* Never on the first trigger. That one lands wherever the
-                 * sensor happens to be and as often as not does not start a
-                 * capture at all -- stopping there left the buffer exactly
-                 * as we had filled it. */
-                done = (attempt >= 2);
+                /* One frame, plus the settle the caller asked for. */
+                usleep((useconds_t)period * 500 + settle * 1000);
+                mwaited = settle;
+                done = 1;
+                (void)fs0;
             }
             printf("  frame %d: %s after %d attempt%s"
                    " (start %dms, bottom %dms), parser %08x\n",

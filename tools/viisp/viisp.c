@@ -600,52 +600,30 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  *
  * Submitted once, before the shot. Whether the ISP then needs re-arming per
  * frame is one of the things this is meant to find out. */
-static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
-                   uint32_t work_h, unsigned W, unsigned H, uint32_t fmt,
-                   uint32_t e03, uint32_t enable, uint32_t trigger,
-                   uint32_t sp)
+/* Once, before any frame: hand the ISP its work buffer, switch the pipeline
+ * on and post-apply. Stock carries these in the calibration gather it sends
+ * ahead of every frame -- the calibration itself is all zeros on this device,
+ * there being no profile installed, so what matters is these three. */
+static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t g[64];
-    int n = 0, addr_word, work_word;
+    uint32_t g[16];
+    int n = 0, work_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
-
-    /* The pipeline registers the reprocess tool calls required for any
-     * pixel output at all, and the work buffer it calls required for a cold
-     * start. Neither has anything to do with where the frame comes from, so
-     * they belong here too. */
-    g[n++] = OP_INCR(0x019, 1); g[n++] = 0x00000400;
-    g[n++] = OP_INCR(0x01B, 2); g[n++] = 0x00000200; g[n++] = 0x00000002;
     g[n++] = OP_INCR(0x053, 2);
     g[n++] = 1;
     work_word = n;
-    g[n++] = 0;                       /* patched by the relocation */
-
-    g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
-    g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
-    g[n++] = OP_INCR(0xE02, 1); g[n++] = fmt;
-    g[n++] = OP_INCR(0xE03, 1); g[n++] = e03;
-
-    /* One plane: base, stride, and the size the hardware may write. */
-    g[n++] = OP_INCR(0xE04, 3);
-    addr_word = n;
-    g[n++] = 0;                       /* patched by the relocation */
-    g[n++] = W * 4;                   /* ARGB out */
-    g[n++] = W * 4 * H;
-
+    g[n++] = 0;                           /* patched by the relocation */
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
-    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
-    struct nvhost_reloc rel[2] = {
-        { cmd_h, (uint32_t)addr_word * 4, out_h, 0 },
-        { cmd_h, (uint32_t)work_word * 4, work_h, 0 },
-    };
-    struct nvhost_reloc_shift sh[2] = { { 0 }, { 0 } };
+    struct nvhost_reloc rel = { cmd_h, (uint32_t)work_word * 4, work_h, 0 };
+    struct nvhost_reloc_shift sh = { 0 };
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
@@ -654,7 +632,91 @@ static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
-    sa.num_relocs = 2;
+    sa.num_relocs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.relocs = (uint32_t)(uintptr_t)&rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)&sh;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("ISP init: enable 0x%08x, %d words, rc=%d (%s)\n",
+           enable, n, rc, rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
+/* The per-frame gather, word for word as the stock camera sends it: output
+ * geometry, three plane triplets for planar YUV, the processing block, the
+ * stats buffer, three conditional syncpoint increments and the streaming
+ * trigger. There are no input registers -- in streaming mode the pixels
+ * arrive from VI and there is nothing to describe. */
+static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
+                     unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
+                     uint32_t trigger, uint32_t u_off, uint32_t v_off,
+                     uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
+                     uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t stride_y = (W + 63) & ~63u;
+    uint32_t stride_uv = ((W / 2) + 63) & ~63u;
+
+    uint32_t g[64];
+    int n = 0, y_word, u_word, v_word, stats_word;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
+    g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
+    g[n++] = OP_INCR(0xE02, 1); g[n++] = fmt;
+    g[n++] = OP_INCR(0xE03, 1); g[n++] = e03;
+
+    g[n++] = OP_INCR(0xE04, 3);
+    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
+    g[n++] = OP_INCR(0xE07, 3);
+    u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+    g[n++] = OP_INCR(0xE0A, 3);
+    v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+
+    g[n++] = OP_INCR(0x500, 6);
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = (H << 16) | W;
+
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_INCR(0x100, 4);
+    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (4u << 8) | sp_mem;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (5u << 8) | sp_stats;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (6u << 8) | sp_loadv;
+
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+    struct nvhost_reloc rel[4] = {
+        { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
+        { cmd_h, (uint32_t)u_word * 4, out_h, u_off },
+        { cmd_h, (uint32_t)v_word * 4, out_h, v_off },
+        { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
+    };
+    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
+    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.num_relocs = 4;
     sa.timeout = 3000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
@@ -665,9 +727,9 @@ static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
 
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("ISP armed: %d words, output at 0x%08x, trigger 0x%02x,"
-           " rc=%d (%s)\n", n, out_iova, trigger, rc,
-           rc == 0 ? "ok" : strerror(errno));
+    printf("ISP frame: %d words, %ux%u fmt 0x%08x, strides %u/%u,"
+           " trigger 0x%02x, rc=%d (%s)\n", n, W, H, fmt, stride_y,
+           stride_uv, trigger, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }
@@ -766,8 +828,8 @@ int main(int argc, char **argv)
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
      * frame that came from VI rather than from memory. */
-    uint32_t isp_fmt = 0x000000c9, isp_e03 = 0;
-    uint32_t isp_enable = 0x7, isp_trigger = ISP_TRIGGER_SENSOR;
+    uint32_t isp_fmt = 0x04FE00E6, isp_e03 = 0;
+    uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -870,17 +932,39 @@ int main(int argc, char **argv)
 
     /* The ISP's own channel and its output buffer. ISP-B is the one port B
      * feeds; the node is nvhost-isp.1, nvhost-isp being ISP-A. */
-    uint32_t out_bytes = W * 4 * (vi_height ? vi_height : H);
+    /* Planar YUV, laid out the way stock lays it out: the luma plane first,
+     * then the two chroma planes on 64K boundaries. Strides are the width
+     * rounded up to 64, and the chroma planes are half of everything. */
+    unsigned OH = vi_height ? vi_height : H;
+    uint32_t stride_y = (W + 63) & ~63u, stride_uv = ((W / 2) + 63) & ~63u;
+    uint32_t u_off = (stride_y * OH + 0xFFFF) & ~0xFFFFu;
+    uint32_t v_off = (u_off + stride_uv * (OH / 2) + 0xFFFF) & ~0xFFFFu;
+    uint32_t out_bytes = v_off + stride_uv * (OH / 2);
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
-    uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0;
+    uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
+    uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
     if (isp_fd < 0) {
         printf("open /dev/nvhost-isp.1: %s\n", strerror(errno));
     } else {
         struct nvhost_set_nvmap_fd_args snf = { (uint32_t)nvmap_fd };
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &snf);
+        /* Four, as stock uses: one to sequence our own submits and three
+         * for the conditions the per-frame gather arms. */
         struct nvhost_get_param_arg ip = { .param = 0, .value = 0 };
         if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
             isp_sp = ip.value;
+        ip.param = 1; ip.value = 0;
+        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
+            sp_mem = ip.value;
+        ip.param = 2; ip.value = 0;
+        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
+            sp_stats = ip.value;
+        ip.param = 3; ip.value = 0;
+        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
+            sp_loadv = ip.value;
+        if (!sp_mem) sp_mem = isp_sp;
+        if (!sp_stats) sp_stats = isp_sp;
+        if (!sp_loadv) sp_loadv = isp_sp;
 
         /* The ISP's own clocks, at the rates the reprocess tool uses. */
         struct nvhost_clk_rate_args ic;
@@ -909,11 +993,17 @@ int main(int argc, char **argv)
         work_h = nvmap_create(512 * 1024);
         if (work_h && nvmap_alloc(work_h) == 0) nvmap_pin(work_h);
 
+        stats_h = nvmap_create(64 * 1024);
+        if (stats_h && nvmap_alloc(stats_h) == 0) nvmap_pin(stats_h);
+
         out_h = nvmap_create(out_bytes);
         if (out_h && nvmap_alloc(out_h) == 0)
             out_iova = nvmap_pin(out_h);
-        printf("ISP-B channel fd=%d, syncpoint %u, output %u bytes"
-               " at 0x%08x\n", isp_fd, isp_sp, out_bytes, out_iova);
+        printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
+               " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
+               sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
+        if (work_h)
+            isp_init(isp_fd, work_h, isp_enable, isp_sp);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
@@ -1352,10 +1442,10 @@ int main(int argc, char **argv)
 
         /* The ISP goes in before the trigger: it has to be waiting when the
          * pixels arrive, since nothing buffers them on the way. */
-        if (isp_fd >= 0 && out_iova && work_h)
-            isp_arm(isp_fd, out_h, out_iova, work_h, W,
-                    vi_height ? vi_height : H, isp_fmt, isp_e03,
-                    isp_enable, isp_trigger, isp_sp);
+        if (isp_fd >= 0 && out_iova && stats_h)
+            isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+                      isp_trigger, u_off, v_off,
+                      sp_mem, sp_stats, sp_loadv, isp_sp);
 
         /* Which event numbers does this hardware actually raise? The two we
          * use for the write acknowledge came from a header that says

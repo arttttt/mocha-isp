@@ -392,6 +392,22 @@ struct nvhost32_submit_args {
 #define T124_CSI_CIL_A_STATUS                0x93C
 #define T124_CSI_CILA_STATUS                 0x940
 #define T124_CILB_PAD_CONFIG0                0x960
+#define T124_CSI_CIL_B_INT_MASK              0x96C
+#define T124_CSI_CIL_B_STATUS                0x970
+#define T124_CSI_CILB_STATUS                 0x974
+#define T124_CILC_PAD_CONFIG0                0x994
+#define T124_PHY_CILC_CONTROL0               0x99C
+#define T124_CSI_CIL_C_INT_MASK              0x9A0
+#define T124_CSI_CIL_C_STATUS                0x9A4
+#define T124_CSI_CILC_STATUS                 0x9A8
+#define T124_CILD_PAD_CONFIG0                0x9C8
+#define T124_PHY_CILD_CONTROL0               0x9D0
+#define T124_CSI_CIL_D_INT_MASK              0x9D4
+#define T124_CSI_CIL_D_STATUS                0x9D8
+#define T124_CSI_CILD_STATUS                 0x9DC
+#define T124_CSI_CIL_E_STATUS                0xA18
+#define T124_CSI_CILE_STATUS                 0xA1C
+#define T124_CILB_PAD_CONFIG0                0x960
 #define T124_PP_B_INPUT_STREAM_CONTROL       0x86C
 #define T124_PP_B_PIXEL_STREAM_CONTROL0      0x870
 #define T124_PP_B_PIXEL_STREAM_CONTROL1      0x874
@@ -800,47 +816,60 @@ int main(int argc, char **argv)
     }
 
     if (front) {
-        printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");
+        /* Port B, one lane, on CIL E. This whole block is the 24.1 driver's
+         * own port-1 path, value for value and in its order -- that code
+         * captured from this sensor, which is a stronger claim than anything
+         * we have inferred. Everything we had here before came from a dump
+         * taken while the REAR camera streamed, so it described the other
+         * brick and disagreed with this in almost every register. */
+        printf("bringing up the CSI receiver (port B / CIL E, 1 lane)\n");
         vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
 
+        /* Clear every status, both bricks, as the driver does -- stale bits
+         * on a lane we are not using still gate the parser. */
+        vi_wr(T124_CSI_CIL_A_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CIL_B_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CIL_C_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CIL_D_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CIL_E_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CILA_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CILB_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CILC_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CILD_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_PP_A_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
         vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+        vi_wr(VI_CSI_BASE(0) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
+        vi_wr(VI_CSI_BASE(1) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
+
+        /* The pads: C carries the clock-and-data back mode, D and E are
+         * left at zero. E being zero is not an omission -- the lane pad
+         * itself takes no configuration on this port. */
+        vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
+        vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
+        vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
+
+        vi_wr(T124_CSI_CIL_C_INT_MASK, 0x0);
+        vi_wr(T124_CSI_CIL_D_INT_MASK, 0x0);
         vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
-        /* Read out of a state where a frame demonstrably lands, not taken
-         * from a driver constant: the pad configuration is 5 and the PHY
-         * control is 2. We had been writing 0 and 9. */
-        vi_wr(T124_CILE_PAD_CONFIG0, 0x00000005);
-        vi_wr(T124_PHY_CILE_CONTROL0, 0x00000002);
-        vi_wr(0x9EC, 0x00000010);
-        vi_wr(0x9F0, 0x00000086);
+        vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
 
-        /* The front camera's brick lives in the UPPER half of this word.
-         * A full dump against a live stock session shows 0x10000000 there,
-         * where we had been writing 0x00000202 -- the lower half, which is
-         * the A/B brick. Every driver constant for the C/E side sits in the
-         * upper half too, so we had been enabling the wrong one all along.
-         * 0xAEC goes with it; stock holds a 2 there and we held nothing. */
-        /* Brick E only. A and B belong to the rear path and are not ours to
-         * touch either way. */
-        vi_wr(T124_CSI_PHY_CIL_COMMAND, phy_cil_cmd);
-
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
-              (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+        /* Reset the parser, configure it, then enable -- the command word
+         * is written twice on purpose, and the single-shot bit rides along
+         * both times. */
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x080301f0);
-        /* Stock leaves this at zero; the top-field bits the driver writes
-         * for interlaced sources are not what this sensor needs. */
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, 0x00000000);
-        /* the gap register is zero in the working state */
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x280301f1);
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, 0x00000011);
+        vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
         vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x00ff0004);
-        vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f004);
+        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x003f0000);
 
-        /* Calibrate only now. The driver's order is pads out of deep power
-         * down, then the CSI and PHY brought up, and the calibration last
-         * -- trimming pads that have not been enabled yet is what a
-         * calibration that never finishes looks like. */
+        /* Only the upper half of the brick command is ours; the lower half
+         * belongs to the rear path and has to survive our write. */
+        vi_wr(T124_CSI_PHY_CIL_COMMAND,
+              (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) | phy_cil_cmd);
+        vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
         /* --tpg: let the receiver make its own picture. This splits the
          * problem in half -- if the pattern lands in the buffer then VI,
          * the parser and the write path are all sound and the fault is on

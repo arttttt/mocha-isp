@@ -257,9 +257,12 @@ int main(int argc, char **argv)
      * mismatch means our configuration, not the hardware. The rear does not
      * stream through the camera stack at all, which leaves any negative
      * result there impossible to attribute. */
-    unsigned W = 1920, H = 1080, port = 1;
+    /* The front sensor's stock session runs at its full 2592x1944, and the
+     * image definition it uses on this channel was read off that session. */
+    unsigned W = 2592, H = 1944, port = 1;
     const char *sensor = "ov5693";
     int use_sensor = 1, dump = 0, front = 1;
+    uint32_t image_def = 0x00200004;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -273,6 +276,8 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--no-sensor") == 0)   use_sensor = 0;
         else if (strcmp(a, "--dump") == 0)        dump = 1;
+        else if (strncmp(a, "--image-def=", 12) == 0)
+            image_def = (uint32_t)strtoul(a + 12, 0, 16);
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -422,9 +427,11 @@ int main(int argc, char **argv)
      * is 1 here: we want the raw bayer in memory, not a converted image. */
     printf("configuring CSI channel at 0x%03x\n", base);
     vi_wr(base + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
-    vi_wr(base + VI_CSI_IMAGE_DEF,
-          (1u << BYPASS_PXL_TRANSFORM_OFFSET) |
-          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET));
+    /* Measured off a live stock session on this channel: 0x00200004. The
+     * transform-bypass bit is CLEAR there, where we had been setting it,
+     * and the low nibble carries a 4 we had left at zero. Bypass off is
+     * what the driver does whenever the ISP is in the path. */
+    vi_wr(base + VI_CSI_IMAGE_DEF, image_def);
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
     vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);

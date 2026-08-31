@@ -1543,8 +1543,9 @@ int main(int argc, char **argv)
     /* The kind to allocate the ISP's output as. Zero means an ordinary
      * pitch-linear buffer; 0xFE is what the block-linear format wants. */
     unsigned out_kind = 0;
-    /* Configure the other block first, the way stock does. */
-    int init_a = 1;
+    /* Configuring the other block the way stock does turns out to stop ours
+     * writing at all, so it is off unless asked for. */
+    int init_a = 0;
     /* Send the calibration with every frame rather than once, as stock
      * does. The init then carries only the clearing pass. */
     int per_frame_cal = 1;
@@ -1617,7 +1618,7 @@ int main(int argc, char **argv)
             opt_v_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--out-kind=", 11) == 0)
             out_kind = (unsigned)strtoul(a + 11, 0, 16);
-        else if (strcmp(a, "--no-init-a") == 0)    init_a = 0;
+        else if (strcmp(a, "--init-a") == 0)       init_a = 1;
         else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
         else if (strcmp(a, "--isp-only") == 0)     { isp_only = 1;
                                                      use_sensor = 0; }

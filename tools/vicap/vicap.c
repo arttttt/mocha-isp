@@ -674,7 +674,14 @@ int main(int argc, char **argv)
     gp.param = 1; gp.value = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0 && gp.value)
         sp_mw = gp.value;
-    printf("VI syncpoints: frame %u, memory write %u\n", sp_id, sp_mw);
+    /* A third, for the command buffer to retire on, so that neither of the
+     * hardware conditions shares a counter with our own submits. */
+    uint32_t sp_cmd = sp_mw;
+    gp.param = 2; gp.value = 0;
+    if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0 && gp.value)
+        sp_cmd = gp.value;
+    printf("VI syncpoints: frame %u, memory write %u, command %u\n",
+           sp_id, sp_mw, sp_cmd);
 
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
@@ -1026,8 +1033,9 @@ int main(int argc, char **argv)
     /* Both acknowledge conditions. The header says outright that these
      * event numbers were found by trial rather than derived, so which of
      * the two belongs to this port is worth not assuming. */
-    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_mw);
-    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+    /* Only the frame start is armed here. The driver arms the memory-write
+     * acknowledge only after the frame start has fired -- once the DMA is
+     * already running -- so arming it up front was our invention. */
     vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
           (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8 | sp_id);
 
@@ -1051,13 +1059,17 @@ int main(int argc, char **argv)
         g[n++] = 0;                       /* the kernel fills this in */
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
         g[n++] = SINGLE_SHOT_CAPTURE;
-        g[n++] = OP_IMM(0, sp_id);        /* retire the syncpoint */
+        /* Retire the command buffer on a syncpoint of its own. It used to
+         * share one with the frame-start condition, so that counter moved
+         * once per submit whether or not a frame ever started -- which is
+         * exactly the reading we were treating as evidence. */
+        g[n++] = OP_IMM(0, sp_cmd);
         nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
         struct nvhost_reloc rel = { cmd_h, (uint32_t)addr_word * 4, buf_h, 0 };
         struct nvhost_reloc_shift sh = { 0 };
         struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-        struct nvhost_syncpt_incr si = { sp_id, 1 };
+        struct nvhost_syncpt_incr si = { sp_cmd, 1 };
         uint32_t cls = VI_CLASS_ID;
         struct nvhost_fence fence = { 0, 0 };
         struct nvhost32_submit_args sa;
@@ -1086,6 +1098,12 @@ int main(int argc, char **argv)
         }
         printf("surface + shot submitted %d times: %d words, rc=%d (%s)\n",
                shots, n, rc, rc == 0 ? "ok" : strerror(errno));
+
+        /* Now that the shots are away, arm the acknowledge -- the driver's
+         * order, and it costs nothing if the DMA has already finished. */
+        vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+              (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_mw);
+        vi_flush("arm memory-write acknowledge");
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
     usleep(1500000);

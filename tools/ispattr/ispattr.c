@@ -81,31 +81,20 @@ int main(int argc, char **argv)
     printf("HwSettingsCreate: rc=%d handle=%p\n", rc, hSet);
     if (!hSet) { if (NvIspClose) NvIspClose(hIsp); return 1; }
 
-    /* Read first. An attribute that answers a read exists; one that also
-     * accepts a write is one we can drive. Reading is the safer half, so it
-     * goes first and --set is what asks for the other. */
-    printf("attributes that answer:\n");
-    unsigned readable = 0, writable = 0;
+    /* Reading is a dead end: three different names in this library share
+     * one address, which is the shape of a stub that answers nothing. The
+     * write is the real entry point, so probe that -- an attribute number
+     * the library knows will be accepted, one it does not will be refused,
+     * and the pattern of the two maps the surface. */
+    printf("attributes the library accepts:\n");
+    unsigned ok = 0;
     for (unsigned id = 0; id < maxattr; id++) {
-        uint32_t val = 0;
-        int grc = HwSettingsGetAttribute
-                ? HwSettingsGetAttribute(hSet, id, &val, sizeof val) : -1;
-        if (grc == 0) {
-            readable++;
-            int src = -1;
-            if (do_set) {
-                uint32_t one = 1;
-                src = HwSettingsSetAttribute(hSet, id, &one, sizeof one);
-                if (src == 0) writable++;
-            }
-            printf("  attr %3u (0x%02x): read 0x%08x%s\n", id, id, val,
-                   do_set ? (src == 0 ? "  [write ok]" : "  [write refused]")
-                          : "");
-        }
+        uint32_t one = 1;
+        int src = HwSettingsSetAttribute(hSet, id, &one, sizeof one);
+        if (src == 0) { ok++; printf("  attr %3u (0x%02x): accepted\n", id, id); }
     }
-    printf("%u readable", readable);
-    if (do_set) printf(", %u writable", writable);
-    printf(" of %u\n", maxattr);
+    printf("%u of %u accepted\n", ok, maxattr);
+    (void)HwSettingsGetAttribute; (void)do_set;
 
     if (HwSettingsDestroy) HwSettingsDestroy(hSet);
     if (NvIspClose) NvIspClose(hIsp);

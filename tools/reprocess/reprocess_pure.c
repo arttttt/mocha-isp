@@ -321,6 +321,7 @@ int main(int argc, char **argv)
     int opt_dump = 1;                       /* write the surface to a file */
     int opt_demosaic_zero = 0;              /* 0x506 as stock sends it */
     int opt_minimal = 0;                    /* touch no settings blocks */
+    int opt_debayer = 0;                    /* demosaic on the host first */
     int opt_in_shift = 0;                   /* restack samples in the container */
     int opt_blk400 = 0;                     /* 0x400 from the host settings */
     int opt_blk400_live = 0;                /* 0x400 as the hardware gets it */
@@ -355,6 +356,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
         else if (strcmp(a, "--demosaic=zero") == 0)   opt_demosaic_zero = 1;
         else if (strcmp(a, "--minimal") == 0)         opt_minimal = 1;
+        else if (strcmp(a, "--debayer") == 0)         opt_debayer = 1;
         else if (strncmp(a, "--plane-align=", 14) == 0)
             plane_align = (uint32_t)strtoul(a + 14, 0, 0);
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
@@ -561,7 +563,10 @@ int main(int argc, char **argv)
 
     /* Allocate buffers */
     uint32_t out_size = L.total;
-    uint32_t in_size = rgba_input ? (W * 4 * H) : (W * H * BPP);
+    /* --debayer hands the ISP packed pixels, so the input buffer has to be
+     * the RGBA size even though the file on disk is bayer. */
+    uint32_t in_size = (rgba_input || opt_debayer) ? (W * 4 * H)
+                                                   : (W * H * BPP);
     uint32_t in_h = nvmap_create(in_size);
     uint32_t out_h = nvmap_create(out_size);
     uint32_t work_h = nvmap_create(512 * 1024);  /* ISP work buffer */
@@ -620,6 +625,43 @@ int main(int argc, char **argv)
     uint8_t *raw_buf = calloc(1, in_size);
     fread(raw_buf, 1, in_size, f);
     fclose(f);
+
+    /* --debayer: do the mosaic ourselves and hand the ISP finished pixels.
+     * The memory port enters the pipeline below the demosaic stage -- raw
+     * bayer through it comes out as a plain average of the mosaic, whatever
+     * format code we declare -- so the way to reach the colour pipeline is
+     * to arrive already demosaiced. Nearest-neighbour over the 2x2 cell:
+     * red from the red site, blue from the blue, green the mean of the two,
+     * all four pixels of the cell taking the same triple. Phase is BGGR to
+     * match the BG10 code: (even,even)=B (even,odd)=G (odd,even)=G
+     * (odd,odd)=R. Ten bits are scaled down to eight. */
+    if (opt_debayer && !rgba_input) {
+        uint8_t *rgba = calloc(1, (size_t)W * H * 4);
+        if (!rgba) { printf("debayer: out of memory\n"); return 1; }
+        const uint16_t *px = (const uint16_t *)raw_buf;
+        for (unsigned y = 0; y + 1 < H; y += 2) {
+            const uint16_t *r0 = px + (size_t)y * W;
+            const uint16_t *r1 = r0 + W;
+            for (unsigned x = 0; x + 1 < W; x += 2) {
+                unsigned b  = r0[x];
+                unsigned g  = (r0[x + 1] + r1[x]) / 2;
+                unsigned r  = r1[x + 1];
+                uint8_t p[4] = { (uint8_t)(r >> 2), (uint8_t)(g >> 2),
+                                 (uint8_t)(b >> 2), 0xff };
+                for (unsigned dy = 0; dy < 2; dy++) {
+                    uint8_t *o = rgba + (((size_t)(y + dy) * W) + x) * 4;
+                    memcpy(o, p, 4);
+                    memcpy(o + 4, p, 4);
+                }
+            }
+        }
+        free(raw_buf);
+        raw_buf = rgba;
+        in_size = W * 4 * H;
+        rgba_input = 1;                 /* the ISP now gets packed pixels */
+        printf("Input: demosaiced on the host, %ux%u RGBA, %u bytes\n",
+               W, H, in_size);
+    }
 
     /* --in-swaprb: exchange the two diagonal bayer sites in the 2x2 cell,
      * i.e. BGGR <-> RGGB. The green sites are untouched. Lets us test the

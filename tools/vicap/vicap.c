@@ -804,8 +804,14 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
     vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);
-    /* The surface address is left out of the register batch on purpose --
-     * it goes in through a submit below, where the kernel can relocate it. */
+    /* The address goes in here as well as through the submit. The
+     * relocation's pin lasts only as long as the job, and the write
+     * happens afterwards, when the frame completes -- by which time that
+     * mapping may be gone, which would look exactly like this: frames
+     * arriving, nothing written, nothing complaining. Our own pin lives
+     * for the whole run. */
+    vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+    vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
     vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
 
     /* Pixel parser: single shot, armed for one frame. */

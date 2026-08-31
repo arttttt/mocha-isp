@@ -845,6 +845,14 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n - 2] = 0x00000001;                /* 0x053 */
     g[n - 1] = work_iova;                 /* 0x054 */
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
+
+    /* Commit. Everything above this is written into shadow state and takes
+     * effect only when the block is told to apply it -- the April notes
+     * list this trigger among the few things the stock settings blob
+     * actually carries. We had dropped it on a driver comment that is about
+     * the per-frame calibration, not about init, and that would explain why
+     * nothing we wrote here ever changed more than the level. */
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);

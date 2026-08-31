@@ -612,7 +612,8 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
-                    uint32_t rt_luma, uint32_t ccm_word, unsigned skip)
+                    uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
+                    uint32_t gpp_gain)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -777,8 +778,13 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000000; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
-    g[n++] = 0x3fff0000; g[n++] = work_iova + 0x31000;
+    /* Three per-channel words. The reprocess tool carries the same
+     * 0x3fff0000 here and comes out monochrome too, which makes this the
+     * one value both paths share and both paths fail on. The output is also
+     * attenuated some sixty-fold against the raw capture, which is what a
+     * gain in the wrong fixed-point format would do. */
+    g[n++] = gpp_gain; g[n++] = gpp_gain;
+    g[n++] = gpp_gain; g[n++] = work_iova + 0x31000;
     }
 
     g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
@@ -1102,6 +1108,7 @@ int main(int argc, char **argv)
      * BGGR at ten bits in a sixteen-bit container, which is what this
      * sensor sends. */
     uint32_t isp_in_fmt = 0;
+    uint32_t gpp_gain = 0x3fff0000;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1150,6 +1157,8 @@ int main(int argc, char **argv)
             isp_skip = (unsigned)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--in-fmt=", 9) == 0)
             isp_in_fmt = (uint32_t)strtoul(a + 9, 0, 16);
+        else if (strncmp(a, "--gpp=", 6) == 0)
+            gpp_gain = (uint32_t)strtoul(a + 6, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1316,7 +1325,7 @@ int main(int argc, char **argv)
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
-                     isp_skip);
+                     isp_skip, gpp_gain);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

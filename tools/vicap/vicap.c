@@ -745,6 +745,13 @@ int main(int argc, char **argv)
     /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
      * is 1 here: we want the raw bayer in memory, not a converted image. */
     printf("configuring CSI channel at 0x%03x\n", base);
+    /* The one register outside the channel that still differs from a live
+     * stock session: VI's dynamic clocking control. Ours reads 0x4040007f
+     * against stock's 0x10100010, and clock management is exactly the kind
+     * of thing that can hold the memory client off without reporting
+     * anything. */
+    vi_wr(0x0F0, 0x10100010);
+
     /* Reset the channel first. Its single-shot bit has been left armed by
      * every attempt that never completed, and nothing clears it -- the
      * driver's own recovery path resets the channel for exactly this. */

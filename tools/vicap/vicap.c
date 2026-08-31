@@ -125,27 +125,91 @@ static void car_enable_csi_clocks(void)
 
 /* The physical layer has never been calibrated for this lane: CILE's entry
  * in the calibration block reads zero, meaning it was never even selected.
- * The sequence is the driver's own -- clear status, select the lane and its
- * clock, then write the control word with the start bit, which the hardware
- * clears when it finishes. */
+ *
+ * Our first attempt at the sequence started the calibration and then watched
+ * it stay ACTIVE for all five hundred polls. The reason was two writes we had
+ * left out entirely: the pads run off a bias that has to be switched on
+ * first -- the clamp reference in CFG0 raised, the regulator power-down in
+ * CFG2 lowered. A calibration launched over unbiased pads has nothing to
+ * converge onto, so it never reports done.
+ *
+ * What follows is the driver's sequence in full, in its order: override the
+ * clock gate, clear status, drop DSI, raise the bias, deselect every lane,
+ * then select ours and trigger. The steps are numbered as they are there. */
 #define MIPI_CAL_BASE       0x700E3000UL
 #define MIPI_CAL_CTRL       0x00
 #define MIPI_CAL_STATUS     0x08
+#define MIPI_CAL_CILA_CFG   0x14
+#define MIPI_CAL_CILB_CFG   0x18
+#define MIPI_CAL_CILC_CFG   0x1c
+#define MIPI_CAL_CILD_CFG   0x20
 #define MIPI_CAL_CILE_CFG   0x24
+#define MIPI_CAL_DSIA_CFG   0x38
+#define MIPI_CAL_DSIB_CFG   0x3c
+#define MIPI_BIAS_PAD_CFG0  0x58
+#define MIPI_BIAS_PAD_CFG2  0x60
+#define MIPI_CAL_DSIA_CFG2  0x64
+#define MIPI_CAL_DSIB_CFG2  0x68
+#define MIPI_CAL_CILC_CFG2  0x6c
+#define MIPI_CAL_CILD_CFG2  0x70
 #define MIPI_CAL_CSIE_CFG2  0x74
 #define MIPI_CAL_CIL_SEL    (1u << 21)
 #define MIPI_CAL_CLKSEL     (1u << 21)
+#define MIPI_CAL_DSI_SEL    (1u << 21)
+#define BIAS_E_VCLAMP_REF   (1u << 0)
+#define BIAS_PDVREG         (1u << 1)
 #define MIPI_CAL_DONE       (1u << 16)
+#define MIPI_CAL_ACTIVE     (1u << 0)
+#define MIPI_CAL_CLKEN_OVR  (1u << 4)
 #define MIPI_CAL_START      (0xau << 26 | 0x2u << 24 | 1u << 4 | 1u << 0)
+
+/* Read-modify-write, because most of the sequence touches one bit of a
+ * register whose other fields carry production trim we must not lose. */
+static void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
+{
+    uint32_t cur = 0;
+    if (mem_rd(MIPI_CAL_BASE + off, &cur) < 0) return;
+    mem_wr(MIPI_CAL_BASE + off, (cur & ~mask) | (val & mask), 0);
+}
 
 static void mipi_calibrate_csie(void)
 {
     uint32_t st = 0;
+
+    /* 1. Override the block's own clock gating. */
+    mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
+
+    /* 2. Clear the status bits. */
     mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0xF1F10000, 0);
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
+
+    /* 3. The display lanes are not ours; drop them. */
+    mipi_upd(MIPI_CAL_DSIA_CFG, MIPI_CAL_DSI_SEL, 0);
+    mipi_upd(MIPI_CAL_DSIB_CFG, MIPI_CAL_DSI_SEL, 0);
+
+    /* 4. The bias the pads calibrate against -- the step we had missing. */
+    mipi_upd(MIPI_BIAS_PAD_CFG0, BIAS_E_VCLAMP_REF, BIAS_E_VCLAMP_REF);
+    mipi_upd(MIPI_BIAS_PAD_CFG2, BIAS_PDVREG, 0);
+
+    /* 5. Deselect every lane and every clock, so only ours is left in. */
+    mipi_upd(MIPI_CAL_CILA_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_DSIA_CFG2, MIPI_CAL_CLKSEL, 0);
+    mipi_upd(MIPI_CAL_CILB_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_DSIB_CFG2, MIPI_CAL_CLKSEL, 0);
+    mipi_upd(MIPI_CAL_CILC_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_CILC_CFG2, MIPI_CAL_CLKSEL, 0);
+    mipi_upd(MIPI_CAL_CILD_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_CILD_CFG2, MIPI_CAL_CLKSEL, 0);
+    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
+
+    /* 6. Ours: lane E with its clock. */
+    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, MIPI_CAL_CIL_SEL);
+    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
+
+    /* 7. Trim and trigger in one word. */
     mem_wr(MIPI_CAL_BASE + MIPI_CAL_CTRL, MIPI_CAL_START, 0);
-    /* The driver polls up to five hundred times at a couple of hundred
+
+    /* 8. The driver polls up to five hundred times at a couple of hundred
      * microseconds; a single short sleep was not giving it time. */
     int tries = 500;
     while (tries--) {
@@ -153,8 +217,13 @@ static void mipi_calibrate_csie(void)
         if (st & MIPI_CAL_DONE) break;
         usleep(300);
     }
-    printf("  MIPI calibration: status 0x%08x after %d polls (%s)\n",
-           st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done");
+    printf("  MIPI calibration: status 0x%08x after %d polls (%s%s)\n",
+           st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done",
+           (st & MIPI_CAL_ACTIVE) ? ", still active" : "");
+
+    /* 9. Leave the selection as the driver leaves it. */
+    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
+    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
 }
 
 static int pmc_dpd_release(uint32_t bit)

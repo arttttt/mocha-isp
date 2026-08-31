@@ -57,6 +57,8 @@
 #define CAR_ENB_SET_X       0x284
 #define CAR_MIPICAL_BIT_H   (1u << 24)
 #define CAR_CLK72M_BIT_X    (1u << 17)
+#define CAR_RST_CLR_H       0x30C
+#define CAR_RST_CLR_W       0x43C
 
 static int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
 {
@@ -99,7 +101,16 @@ static void car_enable_csi_clocks(void)
     mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
     mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
     mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);
-    printf("  receiver clocks on: H 0x%08x, W 0x%08x, X 0x%08x\n", b1, b2, b3);
+
+    /* Enabling a clock is only half of what the kernel's helper does: it
+     * also takes the block out of reset. A module left in reset accepts
+     * register writes and does nothing, without complaining -- which is
+     * what a calibration that starts and never finishes looks like. */
+    mem_wr(CAR_BASE + CAR_RST_CLR_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, 0);
+    mem_wr(CAR_BASE + CAR_RST_CLR_W, CAR_CILE_BIT_W, 0);
+
+    printf("  receiver clocks on and out of reset: H 0x%08x, W 0x%08x, X 0x%08x\n",
+           b1, b2, b3);
 }
 
 /* The physical layer has never been calibrated for this lane: CILE's entry

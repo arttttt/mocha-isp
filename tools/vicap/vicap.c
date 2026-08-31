@@ -285,6 +285,9 @@ struct nvhost32_submit_args {
 #define IMAGE_DEF_FORMAT_OFFSET     16
 #define IMAGE_SIZE_HEIGHT_OFFSET    16
 #define SINGLE_SHOT_CAPTURE         0x1
+#define IMAGE_DEF_DEST_MEM          0x1
+#define IMAGE_DEF_DEST_ISP_A        0x2
+#define IMAGE_DEF_DEST_ISP_B        0x4
 
 /* Port B's command register is 0x87C -- 0x86C is its INPUT_STREAM_CONTROL,
  * and having the wrong one here meant the final write landed on top of the
@@ -495,7 +498,14 @@ int main(int argc, char **argv)
     unsigned W = 2592, H = 1944, port = 1;
     const char *sensor = "ov5693";
     int use_sensor = 1, dump = 0, front = 1;
-    uint32_t image_def = 0x00200004;
+    /* Destination is in the low bits: 1 memory, 2 ISP-A, 4 ISP-B. Stock
+     * reads 0x00200004 because it sends pixels to the ISP, not to memory
+     * -- copying its value told our VI to do the same, which is why the
+     * buffer stayed untouched and nothing ever reported an error. For a
+     * memory write it is the format, the transform bypass, and DEST_MEM. */
+    uint32_t image_def = (1u << BYPASS_PXL_TRANSFORM_OFFSET) |
+                         (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
+                         IMAGE_DEF_DEST_MEM;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
     uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
     int tpg = 0;

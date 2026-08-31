@@ -144,18 +144,37 @@ int main(int argc, char **argv)
          * So the coefficients are given as nine and sixteen real numbers
          * and the library does the conversion. Ones to begin with -- what
          * matters first is whether the stage comes on at all. */
-        static float c9[9]  = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
-        static float c16[16] = { 1, 1, 1, 1, 1, 1, 1, 1,
-                                 1, 1, 1, 1, 1, 1, 1, 1 };
-        uint8_t st[256];
+        /* FOUR pointers in each half, not one. Nine and sixteen are the
+         * lengths of the arrays those pointers reach, not a count of
+         * anything inside the block -- which is why the block fits in
+         * sixty-four bytes after all, and why filling only the first
+         * pointer left three null ones to be dereferenced.
+         *
+         * Four three-by-three matrices and four four-by-four ones: one set
+         * per Bayer phase, going by the company they keep in the symbol
+         * table. Identity to start with -- a one in the middle and nothing
+         * else -- because the question is whether the stage comes on, not
+         * yet what it computes. The library normalises these to ten-bit
+         * fixed point and refuses anything above about eight. */
+        static float m[4][9], k[4][16];
+        for (int q = 0; q < 4; q++) {
+            memset(m[q], 0, sizeof m[q]);
+            memset(k[q], 0, sizeof k[q]);
+            m[q][4] = 1.0f;                  /* centre of the 3x3 */
+            k[q][5] = 1.0f;                  /* centre-ish of the 4x4 */
+        }
+
+        uint8_t st[0x40];
         memset(st, 0, sizeof st);
         st[0] = 1;                                   /* run the stage */
         uint32_t nine = 9, sixteen = 16;
         memcpy(st + 0x04, &nine, 4);
-        memcpy(st + 0x08, &(void *){ c9 }, 4);
+        for (int q = 0; q < 4; q++)
+            memcpy(st + 0x08 + 4 * q, &(void *){ m[q] }, 4);
         st[0x18] = 1;
         memcpy(st + 0x1c, &sixteen, 4);
-        memcpy(st + 0x20, &(void *){ c16 }, 4);
+        for (int q = 0; q < 4; q++)
+            memcpy(st + 0x20 + 4 * q, &(void *){ k[q] }, 4);
         (void)coeff;
 
         printf("block: enable=%u count=%u ptr=%08x  enable2=%u count2=%u"

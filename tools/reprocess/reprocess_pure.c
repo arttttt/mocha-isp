@@ -50,6 +50,7 @@ struct nvmap_pin_handle {
 #define NVMAP_IOC_WRITE    _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
 #define NVMAP_IOC_READ     _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
 #define NVMAP_IOC_PIN_MULT _IOWR(NVMAP_IOC_MAGIC, 10, struct nvmap_pin_handle)
+#define NVMAP_IOC_UNPIN_MULT _IOW(NVMAP_IOC_MAGIC, 11, struct nvmap_pin_handle)
 #define NVMAP_HEAP_IOVMM   (1 << 30)
 #define NVMAP_HANDLE_WRITE_COMBINE 2
 
@@ -147,6 +148,17 @@ static int nvmap_read(uint32_t handle, uint32_t offset, void *data, uint32_t siz
     if (ioctl(nvmap_fd, NVMAP_IOC_READ, &rw) < 0) { perror("nvmap read"); return -1; }
     return 0;
 }
+/* Every run pinned tens of megabytes of IOVMM and released none of it,
+ * which is why the device only survived a couple of runs before the whole
+ * system went sluggish. Unpin and free what we pinned. */
+static void nvmap_unpin(uint32_t handle) {
+    struct nvmap_pin_handle ph = { .handles = handle, .addr = 0, .count = 1 };
+    ioctl(nvmap_fd, NVMAP_IOC_UNPIN_MULT, &ph);
+}
+static void nvmap_free(uint32_t handle) {
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)handle);
+}
+
 static uint32_t nvmap_pin(uint32_t handle) {
     struct nvmap_pin_handle ph = { .handles = handle, .addr = 0, .count = 1 };
     if (ioctl(nvmap_fd, NVMAP_IOC_PIN_MULT, &ph) < 0) { perror("nvmap pin"); return 0; }
@@ -667,6 +679,7 @@ int main(int argc, char **argv)
             perror("init submit FAILED");
         else
             printf("Init submit OK (0x019/0x01B/0x01C), fence=%u\n", isa.fence);
+        nvmap_free(init_h);
     }
 
     /* Cal gather: initialize all shadow registers + post-apply trigger 0x0F
@@ -814,6 +827,7 @@ int main(int argc, char **argv)
             perror("cal submit FAILED");
         else
             printf("Cal submit OK, fence=%u\n", csa.fence);
+        nvmap_free(cal_h);
     }
 
     /* Build reprocess gather with ISP pipeline init */
@@ -1275,6 +1289,13 @@ int main(int argc, char **argv)
         }
         free(buf);
     }
+
+    /* Release the IOVMM before we go, in pin order's reverse. */
+    nvmap_unpin(param_h); nvmap_unpin(work_h);
+    nvmap_unpin(out_h);   nvmap_unpin(in_h);
+    nvmap_free(cmd_h);   nvmap_free(param_h); nvmap_free(work_h);
+    nvmap_free(out_h);   nvmap_free(in_h);
+    printf("Released: unpinned and freed the frame buffers\n");
 
     close(ctrl_fd);
     close(isp_fd);

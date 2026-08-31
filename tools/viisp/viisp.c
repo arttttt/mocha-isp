@@ -630,7 +630,8 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
      * is fourteen hundred words. */
-    uint32_t bytes = (words + 2048) * 4;
+    /* Two clearing passes plus the runtime block and the blob. */
+    uint32_t bytes = (words + 6144) * 4;
     uint32_t cmd_h = nvmap_create((bytes + 4095) & ~4095u);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
@@ -651,6 +652,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * earlier run left behind stays -- so this clears them the way stock
      * does. */
     if (zero_init) {
+        /* The clearing pass, and it is longer than what I had: the colour
+         * matrix and the work buffer are cleared with the rest. Stock runs
+         * it, applies, writes the DMA block and the three registers beside
+         * it, then runs the whole pass again and applies again. */
         static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
             { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
             { 0x700, 16, 0 }, { 0x750, 16, 0 },
@@ -668,37 +673,38 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
             { 0x653, 1, 0 }, { 0x654, 257, 1 },
             { 0x655, 1, 0 }, { 0x656, 257, 1 },
             { 0x657, 1, 0 }, { 0x658, 257, 1 },
+            { 0x300, 4, 0 }, { 0x304, 4, 0 }, { 0x053, 2, 0 },
         };
-        for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
-            g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
-                                 : OP_INCR(z[k].m, z[k].n);
-            for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
+                g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
+                                     : OP_INCR(z[k].m, z[k].n);
+                for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
+            }
+            /* The two words stock leaves set in the whole of that pass. */
+            g[n++] = OP_NONINCR(0x91A, 9);
+            for (int i = 0; i < 8; i++) g[n++] = 0;
+            g[n++] = 0x00000200;
+            g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
+
+            /* Apply, then the transfer configuration. Its last word is two
+             * on the first pass and one on the second -- the difference the
+             * reconstruction collapsed into a single value. */
+            g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
+            g[n++] = OP_INCR(0x018, 5);
+            g[n++] = 0x00000000; g[n++] = 0x00000400;
+            g[n++] = 0x00000000; g[n++] = 0x00000200;
+            g[n++] = pass ? 0x00000001 : 0x00000002;
+            if (!pass) {
+                g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
+                g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
+                g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
+            }
         }
-        /* The two words stock leaves set in the whole of that pass. */
-        g[n++] = OP_NONINCR(0x91A, 9);
-        for (int i = 0; i < 8; i++) g[n++] = 0;
-        g[n++] = 0x00000200;
-        g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
     }
 
-    /* The DMA configuration, and this is one of the places where streaming
-     * and reprocess genuinely differ. Stock streams into block-linear
-     * buffers and its values here say so; ours are ordinary pitch-linear
-     * allocations, which take the reprocess thresholds with the last word
-     * set to one rather than two. Sending the reprocess pair, as we were,
-     * describes neither. */
-    g[n++] = OP_INCR(0x018, 5);
-    g[n++] = 0x00000000; g[n++] = 0x00000400;
-    g[n++] = 0x00000000; g[n++] = 0x00000200;
-    g[n++] = 0x00000001;
-
-    /* Three registers the April notes list among the handful the stock
-     * settings blob actually sets -- 0x01F takes one and 0x05F takes
-     * sixteen -- and which the driver's first init stage writes too. We had
-     * carried over the DMA block that sits beside them and left these out. */
-    g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
-    g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
-    g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
+    /* The transfer configuration now rides inside the clearing pass above,
+     * in the order and with the values the trace shows. */
 
     /* The runtime configuration, ported from the driver's streaming init
      * for ISP-B. The calibration blob alone left the block completing

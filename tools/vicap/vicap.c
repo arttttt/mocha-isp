@@ -93,6 +93,53 @@ struct regrdwr_args {
 #define IMAGE_FORMAT_T_R16_I        32      /* raw pass-through */
 #define IMAGE_DT_RAW10              43
 
+/* CSI receiver, absolute offsets in the VI aperture (t124_registers.h) */
+#define T124_PP_A_PIXEL_STREAM_PP_COMMAND    PP_A_PIXEL_STREAM_PP_COMMAND
+#define T124_PP_A_INPUT_STREAM_CONTROL       0x838
+#define T124_PP_A_PIXEL_STREAM_CONTROL0      0x83C
+#define T124_PP_A_PIXEL_STREAM_CONTROL1      0x840
+#define T124_PP_A_PIXEL_STREAM_GAP           0x844
+#define T124_PP_A_PIXEL_STREAM_EXPECTED_FRAME 0x84C
+#define T124_PP_A_PIXEL_STREAM_PP_INT_MASK   0x850
+#define T124_PP_A_PIXEL_PARSER_STATUS        0x854
+#define T124_CSI_PHY_CIL_COMMAND             0x908
+#define T124_CILA_PAD_CONFIG0                0x92C
+#define T124_PHY_CILA_CONTROL0               0x934
+#define T124_CSI_CIL_A_INT_MASK              0x938
+#define T124_CSI_CIL_A_STATUS                0x93C
+#define T124_CSI_CILA_STATUS                 0x940
+#define T124_CILB_PAD_CONFIG0                0x960
+#define T124_PHY_CILB_CONTROL0               0x968
+#define T124_CSI_CIL_B_INT_MASK              0x96C
+/* The CSI block sits at 0x838 in the VI aperture: 0x838+0xF4 is CILA and
+ * 0x838+0xD0 is the PHY command, both matching the absolute table, so the
+ * two registers that only exist as relative offsets resolve from there. */
+#define T124_CSI_CLKEN_OVERRIDE              (0x838 + 0x218)
+#define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
+
+#define BRICK_CLOCK_A_4X                (0x1 << 16)
+#define T124_CIL_PHY_CONTROL_DEFAULT    0x09
+#define T124_CIL_A_ENABLE               0x0001
+#define T124_CIL_B_ENABLE               0x0100
+#define T124_CIL_AB_4LANE               (T124_CIL_A_ENABLE | T124_CIL_B_ENABLE)
+#define T124_CIL_CMD_HI_MASK            0xFFFF0000
+#define T124_PP_FRAME_MIN_GAP           0x14
+#define T124_CSI_DEBUG_COUNTER_CFG      0x454340E1
+#define PP_FRAME_MIN_GAP_OFFSET         16
+#define CSI_SKIP_PACKET_THRESHOLD_OFFSET 16
+#define CSI_PP_RST                      0x3
+#define CSI_PP_PACKET_HEADER_SENT       (0x1 << 4)
+#define CSI_PP_DATA_IDENTIFIER_ENABLE   (0x1 << 5)
+#define CSI_PP_WORD_COUNT_SELECT_HEADER (0x1 << 6)
+#define CSI_PP_CRC_CHECK_ENABLE         (0x1 << 7)
+#define CSI_PP_WC_CHECK                 (0x1 << 8)
+#define CSI_PP_OUTPUT_FORMAT_STORE      (0x3 << 16)
+#define CSI_PPA_PAD_LINE_NOPAD          (0x2 << 24)
+#define CSI_PP_HEADER_EC_DISABLE        (0x1 << 27)
+#define CSI_PPA_PAD_FRAME_NOPAD         (0x2 << 28)
+#define CSI_PP_TOP_FIELD_FRAME_OFFSET   0
+#define CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET 4
+
 static int nvmap_fd = -1, vi_fd = -1;
 
 static int vi_reg(uint32_t off, uint32_t *val, int write)
@@ -213,6 +260,56 @@ int main(int argc, char **argv)
         else
             printf("sensor streaming at %ux%u\n", W, H);
     }
+
+    /* CSI receiver bring-up, in the order csi.c does it for a T124 with the
+     * sensor on port A: four lanes across brick 0, CILA and CILB. Without
+     * this the channel takes its configuration and then waits forever,
+     * which is exactly what the first run did -- SINGLE_SHOT stayed armed
+     * and the buffer kept its fill pattern. Offsets are the absolute ones
+     * from t124_registers.h, the same space the PP command already
+     * answered in. */
+    printf("bringing up the CSI receiver (port A, 4 lanes)\n");
+    vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
+
+    vi_wr(T124_PP_A_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_A_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CILA_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_A_INT_MASK, 0x0);
+    vi_wr(T124_CSI_CIL_B_INT_MASK, 0x0);
+
+    vi_wr(T124_CILA_PAD_CONFIG0, BRICK_CLOCK_A_4X);
+    vi_wr(T124_CILB_PAD_CONFIG0, 0x0);
+    vi_wr(T124_PHY_CILA_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
+    vi_wr(T124_PHY_CILB_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
+
+    /* Enable both halves of the brick, preserving the other brick's bits. */
+    {
+        uint32_t cil = vi_rd(T124_CSI_PHY_CIL_COMMAND);
+        uint32_t val = (cil & T124_CIL_CMD_HI_MASK) | T124_CIL_AB_4LANE;
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, val);
+        printf("  PHY_CIL_COMMAND 0x%08x -> 0x%08x\n", cil, val);
+    }
+
+    /* Pixel parser: reset, then configure, then enable. */
+    vi_wr(T124_PP_A_PIXEL_STREAM_PP_COMMAND,
+          (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+    vi_wr(T124_PP_A_PIXEL_STREAM_PP_INT_MASK, 0x0);
+    vi_wr(T124_PP_A_PIXEL_STREAM_CONTROL0,
+          CSI_PP_PACKET_HEADER_SENT | CSI_PP_DATA_IDENTIFIER_ENABLE |
+          CSI_PP_WORD_COUNT_SELECT_HEADER | CSI_PP_CRC_CHECK_ENABLE |
+          CSI_PP_WC_CHECK | CSI_PP_OUTPUT_FORMAT_STORE |
+          CSI_PPA_PAD_LINE_NOPAD | CSI_PP_HEADER_EC_DISABLE |
+          CSI_PPA_PAD_FRAME_NOPAD | 0 /* port A */);
+    vi_wr(T124_PP_A_PIXEL_STREAM_CONTROL1,
+          (0x1u << CSI_PP_TOP_FIELD_FRAME_OFFSET) |
+          (0x1u << CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET));
+    vi_wr(T124_PP_A_PIXEL_STREAM_GAP,
+          T124_PP_FRAME_MIN_GAP << PP_FRAME_MIN_GAP_OFFSET);
+    vi_wr(T124_PP_A_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
+    vi_wr(T124_PP_A_INPUT_STREAM_CONTROL,
+          (0x3fu << CSI_SKIP_PACKET_THRESHOLD_OFFSET) | (4 - 1));
+    vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
 
     /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
      * is 1 here: we want the raw bayer in memory, not a converted image. */

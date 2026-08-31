@@ -1532,7 +1532,10 @@ int main(int argc, char **argv)
         printf("surface programmed via host1x: %d words, rc=%d (%s)\n",
                n, rc, rc == 0 ? "ok" : strerror(errno));
         usleep(50000);
+        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    }
 
+    {
         /* The ISP goes in before the trigger: it has to be waiting when the
          * pixels arrive, since nothing buffers them on the way. */
         if (isp_fd >= 0 && out_iova && stats_h) {
@@ -1741,7 +1744,6 @@ int main(int argc, char **argv)
                        sp_mw, hold_thresh, irc);
             }
         }
-        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
     usleep(200000);
 

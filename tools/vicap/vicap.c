@@ -231,6 +231,7 @@ struct nvhost_set_nvmap_fd_args { uint32_t fd; };
 
 /* ---- VI / CSI registers (24.1 registers.h, t124_registers.h) ---- */
 #define VI_CSI_BASE(n)              (0x100 + (n) * 0x100)
+#define VI_CSI_SW_RESET             0x000
 #define VI_CSI_SINGLE_SHOT          0x004
 #define VI_CSI_IMAGE_DEF            0x00c
 #define VI_CSI_IMAGE_SIZE           0x018
@@ -642,6 +643,12 @@ int main(int argc, char **argv)
     /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
      * is 1 here: we want the raw bayer in memory, not a converted image. */
     printf("configuring CSI channel at 0x%03x\n", base);
+    /* Reset the channel first. Its single-shot bit has been left armed by
+     * every attempt that never completed, and nothing clears it -- the
+     * driver's own recovery path resets the channel for exactly this. */
+    vi_wr(base + VI_CSI_SW_RESET, 0xF);
+    vi_wr(base + VI_CSI_SW_RESET, 0x0);
+
     vi_wr(base + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
     /* Measured off a live stock session on this channel: 0x00200004. The
      * transform-bypass bit is CLEAR there, where we had been setting it,

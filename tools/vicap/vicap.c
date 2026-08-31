@@ -1213,6 +1213,13 @@ int main(int argc, char **argv)
              * and release the module. Doing that in the middle of a running
              * DMA is what cut the picture: the tear sat around row 1830, a
              * fixed time into the frame rather than a fixed place in it. */
+            /* Reset the parser as well as the channel, the way the bring-up
+             * does it -- the reset command, then the enable. The channel
+             * reset alone left the parser latched onto a frame already in
+             * progress, so the first capture started and then ran out of
+             * frame before it reached the bottom of the buffer. */
+            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,

@@ -1214,15 +1214,18 @@ int main(int argc, char **argv)
                     nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
                 }
 
-                /* Channel reset, then the parser's own reset-and-enable, the
-                 * way the bring-up does it. Then arm and trigger, all in one
-                 * batch: every write of ours is an ioctl that has nvhost
-                 * claim and release the module, and doing that under a
-                 * running DMA cuts the picture. */
-                vi_wr(base + VI_CSI_SW_RESET, 0xF);
-                vi_wr(base + VI_CSI_SW_RESET, 0x0);
-                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+                /* Reset only on the way in. A reset resynchronises the
+                 * parser to wherever the sensor is right now, so resetting
+                 * before every retry guaranteed every retry started mid
+                 * frame -- eight attempts, eight short frames. Left alone,
+                 * the parser finishes one capture at the end of a frame and
+                 * the next trigger is already on the boundary. */
+                if (attempt == 1) {
+                    vi_wr(base + VI_CSI_SW_RESET, 0xF);
+                    vi_wr(base + VI_CSI_SW_RESET, 0x0);
+                    vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+                }
                 vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                           CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
                 vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,

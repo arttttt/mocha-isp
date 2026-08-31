@@ -572,7 +572,11 @@ int main(int argc, char **argv)
     uint32_t sp_id = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0)
         sp_id = gp.value;
-    printf("VI syncpoint: %u\n", sp_id);
+    uint32_t sp_mw = sp_id;
+    gp.param = 1; gp.value = 0;
+    if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0 && gp.value)
+        sp_mw = gp.value;
+    printf("VI syncpoints: frame %u, memory write %u\n", sp_id, sp_mw);
 
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
@@ -762,6 +766,10 @@ int main(int argc, char **argv)
      * anything. */
     vi_wr(0x0F0, 0x10100010);
 
+    /* The syncpoint control register, which we had never written at all --
+     * the driver puts 0x100 here before any capture. */
+    vi_wr(0x004, 0x00000100);
+
     /* Reset the channel first. Its single-shot bit has been left armed by
      * every attempt that never completed, and nothing clears it -- the
      * driver's own recovery path resets the channel for exactly this. */
@@ -792,8 +800,11 @@ int main(int argc, char **argv)
      * one increment -- so it reads back as zero and never showed up in the
      * comparison against stock. The memory-write acknowledge is the one
      * that has to be armed before the DMA starts. */
+    /* Two different syncpoints, as the driver uses: one for the frame
+     * start and a separate one for the memory-write acknowledge. We had
+     * been arming both conditions against the same id. */
     vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-          (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_id);
+          (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_mw);
     vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
           (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8 | sp_id);
 

@@ -514,7 +514,7 @@ int main(int argc, char **argv)
                          IMAGE_DEF_DEST_MEM;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
     uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
-    int tpg = 0, shots = 8;
+    int tpg = 0, shots = 8, piggyback = 0;
     int hold = 0, dump_regs = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -539,6 +539,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
+        else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }
         else if (strncmp(a, "--phy-cil=", 10) == 0)
             phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
@@ -649,6 +650,30 @@ int main(int argc, char **argv)
      * its preview was running. Copying them verbatim is the point: if the
      * capture still does not happen with the working configuration in
      * place, the missing piece is somewhere other than the CSI setup. */
+    /* --piggyback: touch nothing that is already running. The stock camera
+     * brings this receiver up correctly, so let it, and change only where
+     * the pixels go -- the destination field and the surface. If a frame
+     * lands, the capture path is ours; if it does not, the fault is in the
+     * write itself and not in any of the bring-up we have been repeating.
+     *
+     * It also corrects a wrong reading: the frame-start syncpoint counts
+     * our own shots, not arriving frames -- it advances by the same amount
+     * with no sensor at all. */
+    if (piggyback) {
+        printf("piggyback: leaving the running configuration alone\n");
+        vi_wr(base + VI_CSI_IMAGE_DEF,
+              (1u << BYPASS_PXL_TRANSFORM_OFFSET) |
+              (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
+              IMAGE_DEF_DEST_MEM);
+        vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+        vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+        vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+        vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+        vi_flush("piggyback");
+        usleep(500000);
+        goto readback;
+    }
+
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
 
@@ -902,6 +927,7 @@ int main(int argc, char **argv)
            vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
            vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
 
+readback:
     /* Ask the hardware whether it saw anything at all. The frame-start and
      * memory-write conditions each increment a syncpoint, so a value that
      * has not moved says plainly that no frame started and nothing was

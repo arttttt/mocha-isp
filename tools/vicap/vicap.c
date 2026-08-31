@@ -1215,9 +1215,15 @@ int main(int argc, char **argv)
              * and stopping on it cut the capture a few dozen rows in. The
              * last line losing its fill is the frame reaching the bottom,
              * and reading the buffer goes nowhere near VI. */
+            /* Generous, because the frame takes far longer than the sensor's
+             * geometry says it should: four hundred milliseconds got the
+             * write to about row 900 of 1944. That is a real finding in its
+             * own right -- roughly one frame a second where the timings say
+             * fifteen -- but the picture comes out whole either way once we
+             * stop reading the buffer while it is still being filled. */
             uint8_t tail[64];
             int mwaited = 0, done = 0;
-            while (mwaited < 400 && !done) {
+            while (mwaited < 2500 && !done) {
                 nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
                 for (unsigned i = 0; i < sizeof tail; i++)
                     if (tail[i] != 0xA5) { done = 1; break; }

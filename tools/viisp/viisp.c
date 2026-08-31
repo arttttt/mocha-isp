@@ -907,7 +907,10 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
     sa.num_relocs = 4;
-    sa.timeout = 3000;
+    /* This job is parked on a counter we raise after the whole capture, so
+     * three seconds -- the default -- is shorter than its own life. It ran
+     * out and host1x killed the ISP channel, which costs a reboot. */
+    sa.timeout = 60000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
     sa.relocs = (uint32_t)(uintptr_t)rel;

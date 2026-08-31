@@ -636,6 +636,14 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000000; g[n++] = 0x00000200;
     g[n++] = 0x00000001;
 
+    /* Three registers the April notes list among the handful the stock
+     * settings blob actually sets -- 0x01F takes one and 0x05F takes
+     * sixteen -- and which the driver's first init stage writes too. We had
+     * carried over the DMA block that sits beside them and left these out. */
+    g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
+    g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
+
     /* The runtime configuration, ported from the driver's streaming init
      * for ISP-B. The calibration blob alone left the block completing
      * frames and writing black, and the reason is here: the input stage is

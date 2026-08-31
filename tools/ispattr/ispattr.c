@@ -25,6 +25,63 @@
 #include <stdint.h>
 #include <dlfcn.h>
 
+/* The mapping that holds an address, so a snapshot can be taken without
+ * running off the end of it. */
+static int map_range(const void *p, uintptr_t *start, uintptr_t *end)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512];
+    uintptr_t a = (uintptr_t)p;
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        uintptr_t s, e;
+        if (sscanf(line, "%lx-%lx", (unsigned long *)&s,
+                   (unsigned long *)&e) != 2) continue;
+        if (a >= s && a < e) { *start = s; *end = e; found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+/* What the library keeps for each block of registers it will push: the
+ * method it goes to, how many words, whether it has been touched, and the
+ * words themselves. Finding the one the demosaic call dirtied is the whole
+ * point -- it is the register write we could never see in a trace. */
+static void report_blocks(const uint8_t *before, const uint8_t *after,
+                          uintptr_t base, size_t len)
+{
+    int shown = 0;
+    for (size_t off = 0; off + 16 <= len; off += 4) {
+        if (memcmp(before + off, after + off, 4) == 0) continue;
+        /* Walk back to a plausible header: a method under 0x1000 with a
+         * sane count, whose data region covers this change. */
+        for (size_t h = (off > 0x400 ? off - 0x400 : 0); h <= off; h += 4) {
+            uint16_t method = *(const uint16_t *)(after + h);
+            uint16_t count  = *(const uint16_t *)(after + h + 2);
+            uint8_t dirty   = after[h + 6];
+            if (method == 0 || method >= 0x1000) continue;
+            if (count == 0 || count > 512) continue;
+            if (h + 12 + 4u * count > len) continue;
+            if (off < h + 12 || off >= h + 12 + 4u * count) continue;
+            if (!dirty) continue;
+            printf("\nblock at +%04zx: method=0x%03x count=%u dirty=%u"
+                   " mode=%u  (addr %08lx)\n", h, method, count, dirty,
+                   after[h + 7], (unsigned long)(base + h));
+            const uint32_t *w = (const uint32_t *)(after + h + 12);
+            for (unsigned i = 0; i < count; i++)
+                printf("  [%2u] %08x%s", i, w[i],
+                       (i % 4 == 3 || i + 1 == count) ? "\n" : "");
+            shown++;
+            off = h + 12 + 4u * count;   /* skip past what we just printed */
+            break;
+        }
+        if (shown >= 12) break;
+    }
+    if (!shown)
+        printf("nothing that looks like a dirtied register block changed\n");
+}
+
 int main(int argc, char **argv)
 {
     int instance = 2;          /* ISP-B; the other tool uses 1 for ISP-A */
@@ -192,10 +249,33 @@ int main(int argc, char **argv)
                *(uint32_t *)(st + 0x20));
         fflush(stdout);
 
+        /* Photograph the settings object's whole mapping either side of the
+         * call. The library converts our floats to its own fixed point and
+         * files them in a block tagged with the method they go to -- and
+         * that tag is the answer we have been hunting in register dumps
+         * that could never contain it. */
+        uintptr_t ms = 0, me = 0;
+        uint8_t *before = 0, *after = 0;
+        size_t snap = 0;
+        if (map_range(hSet, &ms, &me)) {
+            snap = me - (uintptr_t)hSet;
+            if (snap > (4u << 20)) snap = 4u << 20;
+            before = malloc(snap);
+            after = malloc(snap);
+            if (before && after) memcpy(before, hSet, snap);
+            printf("watching %zu bytes at %p (mapping %08lx..%08lx)\n",
+                   snap, hSet, (unsigned long)ms, (unsigned long)me);
+        }
+
         uint32_t size = 0x40;
         int src = HwSettingsSetAttribute(hSet, 8, 0, (uint32_t)(uintptr_t)st,
                                          (uint32_t)(uintptr_t)&size);
         printf("demosaic attribute: rc=%d, size now %u\n", src, size);
+
+        if (before && after) {
+            memcpy(after, hSet, snap);
+            report_blocks(before, after, (uintptr_t)hSet, snap);
+        }
 
         /* The attribute is accepted. Applying is a separate question: the
          * name that looks right, NvIspHwSettingsApply, shares an address

@@ -73,12 +73,54 @@ static int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
     return 0;
 }
 
+static int mem_rd(unsigned long addr, uint32_t *out)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    unsigned long base = addr & ~(unsigned long)(page - 1);
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) return -1;
+    void *m = mmap(0, (size_t)page * 2, PROT_READ, MAP_SHARED, fd, (off_t)base);
+    if (m == MAP_FAILED) { close(fd); return -1; }
+    *out = *(volatile uint32_t *)((char *)m + (addr - base));
+    munmap(m, (size_t)page * 2);
+    close(fd);
+    return 0;
+}
+
 static void car_enable_csi_clocks(void)
 {
     uint32_t b1 = 0, b2 = 0;
     mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H, &b1);
     mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
     printf("  receiver clocks on: H 0x%08x, W 0x%08x\n", b1, b2);
+}
+
+/* The physical layer has never been calibrated for this lane: CILE's entry
+ * in the calibration block reads zero, meaning it was never even selected.
+ * The sequence is the driver's own -- clear status, select the lane and its
+ * clock, then write the control word with the start bit, which the hardware
+ * clears when it finishes. */
+#define MIPI_CAL_BASE       0x700E3000UL
+#define MIPI_CAL_CTRL       0x00
+#define MIPI_CAL_STATUS     0x08
+#define MIPI_CAL_CILE_CFG   0x24
+#define MIPI_CAL_CSIE_CFG2  0x74
+#define MIPI_CAL_CIL_SEL    (1u << 21)
+#define MIPI_CAL_CLKSEL     (1u << 21)
+#define MIPI_CAL_DONE       (1u << 16)
+#define MIPI_CAL_START      (0xau << 26 | 0x2u << 24 | 1u << 4 | 1u << 0)
+
+static void mipi_calibrate_csie(void)
+{
+    uint32_t st = 0;
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0xF1F10000, 0);
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CTRL, MIPI_CAL_START, 0);
+    usleep(20000);
+    mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &st);
+    printf("  MIPI calibration: status 0x%08x (%s)\n", st,
+           (st & MIPI_CAL_DONE) ? "done" : "NOT done");
 }
 
 static int pmc_dpd_release(uint32_t bit)
@@ -467,6 +509,7 @@ int main(int argc, char **argv)
      * place, the missing piece is somewhere other than the CSI setup. */
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
+    if (front) mipi_calibrate_csie();
 
     if (front) {
         printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");

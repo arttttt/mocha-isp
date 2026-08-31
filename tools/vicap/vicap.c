@@ -54,6 +54,9 @@
 #define CAR_ENB_SET_W       0x448
 #define CAR_CSI_BIT_H       (1u << 20)
 #define CAR_CILE_BIT_W      (1u << 18)
+#define CAR_ENB_SET_X       0x284
+#define CAR_MIPICAL_BIT_H   (1u << 24)
+#define CAR_CLK72M_BIT_X    (1u << 17)
 
 static int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
 {
@@ -89,10 +92,14 @@ static int mem_rd(unsigned long addr, uint32_t *out)
 
 static void car_enable_csi_clocks(void)
 {
-    uint32_t b1 = 0, b2 = 0;
-    mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H, &b1);
+    uint32_t b1 = 0, b2 = 0, b3 = 0;
+    /* csi and cile for the receiver; mipi-cal and clk72mhz for the
+     * calibration block, which cannot finish without them -- it reported
+     * "not done" while both of those were switched off. */
+    mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
     mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
-    printf("  receiver clocks on: H 0x%08x, W 0x%08x\n", b1, b2);
+    mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);
+    printf("  receiver clocks on: H 0x%08x, W 0x%08x, X 0x%08x\n", b1, b2, b3);
 }
 
 /* The physical layer has never been calibrated for this lane: CILE's entry

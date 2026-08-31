@@ -57,6 +57,9 @@
 #define CAR_ENB_SET_X       0x284
 #define CAR_MIPICAL_BIT_H   (1u << 24)
 #define CAR_CLK72M_BIT_X    (1u << 17)
+#define CAR_ENB_SET_L       0x320
+#define CAR_RST_CLR_L       0x304
+#define CAR_VI_BIT_L        (1u << 20)
 #define CAR_RST_CLR_H       0x30C
 #define CAR_RST_CLR_W       0x43C
 
@@ -98,6 +101,13 @@ static void car_enable_csi_clocks(void)
     /* csi and cile for the receiver; mipi-cal and clk72mhz for the
      * calibration block, which cannot finish without them -- it reported
      * "not done" while both of those were switched off. */
+    /* VI itself, which we had never switched on: its clock reads off in
+     * the L group. Registers answer regardless, because nvhost powers the
+     * module for the length of an ioctl -- but the parser and the write
+     * engine need the clock to actually run. */
+    mem_wr(CAR_BASE + CAR_ENB_SET_L, CAR_VI_BIT_L, 0);
+    mem_wr(CAR_BASE + CAR_RST_CLR_L, CAR_VI_BIT_L, 0);
+
     mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
     mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
     mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);

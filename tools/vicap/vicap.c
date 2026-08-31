@@ -234,6 +234,9 @@ struct regrdwr_args {
 struct nvhost_get_param_arg { uint32_t param, value; };
 struct nvhost_set_nvmap_fd_args { uint32_t fd; };
 struct nvhost_ctrl_syncpt_read_args { uint32_t id, value; };
+struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
+#define NVHOST_IOCTL_CHANNEL_SET_CLK_RATE \
+    _IOW(NVHOST_IOCTL_MAGIC, 10, struct nvhost_clk_rate_args)
 #define NVHOST_IOCTL_CTRL_SYNCPT_READ \
     _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
 struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
@@ -768,6 +771,19 @@ int main(int argc, char **argv)
      * of thing that can hold the memory client off without reporting
      * anything. */
     vi_wr(0x0F0, 0x10100010);
+
+    /* Frames start but nothing is ever written, with no fault reported --
+     * which is what a memory client with no bandwidth reserved looks like.
+     * Ask for a rate on the module and on memory, the way the ISP path
+     * does before it moves a frame. */
+    {
+        struct nvhost_clk_rate_args c;
+        c.moduleid = 0; c.rate = 408000000;
+        int a1 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
+        c.moduleid = 1; c.rate = 528000000;      /* memory */
+        int a2 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
+        printf("clock/bandwidth request: module rc=%d, memory rc=%d\n", a1, a2);
+    }
 
     /* The syncpoint control register, which we had never written at all --
      * the driver puts 0x100 here before any capture. */

@@ -78,8 +78,26 @@ static void report_blocks(const uint8_t *before, const uint8_t *after,
         }
         if (shown >= 12) break;
     }
-    if (!shown)
-        printf("nothing that looks like a dirtied register block changed\n");
+    if (shown) return;
+
+    /* No recognisable header: fall back to reporting where the bytes moved,
+     * as runs, so the shape of the change is still visible. */
+    printf("no tagged block matched; changed runs:\n");
+    size_t off = 0;
+    int runs = 0;
+    while (off + 4 <= len && runs < 24) {
+        if (memcmp(before + off, after + off, 4) == 0) { off += 4; continue; }
+        size_t s = off;
+        while (off + 4 <= len && memcmp(before + off, after + off, 4) != 0)
+            off += 4;
+        printf("  +%06zx (%08lx) %zu words:", s, (unsigned long)(base + s),
+               (off - s) / 4);
+        for (size_t i = s; i < off && i < s + 32; i += 4)
+            printf(" %08x", *(const uint32_t *)(after + i));
+        printf("%s\n", (off - s) > 32 ? " ..." : "");
+        runs++;
+    }
+    if (!runs) printf("  (nothing changed at all)\n");
 }
 
 int main(int argc, char **argv)
@@ -257,14 +275,18 @@ int main(int argc, char **argv)
         uintptr_t ms = 0, me = 0;
         uint8_t *before = 0, *after = 0;
         size_t snap = 0;
+        /* The whole mapping, not just what follows the handle: the blocks
+         * are allocated in their own right and can as easily sit below it. */
+        void *watch = 0;
         if (map_range(hSet, &ms, &me)) {
-            snap = me - (uintptr_t)hSet;
-            if (snap > (4u << 20)) snap = 4u << 20;
+            watch = (void *)ms;
+            snap = me - ms;
+            if (snap > (8u << 20)) snap = 8u << 20;
             before = malloc(snap);
             after = malloc(snap);
-            if (before && after) memcpy(before, hSet, snap);
-            printf("watching %zu bytes at %p (mapping %08lx..%08lx)\n",
-                   snap, hSet, (unsigned long)ms, (unsigned long)me);
+            if (before && after) memcpy(before, watch, snap);
+            printf("watching %zu bytes of %08lx..%08lx (handle at %p)\n",
+                   snap, (unsigned long)ms, (unsigned long)me, hSet);
         }
 
         uint32_t size = 0x40;
@@ -273,8 +295,8 @@ int main(int argc, char **argv)
         printf("demosaic attribute: rc=%d, size now %u\n", src, size);
 
         if (before && after) {
-            memcpy(after, hSet, snap);
-            report_blocks(before, after, (uintptr_t)hSet, snap);
+            memcpy(after, watch, snap);
+            report_blocks(before, after, (uintptr_t)watch, snap);
         }
 
         /* The attribute is accepted. Applying is a separate question: the

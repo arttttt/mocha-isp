@@ -678,7 +678,13 @@ int main(int argc, char **argv)
         sfd = open(sn, O_RDWR);
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
         if (front) {
-            /* Opening the node already powered it; just pick a mode. */
+            /* Opening the node already powered it -- but only just. The log
+             * puts the mode ioctl twenty-five microseconds after the power
+             * sequence returns, and the part answers neither of the two
+             * writes that follow: "no acknowledge from address 0x36". The
+             * driver's power-on does not wait for the sensor to come out of
+             * reset, so the wait has to be here. */
+            usleep(50000);
             /* The driver writes the mode table and then writes exposure
              * from these fields unconditionally -- passing zeros programs
              * the sensor with no frame length and no integration time,

@@ -196,8 +196,26 @@ int main(int argc, char **argv)
     }
 
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
-    int isp_fd = open("/dev/nvhost-isp", O_RDWR);
     int ctrl_fd = open("/dev/nvhost-ctrl", O_RDWR);
+
+    /* The channel node is exclusive: once the library has opened it our own
+     * open fails. But it opened it inside THIS process, so the descriptor is
+     * in our own table -- find it and submit through that. The library's
+     * context and its fence machinery stay live, which is the point. */
+    int isp_fd = open("/dev/nvhost-isp", O_RDWR);
+    if (isp_fd < 0) {
+        for (int fd = 0; fd < 256 && isp_fd < 0; fd++) {
+            char p[64], t[128];
+            snprintf(p, sizeof p, "/proc/self/fd/%d", fd);
+            ssize_t k = readlink(p, t, sizeof t - 1);
+            if (k <= 0) continue;
+            t[k] = 0;
+            if (strcmp(t, "/dev/nvhost-isp") == 0) {
+                isp_fd = fd;
+                printf("channel is the library's: reusing fd %d\n", fd);
+            }
+        }
+    }
     if (nvmap_fd < 0 || isp_fd < 0 || ctrl_fd < 0) {
         printf("open failed: nvmap=%d isp=%d ctrl=%d\n", nvmap_fd, isp_fd, ctrl_fd);
         return 1;

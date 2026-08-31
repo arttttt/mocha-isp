@@ -1139,19 +1139,40 @@ int main(int argc, char **argv)
          * arm every condition in turn against one counter, take a shot, and
          * let the ones that move name themselves. */
         if (scan_cond) {
+            uint8_t fill[64], tail[64];
+            memset(fill, 0xA5, sizeof fill);
             for (uint32_t cond = 0; cond < 32; cond++) {
-                uint32_t v0 = syncpt_read(sp_mw);
+                /* Each pass is a real capture, carried to the bottom of the
+                 * frame. The first sweep judged a condition on 150ms of
+                 * waiting, which is less than a frame and less than the
+                 * first shot needs to start at all -- so it was reporting
+                 * which events arrive early, not which ones arrive. */
+                nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
+                uint32_t fs0 = syncpt_read(sp_id), v0 = syncpt_read(sp_mw);
+
                 vi_wr(base + VI_CSI_SW_RESET, 0xF);
                 vi_wr(base + VI_CSI_SW_RESET, 0x0);
                 vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                           CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
+                      << 8 | sp_id);
                 vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, cond << 8 | sp_mw);
                 vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
                 vi_flush(0);
-                usleep(150000);
-                uint32_t v1 = syncpt_read(sp_mw);
-                printf("  condition %2u: %s\n", cond,
-                       v1 != v0 ? "FIRES" : "-");
+
+                int w = 0, done = 0;
+                while (w < 2500 && !done) {
+                    nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
+                    for (unsigned i = 0; i < sizeof tail; i++)
+                        if (tail[i] != 0xA5) { done = 1; break; }
+                    if (!done) { usleep(1000); w++; }
+                }
+                printf("  condition %2u: %-5s  (frame %s, %dms)\n", cond,
+                       syncpt_read(sp_mw) != v0 ? "FIRES" : "-",
+                       done ? "whole" : (syncpt_read(sp_id) != fs0
+                                         ? "started only" : "never started"),
+                       w);
             }
             goto readback;
         }
@@ -1162,16 +1183,14 @@ int main(int argc, char **argv)
         for (int shot = 0; shot < shots; shot++) {
             uint32_t fs0 = syncpt_read(sp_id);
 
-            /* Clear the channel between shots the way the driver clears a
-             * single shot: a reset pulse on the channel. Without it the
-             * previous capture's state carries over, and the frame we read
-             * was torn -- the last shot writing part of the picture over
-             * what the one before it had left. */
-            if (shot) {
-                vi_wr(base + VI_CSI_SW_RESET, 0xF);
-                vi_wr(base + VI_CSI_SW_RESET, 0x0);
-                vi_flush(0);
-            }
+            /* Clear the channel before every shot, the first included. The
+             * driver clears a single shot with a reset pulse; we were only
+             * doing it between shots, and the first one never started --
+             * the bring-up leaves the parser enabled part way through a
+             * frame, and the trigger lands somewhere it cannot use. */
+            vi_wr(base + VI_CSI_SW_RESET, 0xF);
+            vi_wr(base + VI_CSI_SW_RESET, 0x0);
+            vi_flush(0);
 
             /* Wipe the buffer before the last shot, so what one frame writes
              * can be counted rather than inferred. The first shot after

@@ -544,7 +544,21 @@ int main(int argc, char **argv)
         vi_wr(T124_CILE_PAD_CONFIG0, 0x0);
         vi_wr(T124_PHY_CILE_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
 
-        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x00000202);
+        /* The front camera's brick lives in the UPPER half of this word.
+         * A full dump against a live stock session shows 0x10000000 there,
+         * where we had been writing 0x00000202 -- the lower half, which is
+         * the A/B brick. Every driver constant for the C/E side sits in the
+         * upper half too, so we had been enabling the wrong one all along.
+         * 0xAEC goes with it; stock holds a 2 there and we held nothing. */
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x10000000);
+        vi_wr(0xAEC, 0x00000002);
+
+        /* Leave the A/B brick alone: values left there by an earlier run on
+         * the rear port are not ours to keep. */
+        vi_wr(T124_CILA_PAD_CONFIG0, 0);
+        vi_wr(T124_PHY_CILA_CONTROL0, 0);
+        vi_wr(T124_CILB_PAD_CONFIG0, 0);
+        vi_wr(T124_PHY_CILB_CONTROL0, 0);
 
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
               (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |

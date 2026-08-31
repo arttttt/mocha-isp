@@ -806,7 +806,10 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t stride_y = (W + 63) & ~63u;
+    /* Planar YUV takes a byte per luma sample and half-width chroma; the
+     * packed forms take four bytes a pixel in one plane. */
+    int planar = (fmt & 0xFF) == 0xE6;
+    uint32_t stride_y = planar ? ((W + 63) & ~63u) : W * 4;
     uint32_t stride_uv = ((W / 2) + 63) & ~63u;
 
     uint32_t g[64];
@@ -1106,10 +1109,13 @@ int main(int argc, char **argv)
      * then the two chroma planes on 64K boundaries. Strides are the width
      * rounded up to 64, and the chroma planes are half of everything. */
     unsigned OH = vi_height ? vi_height : H;
-    uint32_t stride_y = (W + 63) & ~63u, stride_uv = ((W / 2) + 63) & ~63u;
+    int isp_planar = (isp_fmt & 0xFF) == 0xE6;
+    uint32_t stride_y = isp_planar ? ((W + 63) & ~63u) : W * 4;
+    uint32_t stride_uv = ((W / 2) + 63) & ~63u;
     uint32_t u_off = (stride_y * OH + 0xFFFF) & ~0xFFFFu;
     uint32_t v_off = (u_off + stride_uv * (OH / 2) + 0xFFFF) & ~0xFFFFu;
-    uint32_t out_bytes = v_off + stride_uv * (OH / 2);
+    uint32_t out_bytes = isp_planar ? v_off + stride_uv * (OH / 2)
+                                    : stride_y * OH;
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
     uint32_t work_iova = 0, stats_iova = 0;

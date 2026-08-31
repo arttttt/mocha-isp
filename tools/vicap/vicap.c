@@ -213,6 +213,7 @@ struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; 
 #define NVMAP_IOC_PIN_MULT   _IOWR(NVMAP_IOC_MAGIC, 10, struct nvmap_pin_handle)
 #define NVMAP_IOC_UNPIN_MULT _IOW(NVMAP_IOC_MAGIC, 11, struct nvmap_pin_handle)
 #define NVMAP_HEAP_IOVMM     (1 << 30)
+#define NVMAP_HEAP_CARVEOUT_GENERIC (1 << 0)
 #define NVMAP_HANDLE_WRITE_COMBINE 2
 
 /* ---- nvhost register access ---- */
@@ -388,8 +389,14 @@ static uint32_t nvmap_create(uint32_t size) {
     if (ioctl(nvmap_fd, NVMAP_IOC_CREATE, &ch) < 0) { perror("nvmap create"); return 0; }
     return ch.handle;
 }
+/* VI reaches memory through its own translation context, and an address
+ * that nvmap hands us for the virtual heap need not mean anything there --
+ * a write would go nowhere, silently, however right the rest is. Carveout
+ * is physically contiguous, so the address is the address. */
+static uint32_t alloc_heap = NVMAP_HEAP_IOVMM;
+
 static int nvmap_alloc(uint32_t h) {
-    struct nvmap_alloc_handle ah = { h, NVMAP_HEAP_IOVMM,
+    struct nvmap_alloc_handle ah = { h, alloc_heap,
                                      NVMAP_HANDLE_WRITE_COMBINE, 4096 };
     if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC, &ah) < 0) { perror("nvmap alloc"); return -1; }
     return 0;
@@ -444,6 +451,7 @@ int main(int argc, char **argv)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
+        else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strncmp(a, "--gain=", 7) == 0)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }

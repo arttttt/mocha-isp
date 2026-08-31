@@ -1127,17 +1127,12 @@ int main(int argc, char **argv)
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
         g[n++] = SINGLE_SHOT_CAPTURE;
 
-        /* Park the job here, on a counter nothing but us will move. The
-         * buffer's mapping into VI's address space belongs to this job, and
-         * until now the job finished immediately -- so the capture ran on
-         * afterwards against an address that was no longer translated, and
-         * the memory controller said so: a fault on the buffer's own base,
-         * and a picture that stops at whatever row it reached. */
-        hold_thresh = syncpt_read(sp_mw) + 1;
-        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-        g[n++] = (sp_mw << 24) | (hold_thresh & 0xFFFFFF);
-        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+        /* No parked job. Holding one here did keep the buffer mapped and did
+         * make the full-resolution capture complete -- but it also outlived
+         * the timeout the kernel allows more than once, and host1x kills the
+         * channel when a job overruns, which costs a reboot every time. A
+         * tool that cannot be run twice is worse than one that sometimes
+         * returns a short frame. */
 
         /* Retire the command buffer on a syncpoint of its own. It used to
          * share one with the frame-start condition, so that counter moved

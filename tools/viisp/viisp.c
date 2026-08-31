@@ -1162,6 +1162,10 @@ int main(int argc, char **argv)
     uint32_t gpp_gain = 0x3fff0000;
     int luma_lo = 0;
     uint32_t in_dims = 0x00780078, in_mode = 1, in_phase = 0;
+    /* The channel-to-ISP interface. Three is the only value anything names,
+     * and what the rest of the field means has never been looked at -- it
+     * is the one register on the VI side that describes the handover. */
+    uint32_t ispintf = ISPINTF_CONFIG_ENABLE;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1219,6 +1223,8 @@ int main(int argc, char **argv)
             in_mode = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-phase=", 11) == 0)
             in_phase = (uint32_t)strtoul(a + 11, 0, 16);
+        else if (strncmp(a, "--ispintf=", 10) == 0)
+            ispintf = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1425,7 +1431,7 @@ int main(int argc, char **argv)
         int n = 0;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
         if (isp_route & 1) { g[n++] = OP_INCR(0x099, 1);
-                             g[n++] = ISPINTF_CONFIG_ENABLE; }
+                             g[n++] = ispintf; }
         if (isp_route & 2) { g[n++] = OP_INCR(0x282, 1);
                              g[n++] = image_def; }
         g[n++] = OP_IMM(0, sp_cmd);
@@ -1742,7 +1748,7 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_IMAGE_DEF, image_def);
     /* The interface between the channel and the ISP. Nothing reaches the
      * ISP with this at zero, whatever the destination bits say. */
-    vi_wr(base + VI_CSI_ISPINTF_CONFIG, ISPINTF_CONFIG_ENABLE);
+    vi_wr(base + VI_CSI_ISPINTF_CONFIG, ispintf);
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
     /* The sensor keeps its own mode; this is only how many of its lines VI
@@ -1829,7 +1835,7 @@ int main(int argc, char **argv)
          * is worth knowing, so each is separately selectable. */
         if (isp_route & 1) {
             g[n++] = OP_INCR(0x099, 1);
-            g[n++] = ISPINTF_CONFIG_ENABLE;
+            g[n++] = ispintf;
         }
         if (isp_route & 2) {
             g[n++] = OP_INCR(0x282, 1);

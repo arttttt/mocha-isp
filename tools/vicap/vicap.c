@@ -442,6 +442,7 @@ struct nvhost32_submit_args {
 #define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
+#define TEGRA_VI_CFG_CG_CTRL            0x0B8
 #define T124_PPA_FRAME_START            9
 #define T124_PPB_FRAME_START            10
 #define T124_MWA_ACK_DONE               6
@@ -773,6 +774,12 @@ int main(int argc, char **argv)
 
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
+
+    /* The driver writes this the moment VI comes up and we never wrote it at
+     * all. It governs VI's internal clock gating, so with it unset the
+     * registers still answer -- nvhost powers the module for an ioctl -- and
+     * the write engine has no clock to run on. */
+    vi_wr(TEGRA_VI_CFG_CG_CTRL, 1);
 
     if (scan_cil) {
         /* Which brick does this sensor actually arrive on? Nothing we have

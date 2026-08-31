@@ -263,6 +263,7 @@ int main(int argc, char **argv)
     const char *sensor = "ov5693";
     int use_sensor = 1, dump = 0, front = 1;
     uint32_t image_def = 0x00200004;
+    uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -278,6 +279,12 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump") == 0)        dump = 1;
         else if (strncmp(a, "--image-def=", 12) == 0)
             image_def = (uint32_t)strtoul(a + 12, 0, 16);
+        else if (strncmp(a, "--frame-length=", 15) == 0)
+            frame_length = (uint32_t)strtoul(a + 15, 0, 0);
+        else if (strncmp(a, "--coarse=", 9) == 0)
+            coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--gain=", 7) == 0)
+            gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -321,11 +328,18 @@ int main(int argc, char **argv)
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
         if (front) {
             /* Opening the node already powered it; just pick a mode. */
+            /* The driver writes the mode table and then writes exposure
+             * from these fields unconditionally -- passing zeros programs
+             * the sensor with no frame length and no integration time,
+             * which is a part that streams nothing. */
             struct ov5693_mode m;
             memset(&m, 0, sizeof m);
             m.res_x = (int)W;
             m.res_y = (int)H;
             m.fps = 30;
+            m.frame_length = frame_length;
+            m.coarse_time = coarse_time;
+            m.gain = (uint16_t)gain;
             if (ioctl(sfd, OV5693_IOCTL_SET_MODE, &m) < 0)
                 printf("sensor mode: %s\n", strerror(errno));
             else

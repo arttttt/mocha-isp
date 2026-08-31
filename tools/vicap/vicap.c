@@ -37,6 +37,17 @@ struct sensor_mode {
 #define SENSOR_IOCTL_SET_MODE   _IOW('o', 1, struct sensor_mode)
 #define SENSOR_IOCTL_SET_POWER  _IOW('o', 20, uint32_t)
 
+/* The front sensor has its own shape entirely: a wider mode struct, and no
+ * power call at all -- opening the node powers it up and closing it powers
+ * it down. Modes: 2592x1944, 1920x1080, 1296x972, 1280x720. */
+struct ov5693_mode {
+    int res_x, res_y, fps;
+    uint32_t frame_length, coarse_time, coarse_time_short;
+    uint16_t gain;
+    uint8_t hdr_en;
+};
+#define OV5693_IOCTL_SET_MODE   _IOW('o', 1, struct ov5693_mode)
+
 /* ---- nvmap ---- */
 #define NVMAP_IOC_MAGIC 'N'
 struct nvmap_create_handle {
@@ -109,6 +120,17 @@ struct regrdwr_args {
 #define T124_CSI_CIL_A_STATUS                0x93C
 #define T124_CSI_CILA_STATUS                 0x940
 #define T124_CILB_PAD_CONFIG0                0x960
+#define T124_PP_B_INPUT_STREAM_CONTROL       0x86C
+#define T124_PP_B_PIXEL_STREAM_CONTROL0      0x870
+#define T124_PP_B_PIXEL_STREAM_CONTROL1      0x874
+#define T124_PP_B_PIXEL_STREAM_GAP           0x878
+#define T124_PP_B_PIXEL_STREAM_PP_COMMAND    0x87C
+#define T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME 0x880
+#define T124_PP_B_PIXEL_STREAM_PP_INT_MASK   0x884
+#define T124_PP_B_PIXEL_PARSER_STATUS        0x888
+#define T124_CILE_PAD_CONFIG0                0xA08
+#define T124_PHY_CILE_CONTROL0               0xA10
+#define T124_CSI_CIL_E_INT_MASK              0xA14
 #define T124_PHY_CILB_CONTROL0               0x968
 #define T124_CSI_CIL_B_INT_MASK              0x96C
 /* The CSI block sits at 0x838 in the VI aperture: 0x838+0xF4 is CILA and
@@ -198,16 +220,25 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *d, uint32_t n, int wr) {
 
 int main(int argc, char **argv)
 {
-    unsigned W = 1920, H = 1080, port = 0;
-    const char *sensor = "imx179";
-    int use_sensor = 1, dump = 0;
+    /* Default to the front camera: it is the one that still works through
+     * the stock app, so its live register values are on record and a
+     * mismatch means our configuration, not the hardware. The rear does not
+     * stream through the camera stack at all, which leaves any negative
+     * result there impossible to attribute. */
+    unsigned W = 1920, H = 1080, port = 1;
+    const char *sensor = "ov5693";
+    int use_sensor = 1, dump = 0, front = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
         else if (strncmp(a, "--height=", 9) == 0) H = (unsigned)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--port=", 7) == 0)   port = (unsigned)strtoul(a + 7, 0, 0);
-        else if (strncmp(a, "--sensor=", 9) == 0) sensor = a + 9;
+        else if (strncmp(a, "--sensor=", 9) == 0) {
+            sensor = a + 9;
+            front = (strcmp(sensor, "ov5693") == 0);
+            if (!front) port = 0;
+        }
         else if (strcmp(a, "--no-sensor") == 0)   use_sensor = 0;
         else if (strcmp(a, "--dump") == 0)        dump = 1;
         else { printf("unknown option %s\n", a); return 1; }
@@ -251,14 +282,27 @@ int main(int argc, char **argv)
         snprintf(sn, sizeof sn, "/dev/%s", sensor);
         sfd = open(sn, O_RDWR);
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
-        uint32_t on = 1;
-        if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
-            printf("sensor power: %s\n", strerror(errno));
-        struct sensor_mode m = { (int)W, (int)H, 0, 0, 0 };
-        if (ioctl(sfd, SENSOR_IOCTL_SET_MODE, &m) < 0)
-            printf("sensor mode: %s\n", strerror(errno));
-        else
-            printf("sensor streaming at %ux%u\n", W, H);
+        if (front) {
+            /* Opening the node already powered it; just pick a mode. */
+            struct ov5693_mode m;
+            memset(&m, 0, sizeof m);
+            m.res_x = (int)W;
+            m.res_y = (int)H;
+            m.fps = 30;
+            if (ioctl(sfd, OV5693_IOCTL_SET_MODE, &m) < 0)
+                printf("sensor mode: %s\n", strerror(errno));
+            else
+                printf("sensor streaming at %ux%u\n", W, H);
+        } else {
+            uint32_t on = 1;
+            if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
+                printf("sensor power: %s\n", strerror(errno));
+            struct sensor_mode m = { (int)W, (int)H, 0, 0, 0 };
+            if (ioctl(sfd, SENSOR_IOCTL_SET_MODE, &m) < 0)
+                printf("sensor mode: %s\n", strerror(errno));
+            else
+                printf("sensor streaming at %ux%u\n", W, H);
+        }
     }
 
     /* CSI receiver bring-up, in the order csi.c does it for a T124 with the
@@ -268,6 +312,38 @@ int main(int argc, char **argv)
      * and the buffer kept its fill pattern. Offsets are the absolute ones
      * from t124_registers.h, the same space the PP command already
      * answered in. */
+    /* For the front camera these are not derived values -- they are what a
+     * live stock session actually had in these registers, read back while
+     * its preview was running. Copying them verbatim is the point: if the
+     * capture still does not happen with the working configuration in
+     * place, the missing piece is somewhere other than the CSI setup. */
+    if (front) {
+        printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");
+        vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
+
+        vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+        vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
+        vi_wr(T124_CILE_PAD_CONFIG0, 0x0);
+        vi_wr(T124_PHY_CILE_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
+
+        uint32_t cil = vi_rd(T124_CSI_PHY_CIL_COMMAND);
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x00000202);
+        printf("  PHY_CIL_COMMAND 0x%08x -> 0x00000202\n", cil);
+
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
+              (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x080301f1);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1,
+              (0x1u << CSI_PP_TOP_FIELD_FRAME_OFFSET) |
+              (0x1u << CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET));
+        vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
+        vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
+        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x007f0014);
+        vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
+    } else {
     printf("bringing up the CSI receiver (port A, 4 lanes)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
 
@@ -310,6 +386,7 @@ int main(int argc, char **argv)
     vi_wr(T124_PP_A_INPUT_STREAM_CONTROL,
           (0x3fu << CSI_SKIP_PACKET_THRESHOLD_OFFSET) | (4 - 1));
     vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
+    }
 
     /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
      * is 1 here: we want the raw bayer in memory, not a converted image. */

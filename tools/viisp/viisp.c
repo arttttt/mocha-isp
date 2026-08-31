@@ -1051,6 +1051,48 @@ int main(int argc, char **argv)
         free(p);
     }
 
+    /* Routing before the sensor streams. The driver is explicit about the
+     * order -- the pixel path has to be configured before the sensor starts
+     * -- and sending it afterwards is what made the frame start vanish:
+     * writing the image definition through host1x while the wire was
+     * already live killed the capture, though the same value written to the
+     * same register by hand did not.
+     *
+     * A job of its own that carries nothing and finishes at once: no
+     * relocation to keep alive, nothing to park on. */
+    if (isp_route && !(image_def & IMAGE_DEF_DEST_MEM)) {
+        uint32_t cmd_h = nvmap_create(4096);
+        nvmap_alloc(cmd_h);
+        uint32_t g[10];
+        int n = 0;
+        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+        if (isp_route & 1) { g[n++] = OP_INCR(0x099, 1);
+                             g[n++] = ISPINTF_CONFIG_ENABLE; }
+        if (isp_route & 2) { g[n++] = OP_INCR(0x282, 1);
+                             g[n++] = image_def; }
+        g[n++] = OP_IMM(0, sp_cmd);
+        nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+        struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+        struct nvhost_syncpt_incr si = { sp_cmd, 1 };
+        uint32_t cls = VI_CLASS_ID;
+        struct nvhost_fence fence = { 0, 0 };
+        struct nvhost32_submit_args sa;
+        memset(&sa, 0, sizeof sa);
+        sa.num_syncpt_incrs = 1;
+        sa.num_cmdbufs = 1;
+        sa.timeout = 3000;
+        sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+        sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+        sa.class_ids = (uint32_t)(uintptr_t)&cls;
+        sa.fences = (uint32_t)(uintptr_t)&fence;
+        errno = 0;
+        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+        printf("VI routing via host1x (mask %u): %d words, rc=%d (%s)\n",
+               isp_route, n, rc, rc == 0 ? "ok" : strerror(errno));
+        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    }
+
     int sfd = -1;
     if (use_sensor) {
         char sn[64];
@@ -1410,44 +1452,6 @@ int main(int argc, char **argv)
      * kernel caps its timeout at ten seconds and a run with retries in it
      * goes past that. Nothing here goes through host1x on the VI side at
      * all; the routing and the trigger are plain register writes. */
-    /* The routing methods on their own, in a job that carries nothing and
-     * finishes at once -- no relocation to keep alive, nothing to park on.
-     * The driver's note says register writes set the bits without opening
-     * the pixel path and only the methods do; sending both together made
-     * the frame start disappear, so each is selectable. */
-    if (isp_route && !(image_def & IMAGE_DEF_DEST_MEM)) {
-        uint32_t cmd_h = nvmap_create(4096);
-        nvmap_alloc(cmd_h);
-        uint32_t g[10];
-        int n = 0;
-        g[n++] = OP_SETCLASS(VI_CLASS_ID);
-        if (isp_route & 1) { g[n++] = OP_INCR(0x099, 1);
-                             g[n++] = ISPINTF_CONFIG_ENABLE; }
-        if (isp_route & 2) { g[n++] = OP_INCR(0x282, 1);
-                             g[n++] = image_def; }
-        g[n++] = OP_IMM(0, sp_cmd);
-        nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
-
-        struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-        struct nvhost_syncpt_incr si = { sp_cmd, 1 };
-        uint32_t cls = VI_CLASS_ID;
-        struct nvhost_fence fence = { 0, 0 };
-        struct nvhost32_submit_args sa;
-        memset(&sa, 0, sizeof sa);
-        sa.num_syncpt_incrs = 1;
-        sa.num_cmdbufs = 1;
-        sa.timeout = 3000;
-        sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
-        sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-        sa.class_ids = (uint32_t)(uintptr_t)&cls;
-        sa.fences = (uint32_t)(uintptr_t)&fence;
-        errno = 0;
-        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-        printf("VI routing via host1x (mask %u): %d words, rc=%d (%s)\n",
-               isp_route, n, rc, rc == 0 ? "ok" : strerror(errno));
-        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
-    }
-
     if (image_def & IMAGE_DEF_DEST_MEM) {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);

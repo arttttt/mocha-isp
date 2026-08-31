@@ -41,6 +41,46 @@
 #define PMC_DPD_CODE_OFF    0x40000000u
 #define PMC_DPD_BIT_CSIE    (1u << 12)
 
+/* The receiver's own clocks. Reading the clock controller shows csi (bit
+ * 20 of the H group) and cile (bit 18 of W) switched off, while vi_sensor
+ * is on -- so the registers accept everything, because nvhost powers VI for
+ * the duration of an ioctl, and the lane interface still cannot receive.
+ * Enabling them from outside does not hold: the kernel gates them again
+ * during the run. So they go on here, in the same window as the shot.
+ * Numbers from the stock kernel's clock table; the set registers only set
+ * bits, which is why they are used rather than a read-modify-write. */
+#define CAR_BASE            0x60006000UL
+#define CAR_ENB_SET_H       0x328
+#define CAR_ENB_SET_W       0x448
+#define CAR_CSI_BIT_H       (1u << 20)
+#define CAR_CILE_BIT_W      (1u << 18)
+
+static int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    unsigned long base = addr & ~(unsigned long)(page - 1);
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) return -1;
+    void *m = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   fd, (off_t)base);
+    if (m == MAP_FAILED) { close(fd); return -1; }
+    volatile uint32_t *r = (volatile uint32_t *)((char *)m + (addr - base));
+    if (before) *before = *r;
+    *r = val;
+    __sync_synchronize();
+    munmap(m, (size_t)page * 2);
+    close(fd);
+    return 0;
+}
+
+static void car_enable_csi_clocks(void)
+{
+    uint32_t b1 = 0, b2 = 0;
+    mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H, &b1);
+    mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
+    printf("  receiver clocks on: H 0x%08x, W 0x%08x\n", b1, b2);
+}
+
 static int pmc_dpd_release(uint32_t bit)
 {
     long page = sysconf(_SC_PAGESIZE);
@@ -426,6 +466,7 @@ int main(int argc, char **argv)
      * capture still does not happen with the working configuration in
      * place, the missing piece is somewhere other than the CSI setup. */
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
+    car_enable_csi_clocks();
 
     if (front) {
         printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");

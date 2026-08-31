@@ -970,12 +970,58 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
  * words are the rear camera's, because that is whose block this is. */
 static int isp_init_a(int fd, uint32_t sp)
 {
-    uint32_t cmd_h = nvmap_create(8192);
+    uint32_t cmd_h = nvmap_create(32768);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t g[512];
+    uint32_t *g = malloc(8192 * 4);
     unsigned n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_A);
+
+    /* The clearing pass first, twice, exactly as this block gets it -- our
+     * earlier version jumped straight to the runtime values and sent a
+     * couple of hundred words where stock sends thousands. */
+    {
+        static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
+            { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
+            { 0x700, 16, 0 }, { 0x750, 16, 0 },
+            { 0xD00, 10, 0 }, { 0xD0A, 1, 0 }, { 0xD0B, 480, 1 },
+            { 0xD0C, 2, 0 }, { 0xD20, 6, 0 },
+            { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
+            { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
+            { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
+            { 0x910, 9, 0 }, { 0x919, 1, 0 },
+            { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
+            { 0x91E, 9, 1 },
+            { 0x506, 9, 0 }, { 0x600, 16, 0 },
+            { 0x650, 1, 0 },
+            { 0x651, 1, 0 }, { 0x652, 257, 1 },
+            { 0x653, 1, 0 }, { 0x654, 257, 1 },
+            { 0x655, 1, 0 }, { 0x656, 257, 1 },
+            { 0x657, 1, 0 }, { 0x658, 257, 1 },
+            { 0x300, 4, 0 }, { 0x304, 4, 0 }, { 0x053, 2, 0 },
+        };
+        for (int pass = 0; pass < 2; pass++) {
+            for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
+                g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
+                                     : OP_INCR(z[k].m, z[k].n);
+                for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
+            }
+            g[n++] = OP_NONINCR(0x91A, 9);
+            for (int i = 0; i < 8; i++) g[n++] = 0;
+            g[n++] = 0x00000200;
+            g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
+            g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
+            g[n++] = OP_INCR(0x018, 5);
+            g[n++] = 0x00000000; g[n++] = 0x00000400;
+            g[n++] = 0x00000000; g[n++] = 0x00000200;
+            g[n++] = pass ? 0x00000001 : 0x00000002;
+            if (!pass) {
+                g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
+                g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
+                g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
+            }
+        }
+    }
 
     g[n++] = OP_INCR(0x400, 12);
     g[n++] = 0x00000001; g[n++] = 0x004b0000;
@@ -1102,6 +1148,7 @@ static int isp_init_a(int fd, uint32_t sp)
     int rc = ioctl(fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
     printf("ISP-A configured: %u words, rc=%d (%s)\n", n, rc,
            rc == 0 ? "ok" : strerror(errno));
+    free(g);
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }

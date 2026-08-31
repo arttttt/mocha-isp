@@ -418,7 +418,7 @@ int main(int argc, char **argv)
     int use_sensor = 1, dump = 0, front = 1;
     uint32_t image_def = 0x00200004;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
-    int hold = 0;
+    int hold = 0, dump_regs = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -439,6 +439,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
+        else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strncmp(a, "--gain=", 7) == 0)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
@@ -664,6 +665,19 @@ int main(int argc, char **argv)
            vi_rd(front ? 0xA1C : T124_CSI_CILA_STATUS),
            vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
                        : T124_PP_A_PIXEL_PARSER_STATUS));
+
+    /* The channel is exclusive, so nothing outside this process can read
+     * the aperture while we hold it -- and picking ranges by hand is how a
+     * difference gets missed. Dump the lot and diff it against a stock
+     * session offline. */
+    if (dump_regs) {
+        printf("=== VI aperture ===\n");
+        for (uint32_t o = 0; o < 0xC00; o += 4) {
+            uint32_t v = vi_rd(o);
+            if (v && v != 0xdeadbeef) printf("  +0x%03x = 0x%08x\n", o, v);
+        }
+        printf("=== end ===\n");
+    }
 
     uint32_t err = vi_rd(base + VI_CSI_ERROR_STATUS);
     printf("ERROR_STATUS = 0x%08x, SINGLE_SHOT = 0x%08x\n",

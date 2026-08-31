@@ -610,10 +610,11 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  * 0x054 takes 0, and there is deliberately no trigger at the end. */
 #include "isp_b_cal.h"
 
-static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
+static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
+                    uint32_t work_iova, uint32_t stats_iova)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
-    uint32_t bytes = (words + 8) * 4;
+    uint32_t bytes = (words + 256) * 4;
     uint32_t cmd_h = nvmap_create((bytes + 4095) & ~4095u);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
@@ -631,6 +632,132 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
     g[n++] = 0x00000000; g[n++] = 0x00000400;
     g[n++] = 0x00000000; g[n++] = 0x00000200;
     g[n++] = 0x00000001;
+
+    /* The runtime configuration, ported from the driver's streaming init
+     * for ISP-B. The calibration blob alone left the block completing
+     * frames and writing black, and the reason is here: the input stage is
+     * never switched on without 0x200, and the processing channels have
+     * nowhere to work without the addresses in 0x700 and 0x750. None of
+     * this appears in the per-frame trace because stock had already sent it
+     * at init. */
+    g[n++] = OP_INCR(0x400, 12);
+    g[n++] = 0x00000001; g[n++] = 0x004b0000;
+    g[n++] = 0x00930000; g[n++] = 0x00220000;
+    g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
+    g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
+    g[n++] = 0x00030000; g[n++] = 0x00000000;
+    g[n++] = 0x00020000; g[n++] = 0x00000000;
+
+    g[n++] = OP_INCR(0x800, 3);
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0x820, 3);
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
+
+    g[n++] = OP_INCR(0x930, 18);
+    g[n++] = 0x0000001c; g[n++] = 0x88888888;
+    g[n++] = 0x78787800; g[n++] = 0x00000078;
+    g[n++] = 0x88888888; g[n++] = 0x78787800;
+    g[n++] = 0x00000078; g[n++] = 0x88888888;
+    g[n++] = 0x78787800; g[n++] = 0x00000078;
+    g[n++] = 0x88888888; g[n++] = 0x78787800;
+    g[n++] = 0x00000078; g[n++] = 0x3fc00000;
+    g[n++] = 0x00000000; g[n++] = 0x00070000;
+    g[n++] = 0x00000000; g[n++] = 0x00070000;
+
+    g[n++] = OP_INCR(0xC00, 3);
+    g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
+
+    /* The input stage: dimensions, then the enable, then stride and format. */
+    g[n++] = OP_INCR(0x202, 3);
+    g[n++] = 0x00000001; g[n++] = 0x00780078; g[n++] = 0x00780078;
+    g[n++] = OP_INCR(0x200, 2);
+    g[n++] = 0x00000001; g[n++] = 0x00000000;
+    g[n++] = OP_INCR(0x205, 4);
+    g[n++] = 0x00000000; g[n++] = 0x000600c8;
+    g[n++] = 0x000f000f; g[n++] = 0x00000000;
+
+    g[n++] = OP_INCR(0x700, 16);
+    g[n++] = 0x00000001; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00001a40;
+    g[n++] = 0x00000000; g[n++] = work_iova + 0x30000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00001000; g[n++] = 0x00001a00;
+    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+
+    g[n++] = OP_INCR(0x750, 16);
+    g[n++] = 0x00000003; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+
+    g[n++] = OP_INCR(0xD20, 6);
+    g[n++] = 0x00001101; g[n++] = 0x00000000;
+    g[n++] = 0x00210000; g[n++] = 0x00210000;
+    g[n++] = 0x00210000; g[n++] = 0x00210000;
+
+    g[n++] = OP_INCR(0x900, 2);
+    g[n++] = 0x00000001; g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x904, 2);
+    g[n++] = 0x00005555; g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
+
+    g[n++] = OP_INCR(0x920, 10);
+    g[n++] = 0x00000002; g[n++] = work_iova + 0x31660;
+    g[n++] = 0x00000000; g[n++] = work_iova + 0x3f4a0;
+    g[n++] = 0x0000fa80; g[n++] = work_iova + 0x30000;
+    g[n++] = 0x00001c50; g[n++] = work_iova + 0x20000;
+    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+
+    g[n++] = OP_INCR(0x909, 7);
+    g[n++] = 0x00000001; g[n++] = 0xfc000f00;
+    g[n++] = 0xf680f320; g[n++] = 0x0d80fde0;
+    g[n++] = 0x00000030; g[n++] = 0x1400002a;
+    g[n++] = 0x3c00002b;
+
+    g[n++] = OP_INCR(0x910, 9);
+    g[n++] = 0x00000003; g[n++] = 0x00000028;
+    g[n++] = 0x01480029; g[n++] = 0x0003030b;
+    g[n++] = 0x00990030; g[n++] = 0x00000800;
+    g[n++] = 0x007b0666; g[n++] = 0x00000036;
+    g[n++] = 0x00001f1f;
+
+    g[n++] = OP_INCR(0x91B, 1); g[n++] = 0x00000000;
+    g[n++] = OP_NONINCR(0x91C, 9);
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0x00000001; g[n++] = 0x00000025;
+    g[n++] = 0x00000000; g[n++] = 0x00000026; g[n++] = 0x00000361;
+    g[n++] = OP_INCR(0x91D, 1); g[n++] = 0x00000000;
+    g[n++] = OP_NONINCR(0x91E, 9);
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0; g[n++] = 0x00000780;
+    g[n++] = 0; g[n++] = 0x00000780; g[n++] = 0x00000200;
+    g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000032;
+
+    g[n++] = OP_INCR(0x506, 9);
+    g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
+    g[n++] = 0x04c1304c; g[n++] = 0x08220882;
+    g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
+    g[n++] = 0x08621886; g[n++] = 0x01204812;
+    g[n++] = 0x06e1b86e;
+
+    g[n++] = OP_INCR(0x600, 16);
+    g[n++] = 0x00000005; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
+    g[n++] = 0x3fff0000; g[n++] = work_iova + 0x31000;
+
+    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
+    g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
     memcpy(&g[n], isp_b_cal_data, words * 4);
     n += words;
@@ -981,6 +1108,7 @@ int main(int argc, char **argv)
     uint32_t out_bytes = v_off + stride_uv * (OH / 2);
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
+    uint32_t work_iova = 0, stats_iova = 0;
     uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
     uint32_t isp_base_mem = 0, isp_base_stats = 0, isp_base_loadv = 0;
     if (isp_fd < 0) {
@@ -1043,12 +1171,14 @@ int main(int argc, char **argv)
 
         /* A scratch buffer the ISP wants for its own working state. The
          * reprocess tool calls it required for a cold start. */
+        /* Big enough for the offsets the runtime configuration hands out --
+         * it reaches 0x3f4a0 into this buffer. */
         work_h = nvmap_create(512 * 1024);
-        if (work_h && nvmap_alloc(work_h) == 0) nvmap_pin(work_h);
+        if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
 
         stats_h = nvmap_create(64 * 1024);
         if (stats_h && nvmap_alloc(stats_h) == 0) {
-            nvmap_pin(stats_h);
+            stats_iova = nvmap_pin(stats_h);
             /* Filled with a pattern of its own, so what the ISP puts there
              * is distinguishable from what was never touched. */
             void *p = malloc(64 * 1024);
@@ -1064,7 +1194,8 @@ int main(int argc, char **argv)
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
-            isp_init(isp_fd, work_h, isp_enable, isp_sp);
+            isp_init(isp_fd, work_h, isp_enable, isp_sp,
+                     work_iova, stats_iova);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

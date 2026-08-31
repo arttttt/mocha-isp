@@ -220,6 +220,18 @@ static void mipi_calibrate_csie(void)
     printf("  MIPI calibration: status 0x%08x after %d polls (%s%s)\n",
            st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done",
            (st & MIPI_CAL_ACTIVE) ? ", still active" : "");
+    {
+        /* Read back what the block actually holds. A calibration that stays
+         * active tells us nothing about which of the writes landed. */
+        uint32_t ctrl = 0, b0 = 0, b2 = 0, ce = 0, c2 = 0;
+        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CTRL, &ctrl);
+        mem_rd(MIPI_CAL_BASE + MIPI_BIAS_PAD_CFG0, &b0);
+        mem_rd(MIPI_CAL_BASE + MIPI_BIAS_PAD_CFG2, &b2);
+        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CILE_CFG, &ce);
+        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CSIE_CFG2, &c2);
+        printf("    ctrl=%08x bias0=%08x bias2=%08x cile=%08x csie2=%08x\n",
+               ctrl, b0, b2, ce, c2);
+    }
 
     /* 9. Leave the selection as the driver leaves it. */
     mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);

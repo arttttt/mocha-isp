@@ -311,6 +311,7 @@ int main(int argc, char **argv)
     int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
     int opt_teardown = 1;                   /* quiesce the ISP on the way out */
+    int opt_dump = 1;                       /* write the surface to a file */
     int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     uint32_t r200[2], r202[3], r205[4];
@@ -340,6 +341,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
+        else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
         else if (strncmp(a, "--r400=", 7) == 0) {
             n400 = parse_words(a + 7, r400, 12); opt_blk400 = 1;
@@ -1261,7 +1263,11 @@ int main(int argc, char **argv)
     }
 
     /* Dump: the whole surface, plus one file per plane so a multi-plane
-     * output can be looked at without slicing it by hand on the host. */
+     * output can be looked at without slicing it by hand. Skipped by
+     * --no-dump: a sweep only needs the numbers above, and the dump is
+     * some thirty megabytes of nvmap reads and a file write per run. */
+    if (!opt_dump) printf("Dump: skipped (--no-dump)\n");
+    if (opt_dump)
     {
         uint8_t *buf = malloc(chunk);
         char outpath[160];

@@ -215,12 +215,22 @@ static void layout_build(struct out_layout *L, uint32_t fmt)
     L->total = off;
 }
 
+/* Named after the FORMAT, not after how many triplets we happen to push:
+ * with --out-planes=3 on RGBA the extra triplets are still packed pixels. */
 static const char *plane_name(const struct out_layout *L, int i)
 {
-    if (L->planes == 1) return "packed";
-    if (i == 0) return "Y";
-    if (L->planes == 2) return "UV";
-    return i == 1 ? "U" : "V";
+    switch (L->fmt & 0xFF) {
+    case 0xE6: return i == 0 ? "Y" : (i == 1 ? "U" : "V");
+    case 0xE7: return i == 0 ? "Y" : "UV";
+    default:   return "packed";
+    }
+}
+
+/* 4 for a packed RGBA surface, 1 otherwise -- again a property of the
+ * format alone, so an --out-planes override cannot switch the stats off. */
+static int plane_channels(const struct out_layout *L)
+{
+    return (L->fmt & 0xFF) == 0x43 ? 4 : 1;
 }
 
 int main(int argc, char **argv)
@@ -239,6 +249,7 @@ int main(int argc, char **argv)
 "  Input:     --in-fmt=0xN                    E33 code (default 0x10200024)\n"
 "             --in-swaprb                     swap R/B bayer sites in RAM\n"
 "             --rgba-in                       input is RGBA, not bayer\n"
+"  ISP:       --isp-enable=0xN                reg 0x015 (default 0x7)\n"
 "  Colour:    --curve=identity|scurve         tone curves (default identity)\n"
 "             --gpp-gain=0xWORD               0x600 words 12..14 (def 0x3fff0000)\n"
 "             --ccm=w0,w1,..,w7               push CCM 0x300/0x304 (default: off)\n"
@@ -262,6 +273,7 @@ int main(int argc, char **argv)
     uint32_t out_fmt = 0x43;            /* RGBA unless asked otherwise */
     int have_e02_hi = 0;
     uint32_t opt_e02_hi = 0;
+    uint32_t opt_isp_enable = 0x00000007;   /* from blob gather RE */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -279,6 +291,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--v-offset=", 11) == 0)  opt_v_offset = strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--out-e03=", 10) == 0)   opt_e03 = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)     opt_in_fmt = strtoul(a + 9, 0, 16);
+        else if (strncmp(a, "--isp-enable=", 13) == 0) opt_isp_enable = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
         else if (strcmp(a, "--rgba-in") == 0)         rgba_input = 1;
         else if (strncmp(a, "--curve=", 8) == 0)      opt_scurve = (strcmp(a + 8, "scurve") == 0);
@@ -303,8 +316,12 @@ int main(int argc, char **argv)
         }
         else if (a[0] == '-') { printf("unknown option: %s\n", a); return 1; }
     }
-    /* positional format word still wins (legacy call sites) */
+    /* Legacy positional format / isp-enable. Both are only positional when
+     * they are not options: an unguarded argv[3] silently turned --height=
+     * into ISP_ENABLE=0 and quietly changed what the run measured. */
     if (argc > 2 && argv[2][0] != '-') out_fmt = strtoul(argv[2], NULL, 16);
+    if (argc > 3 && argv[3][0] != '-' && argv[2][0] != '-')
+        opt_isp_enable = strtoul(argv[3], NULL, 16);
     /* a bare low byte gets the default high halfword for that format */
     if (out_fmt <= 0xFF && (out_fmt == 0xE6 || out_fmt == 0xE7)) out_fmt |= 0x01000000;
     if (have_e02_hi) out_fmt = (out_fmt & 0x0000FFFF) | (opt_e02_hi << 16);
@@ -351,6 +368,7 @@ int main(int argc, char **argv)
     printf("Colour: curve=%s gpp-gain=0x%08x ls=%s ccm=%s swaprb=%d\n",
            opt_scurve ? "scurve" : "identity", opt_gpp_gain,
            opt_no_ls ? "off" : "on", have_ccm ? "set" : "off", opt_swaprb);
+    printf("ISP_ENABLE=0x%08x e03=0x%08x\n", opt_isp_enable, opt_e03);
 
     /* Open devices */
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
@@ -881,8 +899,7 @@ int main(int argc, char **argv)
 
     /* ISP_ENABLE — try different values */
     cmd[n++] = OP_INCR(0x015, 1);
-    uint32_t isp_enable = 0x00000007;  /* from blob gather RE */
-    if (argc > 3) isp_enable = strtoul(argv[3], NULL, 16);
+    uint32_t isp_enable = opt_isp_enable;
     cmd[n++] = isp_enable;
     printf("ISP_ENABLE: 0x%08x\n", isp_enable);
 
@@ -988,7 +1005,7 @@ int main(int argc, char **argv)
             uint32_t lo[4] = { 255, 255, 255, 255 }, hi[4] = { 0, 0, 0, 0 };
             uint64_t sum[4] = { 0, 0, 0, 0 };
             uint32_t cnt[4] = { 0, 0, 0, 0 };
-            int chans = (L.planes == 1 && (L.fmt & 0xFF) == 0x43) ? 4 : 1;
+            int chans = plane_channels(&L);
             for (uint32_t off = 0; off < sz; off += chunk) {
                 uint32_t part = (sz - off < (uint32_t)chunk) ? sz - off : (uint32_t)chunk;
                 if (nvmap_read(out_h, L.offset[pl] + off, buf, part) < 0) break;
@@ -1029,7 +1046,9 @@ int main(int argc, char **argv)
             fclose(fp);
             printf("Saved %s (%u bytes)\n", outpath, L.total);
         }
-        if (L.planes > 1) {
+        /* Per-plane files only for a genuinely multi-plane format: on a
+         * packed surface with --out-planes=3 they would be copies. */
+        if (L.planes > 1 && plane_channels(&L) == 1) {
             for (int pl = 0; pl < L.planes; pl++) {
                 if (!L.size[pl]) continue;
                 snprintf(outpath, sizeof(outpath),

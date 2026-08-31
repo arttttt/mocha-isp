@@ -620,6 +620,18 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
     uint32_t *g = malloc(bytes);
     unsigned n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* The DMA configuration, and this is one of the places where streaming
+     * and reprocess genuinely differ. Stock streams into block-linear
+     * buffers and its values here say so; ours are ordinary pitch-linear
+     * allocations, which take the reprocess thresholds with the last word
+     * set to one rather than two. Sending the reprocess pair, as we were,
+     * describes neither. */
+    g[n++] = OP_INCR(0x018, 5);
+    g[n++] = 0x00000000; g[n++] = 0x00000400;
+    g[n++] = 0x00000000; g[n++] = 0x00000200;
+    g[n++] = 0x00000001;
+
     memcpy(&g[n], isp_b_cal_data, words * 4);
     n += words;
     g[n - 2] = 0x00000001;                /* 0x053 */
@@ -836,7 +848,10 @@ int main(int argc, char **argv)
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
      * frame that came from VI rather than from memory. */
-    uint32_t isp_fmt = 0x04FE00E6, isp_e03 = 0;
+    /* Pitch-linear planar YUV. The 0x04FE00E6 in the stock trace is the
+     * block-linear form and wants buffers allocated as such; ours are
+     * ordinary ones. */
+    uint32_t isp_fmt = 0x010000E6, isp_e03 = 0;
     uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
     /* Which of the two routing writes go through host1x methods rather than
      * registers: bit 0 the ISP interface, bit 1 the image definition. */

@@ -613,7 +613,7 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
-                    uint32_t gpp_gain)
+                    uint32_t gpp_gain, int luma_lo)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -642,19 +642,30 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * nowhere to work without the addresses in 0x700 and 0x750. None of
      * this appears in the per-frame trace because stock had already sent it
      * at init. */
-    /* Everything from here to the calibration blob is the driver's
-     * streaming init, and none of it appears in the stock per-frame trace
-     * -- stock sent it at open time, and whether every block of it is right
-     * is not settled. Since the output comes back with one channel and the
-     * others exactly zero, the blocks that touch channels are worth being
-     * able to leave out one at a time. */
+    /* Everything from here to the calibration blob is the streaming init
+     * from the 24.1 driver -- which is the owner's own reconstruction, not
+     * anything from the vendor, so it is a hypothesis rather than a
+     * reference. None of it appears in the stock traces either, those
+     * carrying only the per-frame gather. Bit 3 drops the whole of it, so
+     * the ISP can be given nothing but what the traces actually show. */
+    if (!(skip & 0x08)) {
+
     if (!(skip & 0x01)) {
         /* The three words after the enable are 75, 147 and 34 -- the BT.601
          * luma weights, which is what folding three channels into one looks
          * like. */
+        /* 75, 147 and 34 -- the BT.601 luma weights -- and the driver puts
+         * them in the high half of each word. If the hardware reads them
+         * from the low half, the luma comes out zero, and a zero luma is
+         * exactly what the planar output shows: an empty Y plane with the
+         * chroma carrying the picture. In the packed forms that same zero
+         * luma leaves red alive and clamps green and blue to nothing, which
+         * is what we have been calling "only red". Worth trying both. */
         g[n++] = OP_INCR(0x400, 12);
-        g[n++] = rt_luma; g[n++] = 0x004b0000;
-        g[n++] = 0x00930000; g[n++] = 0x00220000;
+        g[n++] = rt_luma;
+        g[n++] = luma_lo ? 0x0000004b : 0x004b0000;
+        g[n++] = luma_lo ? 0x00000093 : 0x00930000;
+        g[n++] = luma_lo ? 0x00000022 : 0x00220000;
         g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
         g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
         g[n++] = 0x00030000; g[n++] = 0x00000000;
@@ -790,10 +801,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
-    /* The colour matrix. We have never written it, and neither does the
-     * driver's streaming init -- so whatever it holds after reset is what
-     * the pipeline uses. A matrix of zeros would pass red and kill green
-     * and blue, which is exactly the output we get. This does not try to
+    }   /* end of the reconstructed streaming init */
+
+    /* The colour matrix. Neither we nor that init write it, so whatever it
+     * holds after reset is what the pipeline uses. This does not try to
      * guess the right coefficients; it establishes whether these registers
      * are the gate at all. */
     if (ccm_word) {
@@ -1114,6 +1125,7 @@ int main(int argc, char **argv)
      * sensor sends. */
     uint32_t isp_in_fmt = 0;
     uint32_t gpp_gain = 0x3fff0000;
+    int luma_lo = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1164,6 +1176,7 @@ int main(int argc, char **argv)
             isp_in_fmt = (uint32_t)strtoul(a + 9, 0, 16);
         else if (strncmp(a, "--gpp=", 6) == 0)
             gpp_gain = (uint32_t)strtoul(a + 6, 0, 16);
+        else if (strcmp(a, "--luma-lo") == 0) luma_lo = 1;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1330,7 +1343,7 @@ int main(int argc, char **argv)
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
-                     isp_skip, gpp_gain);
+                     isp_skip, gpp_gain, luma_lo);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

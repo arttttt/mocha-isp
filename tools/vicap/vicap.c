@@ -473,6 +473,7 @@ int main(int argc, char **argv)
     int use_sensor = 1, dump = 0, front = 1;
     uint32_t image_def = 0x00200004;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
+    uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
     int hold = 0, dump_regs = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -496,6 +497,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
+        else if (strncmp(a, "--phy-cil=", 10) == 0)
+            phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
@@ -618,7 +621,11 @@ int main(int argc, char **argv)
          * the A/B brick. Every driver constant for the C/E side sits in the
          * upper half too, so we had been enabling the wrong one all along.
          * 0xAEC goes with it; stock holds a 2 there and we held nothing. */
-        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x10000000);
+        /* 0x10000000 is what a live stock session reads, but that may be a
+         * value between frames. The 24.1 driver -- whose capture into
+         * memory did work -- writes 0x12020000 for this camera: CSI-C,
+         * one lane, through CILE. Take the one from working code. */
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, phy_cil_cmd);
 
         /* Leave the A/B brick alone: values left there by an earlier run on
          * the rear port are not ours to keep. */

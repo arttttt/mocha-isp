@@ -615,7 +615,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
                     uint32_t gpp_gain, int luma_lo,
                     uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
-                    int zero_init)
+                    int zero_init, int apply)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
@@ -901,7 +901,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * actually carries. We had dropped it on a driver comment that is about
      * the per-frame calibration, not about init, and that would explain why
      * nothing we wrote here ever changed more than the level. */
-    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
+    /* Optional, and the question is sharper than it looks. Stock's trace
+     * has no 0x0F anywhere -- only the streaming trigger. If it writes its
+     * clearing pass into shadow state and never applies it, then the
+     * hardware defaults are what stay in force, demosaic included. Applying
+     * ours would then be the very thing that destroys them. */
+    if (apply) { g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F; }
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -1212,6 +1217,7 @@ int main(int argc, char **argv)
     /* Clear the block the way stock clears it before anything else. On by
      * default now: it is what the camera on this device actually does. */
     int zero_init = 1;
+    int isp_apply = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1272,6 +1278,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--ispintf=", 10) == 0)
             ispintf = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
+        else if (strcmp(a, "--no-apply") == 0)     isp_apply = 0;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1444,7 +1451,7 @@ int main(int argc, char **argv)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
                      isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase, zero_init);
+                     in_phase, zero_init, isp_apply);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

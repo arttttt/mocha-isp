@@ -565,9 +565,9 @@ int main(int argc, char **argv)
               CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
         vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x080301f1);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1,
-              (0x1u << CSI_PP_TOP_FIELD_FRAME_OFFSET) |
-              (0x1u << CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET));
+        /* Stock leaves this at zero; the top-field bits the driver writes
+         * for interlaced sources are not what this sensor needs. */
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, 0x00000000);
         vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
         vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
         vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x007f0014);

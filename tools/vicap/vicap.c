@@ -671,6 +671,7 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
         vi_flush("piggyback");
         usleep(500000);
+        dump_regs = 1;      /* this is the state where capture works */
         goto readback;
     }
 

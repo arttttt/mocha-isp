@@ -175,7 +175,7 @@ int main(int argc, char **argv)
         return 1;
     }
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
-    int yuv_cfg = 0, use_lib = 1;
+    int yuv_cfg = 0, use_lib = 1, dma_init = 1;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
@@ -183,6 +183,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--w0=", 5) == 0)     w0 = (uint32_t)strtoul(a + 5, 0, 0);
         else if (strcmp(a, "--yuv-cfg") == 0)     yuv_cfg = 1;
         else if (strcmp(a, "--no-lib") == 0)      use_lib = 0;
+        else if (strcmp(a, "--no-dma") == 0)      dma_init = 0;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -257,6 +258,18 @@ int main(int argc, char **argv)
     uint32_t cmd[64];
     int n = 0, y_reloc, in_reloc, work_reloc;
     cmd[n++] = OP_SETCLASS(ISP_CLASS_A, 0, 0);
+
+    /* The hybrid proper: the library selected the pipeline, but nothing in
+     * its bring-up configures the memory output path, so the first attempt
+     * submitted cleanly and wrote nothing. These are the DMA thresholds our
+     * own init sends -- output burst, input burst, mode -- and they are the
+     * part that has to come from us. --no-dma leaves them out. */
+    if (dma_init) {
+        cmd[n++] = OP_INCR(0x019, 1); cmd[n++] = 0x00000400;
+        cmd[n++] = OP_INCR(0x01B, 2); cmd[n++] = 0x00000200;
+                                      cmd[n++] = 0x00000002;
+    }
+
     cmd[n++] = OP_INCR(0x053, 2);
     work_reloc = n;
     cmd[n++] = 1;

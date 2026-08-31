@@ -540,6 +540,15 @@ int main(int argc, char **argv)
            vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
            vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
 
+    /* Read the lane interface while the sensor is still powered. A stock
+     * session shows 0x110 here; zero means nothing ever arrived on the
+     * wire, which points at the sensor rather than the receiver. */
+    printf("CIL status: E=0x%08x CILE=0x%08x parser=0x%08x\n",
+           vi_rd(front ? 0xA18 : T124_CSI_CIL_A_STATUS),
+           vi_rd(front ? 0xA1C : T124_CSI_CILA_STATUS),
+           vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
+                       : T124_PP_A_PIXEL_PARSER_STATUS));
+
     uint32_t err = vi_rd(base + VI_CSI_ERROR_STATUS);
     printf("ERROR_STATUS = 0x%08x, SINGLE_SHOT = 0x%08x\n",
            err, vi_rd(base + VI_CSI_SINGLE_SHOT));

@@ -322,6 +322,7 @@ int main(int argc, char **argv)
     int opt_demosaic_zero = 0;              /* 0x506 as stock sends it */
     int opt_minimal = 0;                    /* touch no settings blocks */
     int opt_debayer = 0;                    /* demosaic on the host first */
+    int opt_yuv422 = 0;                     /* and convert to packed YUV422 */
     int opt_in_shift = 0;                   /* restack samples in the container */
     int opt_blk400 = 0;                     /* 0x400 from the host settings */
     int opt_blk400_live = 0;                /* 0x400 as the hardware gets it */
@@ -357,6 +358,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--demosaic=zero") == 0)   opt_demosaic_zero = 1;
         else if (strcmp(a, "--minimal") == 0)         opt_minimal = 1;
         else if (strcmp(a, "--debayer") == 0)         opt_debayer = 1;
+        else if (strcmp(a, "--yuv422") == 0)  { opt_debayer = 1; opt_yuv422 = 1; }
         else if (strncmp(a, "--plane-align=", 14) == 0)
             plane_align = (uint32_t)strtoul(a + 14, 0, 0);
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
@@ -663,8 +665,39 @@ int main(int argc, char **argv)
         raw_buf = rgba;
         in_size = W * 4 * H;
         rgba_input = 1;                 /* the ISP now gets packed pixels */
-        printf("Input: demosaiced on the host, %ux%u RGBA, %u bytes\n",
+        printf("Input: demosaiced on the host, %ux%u ARGB, %u bytes\n",
                W, H, in_size);
+
+        /* --yuv422: go one step further and hand it packed YUV, which is
+         * what a reprocess port is built to take. Two bytes per pixel in a
+         * single surface, so it still fits the one input address we know
+         * how to program -- a planar or semi-planar input would need the
+         * extra input plane registers, and those we have never seen used. */
+        if (opt_yuv422) {
+            uint8_t *yuv = calloc(1, (size_t)W * H * 2);
+            if (!yuv) { printf("yuv422: out of memory\n"); return 1; }
+            for (size_t i = 0; i + 1 < (size_t)W * H; i += 2) {
+                const uint8_t *p0 = rgba + i * 4, *p1 = p0 + 4;
+                int r0 = p0[1], g0 = p0[2], b0 = p0[3];
+                int r1 = p1[1], g1 = p1[2], b1 = p1[3];
+                int y0 = (299 * r0 + 587 * g0 + 114 * b0) / 1000;
+                int y1 = (299 * r1 + 587 * g1 + 114 * b1) / 1000;
+                int rm = (r0 + r1) / 2, gm = (g0 + g1) / 2, bm = (b0 + b1) / 2;
+                int u = 128 + (-169 * rm - 331 * gm + 500 * bm) / 1000;
+                int v = 128 + (500 * rm - 419 * gm - 81 * bm) / 1000;
+                uint8_t *o = yuv + i * 2;
+                o[0] = (uint8_t)(u < 0 ? 0 : u > 255 ? 255 : u);  /* U Y0 V Y1 */
+                o[1] = (uint8_t)y0;
+                o[2] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                o[3] = (uint8_t)y1;
+            }
+            free(rgba);
+            raw_buf = yuv;
+            in_size = W * 2 * H;
+            rgba_input = 0;   /* two bytes per pixel: the bayer stride fits */
+            printf("Input: converted to packed YUV422 (UYVY), %u bytes, "
+                   "stride %u\n", in_size, W * 2);
+        }
     }
 
     /* --in-swaprb: exchange the two diagonal bayer sites in the 2x2 cell,

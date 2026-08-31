@@ -312,6 +312,7 @@ int main(int argc, char **argv)
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
     int opt_teardown = 1;                   /* quiesce the ISP on the way out */
     int opt_dump = 1;                       /* write the surface to a file */
+    int opt_in_shift = 0;                   /* restack samples in the container */
     int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     uint32_t r200[2], r202[3], r205[4];
@@ -342,6 +343,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
+        else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
         else if (strncmp(a, "--r400=", 7) == 0) {
             n400 = parse_words(a + 7, r400, 12); opt_blk400 = 1;
@@ -607,6 +609,21 @@ int main(int argc, char **argv)
     /* --in-swaprb: exchange the two diagonal bayer sites in the 2x2 cell,
      * i.e. BGGR <-> RGGB. The green sites are untouched. Lets us test the
      * bayer phase without guessing an E33 code. */
+    /* --in-shift: restack the 10 bits inside their 16-bit container. Our
+     * raw is right-justified; if the ISP unpacks from the top of the word
+     * we are handing it the wrong bits, which would explain the output
+     * surviving as exactly the top 5 bits of 10 -- and a bad unpack breaks
+     * the channel weights and the third bayer site along with the depth. */
+    if (opt_in_shift && !rgba_input) {
+        uint16_t *px = (uint16_t *)raw_buf;
+        size_t npx = (size_t)W * H;
+        if (opt_in_shift > 0)
+            for (size_t i = 0; i < npx; i++) px[i] = (uint16_t)(px[i] << opt_in_shift);
+        else
+            for (size_t i = 0; i < npx; i++) px[i] = (uint16_t)(px[i] >> -opt_in_shift);
+        printf("Input: samples shifted %d bits inside the container\n", opt_in_shift);
+    }
+
     if (opt_swaprb && !rgba_input) {
         uint16_t *px = (uint16_t *)raw_buf;
         for (unsigned y = 0; y + 1 < H; y += 2) {

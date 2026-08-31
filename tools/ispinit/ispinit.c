@@ -761,6 +761,13 @@ int main(int argc, char **argv)
     unsigned outblock_off = 0x1674; /* rec0 last word: device address */
     unsigned outblock_addr = 0;     /* override the pinned address */
     int outblock_addr_set = 0;
+    unsigned statshandle = 0x403;   /* statshandle=<hex>: nvmap handle
+                                       of the STATS buffer; its device
+                                       address goes into override word
+                                       [29] -- the kernel relocates it
+                                       there AFTER our override, so the
+                                       word must hold a LIVE address,
+                                       not a stale constant */
 
     int objdump0_on = 0;
     const char *objdump0_path = "/data/local/tmp/our_obj_early.bin";
@@ -1623,6 +1630,17 @@ int main(int argc, char **argv)
                 return 1;
             }
             inst = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "statshandle=", 12) == 0) {
+            char *e33 = 0;
+            long v = strtol(tok + 12, &e33, 0);
+            if (e33 == tok + 12 || *e33 != '\0' || v <= 0) {
+                printf("[0] bad statshandle '%s', use statshandle=<hex>\n",
+                       argv[ai]);
+                return 1;
+            }
+            statshandle = (unsigned)v;
             continue;
         }
         if (strncmp(tok, "outblock=", 9) == 0) {
@@ -3061,8 +3079,36 @@ round_trip_end:;
                 unsigned q6;
                 FILE *po;
 
+                /*
+                 * Word [29] must hold the LIVE device address of the
+                 * stats buffer: the kernel relocates that handle into
+                 * word [29] AFTER our override, so a stale constant
+                 * here would overwrite the relocated address and kill
+                 * the stats path (b5e8ac3's run proved it). Resolve it
+                 * now via the same GetAddress we use for our buffers.
+                 * Refusal rule: if the address comes back zero, we do
+                 * NOT arm the override at all -- an armed override with
+                 * a broken stats address invalidates the whole run.
+                 * Any OTHER word the kernel relocates must be resolved
+                 * the same way -- a hardcoded relocated value gets
+                 * overwritten by our own block.
+                 */
+                unsigned stats_addr = 0;
+                if (nvRmMemGetAddress != 0)
+                    stats_addr =
+                        nvRmMemGetAddress(statshandle, 0);
+                printf("[11c] outblock: stats handle=0x%x -> addr=0x%x "
+                       "(goes to word [29])\n",
+                       statshandle, stats_addr);
+                if (stats_addr == 0) {
+                    printf("[11c] outblock: stats addr is zero -- NOT "
+                           "armed, run is clean\n");
+                    goto skip_arm;
+                }
+
                 for (q6 = 0; q6 < 46; q6++)
                     words[q6] = base[q6];
+                words[29] = stats_addr; /* LIVE stats address */
                 if (outblock_addr_set != 0)
                     words[31] = outblock_addr;
                 else if (out_devaddr_valid != 0)
@@ -3118,7 +3164,11 @@ round_trip_end:;
                            "submit=%u gather=0 written\n",
                            outblock_submit);
                 }
+                goto outblock_done;
             }
+        skip_arm:
+            ; /* override NOT armed -- run stays clean */
+        outblock_done:
 
             /* manual gate write, only when obj0=<val> is given */
             if (obj0_set && hIsp != 0) {

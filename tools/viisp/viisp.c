@@ -994,7 +994,15 @@ int main(int argc, char **argv)
         if (work_h && nvmap_alloc(work_h) == 0) nvmap_pin(work_h);
 
         stats_h = nvmap_create(64 * 1024);
-        if (stats_h && nvmap_alloc(stats_h) == 0) nvmap_pin(stats_h);
+        if (stats_h && nvmap_alloc(stats_h) == 0) {
+            nvmap_pin(stats_h);
+            /* Filled with a pattern of its own, so what the ISP puts there
+             * is distinguishable from what was never touched. */
+            void *p = malloc(64 * 1024);
+            memset(p, 0x3C, 64 * 1024);
+            nvmap_rw(stats_h, 0, p, 64 * 1024, 1);
+            free(p);
+        }
 
         out_h = nvmap_create(out_bytes);
         if (out_h && nvmap_alloc(out_h) == 0)
@@ -1753,6 +1761,34 @@ readback:
                " read %u = %u\n", sp_mem, syncpt_read(sp_mem),
                sp_stats, syncpt_read(sp_stats),
                sp_loadv, syncpt_read(sp_loadv));
+
+        /* The stats condition is the one that fires, so this is where to
+         * look for proof that pixels reached the ISP at all. Numbers here
+         * that track the scene mean the frame crossed from VI; a buffer
+         * still holding its fill means the condition fires on something
+         * other than work done. */
+        if (stats_h) {
+            uint32_t sbytes = 64 * 1024, sch = 0, snz = 0;
+            uint8_t *s = malloc(sbytes);
+            if (nvmap_rw(stats_h, 0, s, sbytes, 0) == 0) {
+                for (uint32_t i = 0; i < sbytes; i++) {
+                    if (s[i] != 0x3C) sch++;
+                    if (s[i]) snz++;
+                }
+                printf("ISP stats: %u of %u bytes differ from the fill, %u"
+                       " non-zero\n", sch, sbytes, snz);
+                printf("  first words:");
+                for (int i = 0; i < 8; i++)
+                    printf(" %08x", ((uint32_t *)s)[i]);
+                printf("\n");
+                if (dump) {
+                    FILE *sf = fopen("/data/local/tmp/viisp_stats.bin", "wb");
+                    if (sf) { fwrite(s, 1, sbytes, sf); fclose(sf);
+                        printf("saved /data/local/tmp/viisp_stats.bin\n"); }
+                }
+            }
+            free(s);
+        }
 
         if (dump) {
             FILE *f = fopen("/data/local/tmp/viisp_out.raw", "wb");

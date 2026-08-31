@@ -674,7 +674,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                                  : OP_INCR(z[k].m, z[k].n);
             for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
         }
-        /* The one word stock leaves set. */
+        /* The two words stock leaves set in the whole of that pass. */
+        g[n++] = OP_NONINCR(0x91A, 9);
+        for (int i = 0; i < 8; i++) g[n++] = 0;
+        g[n++] = 0x00000200;
         g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
     }
 
@@ -1143,9 +1146,10 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
                      uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-                     uint32_t in_fmt, uint32_t work_iova)
+                     uint32_t in_fmt, uint32_t work_iova, int per_frame_cal)
 {
-    uint32_t cmd_h = nvmap_create(4096);
+    /* Room for the calibration too, now that it rides with every frame. */
+    uint32_t cmd_h = nvmap_create(16384);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     /* Planar YUV takes a byte per luma sample and half-width chroma; the
@@ -1154,9 +1158,22 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     uint32_t stride_y = planar ? ((W + 63) & ~63u) : W * 4;
     uint32_t stride_uv = ((W / 2) + 63) & ~63u;
 
-    uint32_t g[64];
+    unsigned cal_words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
+    uint32_t *g = malloc((cal_words + 128) * 4);
     int n = 0, y_word, u_word, v_word, stats_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* The calibration goes out with every frame, which is what stock does:
+     * lens shading, the four curves and the work buffer, ahead of the frame
+     * itself, in every one of its cycles. We had been sending it once at
+     * init, so the block ran the whole session on whatever the clearing
+     * pass had left. */
+    if (per_frame_cal) {
+        memcpy(&g[n], isp_b_cal_data, cal_words * 4);
+        n += cal_words;
+        g[n - 2] = 0x00000001;
+        g[n - 1] = work_iova;
+    }
 
     /* The work buffer, renewed for every frame. Stock's calibration gather
      * ends with this pair in all eight of its cycles -- enable and a real
@@ -1219,6 +1236,7 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     (void)hold_sp; (void)hold_at;
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    free(g);
 
     struct nvhost_reloc rel[4] = {
         { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
@@ -1415,6 +1433,9 @@ int main(int argc, char **argv)
     unsigned out_kind = 0;
     /* Configure the other block first, the way stock does. */
     int init_a = 1;
+    /* Send the calibration with every frame rather than once, as stock
+     * does. The init then carries only the clearing pass. */
+    int per_frame_cal = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -2361,7 +2382,7 @@ int main(int argc, char **argv)
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
                               sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                              isp_in_fmt, work_iova);
+                              isp_in_fmt, work_iova, per_frame_cal);
                 }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);

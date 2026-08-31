@@ -217,6 +217,21 @@ static void layout_build(struct out_layout *L, uint32_t fmt)
 
 /* Named after the FORMAT, not after how many triplets we happen to push:
  * with --out-planes=3 on RGBA the extra triplets are still packed pixels. */
+/* "1,4cc,0" -> words. Returns how many were read, -1 on a bad list. */
+static int parse_words(const char *s, uint32_t *out, int max)
+{
+    int k = 0;
+    while (*s && k < max) {
+        char *end;
+        out[k++] = (uint32_t)strtoul(s, &end, 16);
+        if (end == s) return -1;
+        s = end;
+        if (*s == ',') s++;
+        else if (*s) return -1;
+    }
+    return *s ? -1 : k;
+}
+
 static const char *plane_name(const struct out_layout *L, int i)
 {
     switch (L->fmt & 0xFF) {
@@ -252,6 +267,9 @@ int main(int argc, char **argv)
 "  ISP:       --isp-enable=0xN                reg 0x015 (default 0x7)\n"
 "             --stat-bytes=N                  readback scan budget, 0=all\n"
 "             --param-fill=0xWORD             fill the 0x100 DMA block (def 0)\n"
+"  Pipeline:  --pipeline                      stock 0x200/0x202/0x205\n"
+"             --r200=a,b --r202=a,b,c --r205=a,b,c,d   hex words, imply\n"
+"                                             --pipeline; default per class\n"
 "  Colour:    --curve=identity|scurve         tone curves (default identity)\n"
 "             --gpp-gain=0xWORD               0x600 words 12..14 (def 0x3fff0000)\n"
 "             --ccm=w0,w1,..,w7               push CCM 0x300/0x304 (default: off)\n"
@@ -282,6 +300,8 @@ int main(int argc, char **argv)
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
     int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
+    uint32_t r200[2], r202[3], r205[4];
+    int n200 = 0, n202 = 0, n205 = 0;       /* 0 = use the class default */
     int opt_blk500 = 0;                     /* stock 0x500 words instead of ours */
 
     for (int i = 1; i < argc; i++) {
@@ -306,6 +326,18 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
         else if (strcmp(a, "--pipeline") == 0)        opt_pipeline = 1;
+        else if (strncmp(a, "--r200=", 7) == 0) {
+            n200 = parse_words(a + 7, r200, 2); opt_pipeline = 1;
+            if (n200 < 0) { printf("bad --r200 list\n"); return 1; }
+        }
+        else if (strncmp(a, "--r202=", 7) == 0) {
+            n202 = parse_words(a + 7, r202, 3); opt_pipeline = 1;
+            if (n202 < 0) { printf("bad --r202 list\n"); return 1; }
+        }
+        else if (strncmp(a, "--r205=", 7) == 0) {
+            n205 = parse_words(a + 7, r205, 4); opt_pipeline = 1;
+            if (n205 < 0) { printf("bad --r205 list\n"); return 1; }
+        }
         else if (strcmp(a, "--blk500") == 0)          opt_blk500 = 1;
         else if (strcmp(a, "--commit") == 0)          opt_commit = 1;
         else if (strcmp(a, "--commit-full") == 0)     opt_commit = 2;
@@ -928,14 +960,36 @@ int main(int argc, char **argv)
      * together, and the companions carry real values (0x780078 pairs,
      * 0x600c8, 0xf000f). This is that combination. */
     if (opt_pipeline) {
-        cmd[n++] = OP_INCR(0x200, 2);
-        cmd[n++] = 0x00000001; cmd[n++] = 0x00000000;
-        cmd[n++] = OP_INCR(0x202, 3);
-        cmd[n++] = 0x00000001; cmd[n++] = 0x00780078; cmd[n++] = 0x00780078;
-        cmd[n++] = OP_INCR(0x205, 4);
-        cmd[n++] = 0x00000000; cmd[n++] = 0x000600c8;
-        cmd[n++] = 0x000f000f; cmd[n++] = 0x00000000;
-        printf("0x200/0x202/0x205: stock pipeline mode\n");
+        /* Defaults follow the class we are actually submitting on. The
+         * trace carries a different set per ISP -- 0x202 pairs are
+         * 0x02000200 on class 0x32 and 0x00780078 on 0x34, and 0x205's
+         * last word is 0x3333 against 0 -- so taking one ISP's numbers
+         * for the other feeds it someone else's geometry. */
+        int a_class = (ISP_CLASS == ISP_CLASS_A);
+        uint32_t d200[2] = { 0x00000001, 0x00000000 };
+        uint32_t d202[3] = { 0x00000001,
+                             a_class ? 0x02000200 : 0x00780078,
+                             a_class ? 0x02000200 : 0x00780078 };
+        uint32_t d205[4] = { 0x00000000, 0x000600c8, 0x000f000f,
+                             a_class ? 0x00003333 : 0x00000000 };
+        if (!n200) { memcpy(r200, d200, sizeof d200); n200 = 2; }
+        if (!n202) { memcpy(r202, d202, sizeof d202); n202 = 3; }
+        if (!n205) { memcpy(r205, d205, sizeof d205); n205 = 4; }
+
+        cmd[n++] = OP_INCR(0x200, n200);
+        for (int i = 0; i < n200; i++) cmd[n++] = r200[i];
+        cmd[n++] = OP_INCR(0x202, n202);
+        for (int i = 0; i < n202; i++) cmd[n++] = r202[i];
+        cmd[n++] = OP_INCR(0x205, n205);
+        for (int i = 0; i < n205; i++) cmd[n++] = r205[i];
+
+        printf("pipeline (class 0x%02x): 0x200=", ISP_CLASS);
+        for (int i = 0; i < n200; i++) printf("%08x ", r200[i]);
+        printf(" 0x202=");
+        for (int i = 0; i < n202; i++) printf("%08x ", r202[i]);
+        printf(" 0x205=");
+        for (int i = 0; i < n205; i++) printf("%08x ", r205[i]);
+        printf("\n");
     }
 
     /* 0x400, 12 words -- the block the tool has never programmed. Words

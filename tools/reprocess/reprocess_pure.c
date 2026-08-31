@@ -250,6 +250,7 @@ int main(int argc, char **argv)
 "             --in-swaprb                     swap R/B bayer sites in RAM\n"
 "             --rgba-in                       input is RGBA, not bayer\n"
 "  ISP:       --isp-enable=0xN                reg 0x015 (default 0x7)\n"
+"             --stat-bytes=N                  readback scan budget, 0=all\n"
 "  Colour:    --curve=identity|scurve         tone curves (default identity)\n"
 "             --gpp-gain=0xWORD               0x600 words 12..14 (def 0x3fff0000)\n"
 "             --ccm=w0,w1,..,w7               push CCM 0x300/0x304 (default: off)\n"
@@ -274,6 +275,7 @@ int main(int argc, char **argv)
     int have_e02_hi = 0;
     uint32_t opt_e02_hi = 0;
     uint32_t opt_isp_enable = 0x00000007;   /* from blob gather RE */
+    uint32_t opt_stat_bytes = 4u << 20;     /* readback scan budget per plane */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -292,6 +294,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--out-e03=", 10) == 0)   opt_e03 = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)     opt_in_fmt = strtoul(a + 9, 0, 16);
         else if (strncmp(a, "--isp-enable=", 13) == 0) opt_isp_enable = strtoul(a + 13, 0, 16);
+        else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
         else if (strcmp(a, "--rgba-in") == 0)         rgba_input = 1;
         else if (strncmp(a, "--curve=", 8) == 0)      opt_scurve = (strcmp(a + 8, "scurve") == 0);
@@ -994,7 +997,11 @@ int main(int argc, char **argv)
     {
         uint8_t *buf = malloc(chunk);
         for (int pl = 0; pl < L.planes; pl++) {
-            uint32_t sz = L.size[pl] ? L.size[pl] : chunk;
+            /* Scanning a 30 MB plane byte by byte costs hundreds of nvmap
+             * reads for numbers a few megabytes already settle. Bounded by
+             * default; --stat-bytes=0 scans the whole plane. */
+            uint32_t sz = L.size[pl] ? L.size[pl] : (uint32_t)chunk;
+            if (opt_stat_bytes && sz > opt_stat_bytes) sz = opt_stat_bytes;
             uint8_t head[16];
             nvmap_read(out_h, L.offset[pl], head, 16);
             printf("plane %d (%s) @0x%06x:", pl, plane_name(&L, pl), L.offset[pl]);
@@ -1018,8 +1025,8 @@ int main(int argc, char **argv)
                     sum[c] += v; cnt[c]++;
                 }
             }
-            printf("  bytes=%u nonzero=%u (%.1f%%)\n", sz, nz,
-                   sz ? 100.0 * nz / sz : 0.0);
+            printf("  scanned=%u of %u nonzero=%u (%.1f%%)\n",
+                   sz, L.size[pl], nz, sz ? 100.0 * nz / sz : 0.0);
             static const char *cn[4] = { "R", "G", "B", "A" };
             for (int c = 0; c < chans; c++)
                 printf("  %s min=%u max=%u mean=%.1f\n",

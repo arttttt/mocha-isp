@@ -830,6 +830,42 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     return rc;
 }
 
+/* Put the block back to sleep. Without this it stays armed and writes a
+ * later frame into a buffer we have already let go -- the memory controller
+ * faults on it after the sensor has powered down, which is exactly where
+ * the fault lands in the log. */
+static void isp_stop(int isp_fd, uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return;
+
+    uint32_t g[10];
+    int n = 0;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_INCR(0x015, 1); g[n++] = 0x00000000;
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x00000000;
+    g[n++] = OP_IMM(0, sp);
+    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("ISP stopped: rc=%d (%s)\n", rc, rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+}
+
 /* The per-frame gather, word for word as the stock camera sends it: output
  * geometry, three plane triplets for planar YUV, the processing block, the
  * stats buffer, three conditional syncpoint increments and the streaming
@@ -839,7 +875,8 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
-                     uint32_t sp, uint32_t hold_sp, uint32_t hold_at)
+                     uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
+                     uint32_t in_fmt)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -869,6 +906,14 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0x500, 6);
     g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
     g[n++] = (H << 16) | W;
+
+    /* Tell the block what is arriving. The input-format register is
+     * documented as belonging to the reprocess path, where it names the
+     * Bayer order and depth -- but nothing in the streaming path names them
+     * either, and a pipeline that does not know it is looking at a mosaic
+     * has no reason to demosaic. Written without arming the memory input
+     * trigger, so the source stays VI. */
+    if (in_fmt) { g[n++] = OP_INCR(0xE33, 1); g[n++] = in_fmt; }
 
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_INCR(0x100, 4);
@@ -1053,6 +1098,10 @@ int main(int argc, char **argv)
      * the GPP at 0x600, bit 2 the input stage, bit 3 the statistics, bit 4
      * the second processing channel. */
     unsigned isp_skip = 0;
+    /* The input pixel format, if we choose to name it. 0x10200024 is Bayer
+     * BGGR at ten bits in a sixteen-bit container, which is what this
+     * sensor sends. */
+    uint32_t isp_in_fmt = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1099,6 +1148,8 @@ int main(int argc, char **argv)
             ccm_word = (uint32_t)strtoul(a + 6, 0, 16);
         else if (strncmp(a, "--isp-skip=", 11) == 0)
             isp_skip = (unsigned)strtoul(a + 11, 0, 0);
+        else if (strncmp(a, "--in-fmt=", 9) == 0)
+            isp_in_fmt = (uint32_t)strtoul(a + 9, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1932,7 +1983,8 @@ int main(int argc, char **argv)
                     isp_base_mem = syncpt_read(sp_mem);
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
-                              sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0);
+                              sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                              isp_in_fmt);
                 }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
@@ -1994,6 +2046,7 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
+        if (isp_fd >= 0 && out_iova) isp_stop(isp_fd, isp_sp);
 
         /* Release whichever job is parked -- VI's on the memory path, the
          * ISP's on this one. Both wait on the same counter and neither can

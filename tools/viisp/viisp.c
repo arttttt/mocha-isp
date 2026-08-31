@@ -611,7 +611,8 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 #include "isp_b_cal.h"
 
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
-                    uint32_t work_iova, uint32_t stats_iova, int demosaic_zero)
+                    uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
+                    uint32_t rt_luma)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -640,8 +641,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * nowhere to work without the addresses in 0x700 and 0x750. None of
      * this appears in the per-frame trace because stock had already sent it
      * at init. */
+    /* The three words after the enable are 75, 147 and 34 -- the BT.601
+     * luma weights. This block folds the three channels into one, which is
+     * exactly the shape of what comes back: red carrying everything, green
+     * and blue at zero. Its enable is a knob for that reason. */
     g[n++] = OP_INCR(0x400, 12);
-    g[n++] = 0x00000001; g[n++] = 0x004b0000;
+    g[n++] = rt_luma; g[n++] = 0x004b0000;
     g[n++] = 0x00930000; g[n++] = 0x00220000;
     g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
     g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
@@ -1016,6 +1021,7 @@ int main(int argc, char **argv)
      * registers: bit 0 the ISP interface, bit 1 the image definition. */
     unsigned isp_route = 3;
     int demosaic_zero = 0;
+    uint32_t rt_luma = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1056,6 +1062,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--isp-route=", 12) == 0)
             isp_route = (unsigned)strtoul(a + 12, 0, 0);
         else if (strcmp(a, "--demosaic-zero") == 0) demosaic_zero = 1;
+        else if (strncmp(a, "--isp-luma=", 11) == 0)
+            rt_luma = (uint32_t)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1221,7 +1229,7 @@ int main(int argc, char **argv)
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
-                     work_iova, stats_iova, demosaic_zero);
+                     work_iova, stats_iova, demosaic_zero, rt_luma);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

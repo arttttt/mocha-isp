@@ -457,10 +457,16 @@ struct nvhost32_submit_args {
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008
 #define TEGRA_VI_CFG_CG_CTRL            0x0B8
 #define VI_CSI_SW_RESET                 0x000
+/* Measured, not taken from the header: arming every condition in turn and
+ * taking a shot, the ones that move are 10 -- port B's frame start, which we
+ * already relied on -- and 12. Six and seven, which the header gives for the
+ * write acknowledge and admits were found by trial, never fire. Twelve sits
+ * exactly where the pattern puts it: frame start for A and B is 9 and 10, so
+ * write done for A and B is 11 and 12. */
 #define T124_PPA_FRAME_START            9
 #define T124_PPB_FRAME_START            10
-#define T124_MWA_ACK_DONE               6
-#define T124_MWB_ACK_DONE               7
+#define T124_MWA_ACK_DONE               11
+#define T124_MWB_ACK_DONE               12
 
 #define BRICK_CLOCK_A_4X                (0x1 << 16)
 #define T124_CIL_PHY_CONTROL_DEFAULT    0x09

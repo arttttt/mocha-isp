@@ -320,6 +320,7 @@ int main(int argc, char **argv)
     int opt_teardown = 1;                   /* quiesce the ISP on the way out */
     int opt_dump = 1;                       /* write the surface to a file */
     int opt_demosaic_zero = 0;              /* 0x506 as stock sends it */
+    int opt_minimal = 0;                    /* touch no settings blocks */
     int opt_in_shift = 0;                   /* restack samples in the container */
     int opt_blk400 = 0;                     /* 0x400 from the host settings */
     int opt_blk400_live = 0;                /* 0x400 as the hardware gets it */
@@ -353,6 +354,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
         else if (strcmp(a, "--demosaic=zero") == 0)   opt_demosaic_zero = 1;
+        else if (strcmp(a, "--minimal") == 0)         opt_minimal = 1;
         else if (strncmp(a, "--plane-align=", 14) == 0)
             plane_align = (uint32_t)strtoul(a + 14, 0, 0);
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
@@ -887,6 +889,14 @@ int main(int argc, char **argv)
     cmd[n++] = 1;                         /* enable */
     cmd[n++] = 0;                         /* IOVA patched by reloc */
 
+    /* Everything from here to the output programming is settings the tool
+     * writes over the hardware's own defaults -- 0x700/0x750, the demosaic
+     * block, GPP, the tone curves, lens shading, 0x500. Stock touches none
+     * of them and gets colour; we overwrite all of them every frame.
+     * --minimal sends only geometry, format, plane addresses, the input
+     * descriptor, the enable and the trigger, and leaves the defaults be. */
+    if (!opt_minimal) {
+
     /* Zero 0x200 (reset from previous) */
     cmd[n++] = OP_INCR(0x200, 9);
     cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0;
@@ -1122,6 +1132,8 @@ int main(int argc, char **argv)
         cmd[n++] = 0x00000000;
         cmd[n++] = (H << 16) | W;        /* 0x505 */
     }
+
+    }   /* end of the settings the hardware would otherwise default */
 
     /* Output: dims + format */
     cmd[n++] = OP_INCR(0xE00, 1);

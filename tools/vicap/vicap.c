@@ -438,6 +438,22 @@ static void nvmap_unpin(uint32_t h) {
     struct nvmap_pin_handle ph = { h, 0, 1 };
     ioctl(nvmap_fd, NVMAP_IOC_UNPIN_MULT, &ph);
 }
+/* If the engine wrote through a different mapping than the one we read
+ * back through, the data can be sitting there while our read returns what
+ * was in cache -- indistinguishable from a capture that never happened. */
+struct nvmap_cache_op {
+    unsigned long addr;
+    uint32_t handle, len;
+    int32_t op;
+};
+#define NVMAP_IOC_CACHE   _IOW(NVMAP_IOC_MAGIC, 12, struct nvmap_cache_op)
+#define NVMAP_CACHE_OP_INV 1
+
+static void nvmap_invalidate(uint32_t h, uint32_t len) {
+    struct nvmap_cache_op c = { 0, h, len, NVMAP_CACHE_OP_INV };
+    ioctl(nvmap_fd, NVMAP_IOC_CACHE, &c);
+}
+
 static int nvmap_rw(uint32_t h, uint32_t off, void *d, uint32_t n, int wr) {
     struct nvmap_rw_handle rw = { (unsigned long)d, h, off, n, n, n, 1 };
     return ioctl(nvmap_fd, wr ? NVMAP_IOC_WRITE : NVMAP_IOC_READ, &rw);
@@ -810,6 +826,8 @@ int main(int argc, char **argv)
     uint32_t err = vi_rd(base + VI_CSI_ERROR_STATUS);
     printf("ERROR_STATUS = 0x%08x, SINGLE_SHOT = 0x%08x\n",
            err, vi_rd(base + VI_CSI_SINGLE_SHOT));
+
+    nvmap_invalidate(buf_h, frame);
 
     /* Did anything land? The buffer was filled with 0xA5. */
     {

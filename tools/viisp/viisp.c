@@ -600,37 +600,37 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  *
  * Submitted once, before the shot. Whether the ISP then needs re-arming per
  * frame is one of the things this is meant to find out. */
-/* Once, before any frame: hand the ISP its work buffer, switch the pipeline
- * on and post-apply. Stock carries these in the calibration gather it sends
- * ahead of every frame -- the calibration itself is all zeros on this device,
- * there being no profile installed, so what matters is these three. */
+/* The calibration gather, taken verbatim from the 24.1 ISP driver, which in
+ * turn captured it off the stock camera on this device. Fifteen hundred
+ * words of it, and there is no reconstructing that from a register list --
+ * the three or four registers we had been sending in its place were never
+ * going to stand in for it.
+ *
+ * The driver patches the last two words before sending: 0x053 takes 1 and
+ * 0x054 takes 0, and there is deliberately no trigger at the end. */
+#include "isp_b_cal.h"
+
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
 {
-    uint32_t cmd_h = nvmap_create(4096);
+    unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
+    uint32_t bytes = (words + 8) * 4;
+    uint32_t cmd_h = nvmap_create((bytes + 4095) & ~4095u);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t g[16];
-    int n = 0, work_word;
+    uint32_t *g = malloc(bytes);
+    unsigned n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
-    /* The DMA pipeline registers. The reprocess tool calls these required
-     * for any pixel output at all, and dropping them when this was rewritten
-     * around the stock trace was a mistake: the trace shows what stock sends
-     * per frame, not what its driver had already set up. */
-    g[n++] = OP_INCR(0x019, 1); g[n++] = 0x00000400;
-    g[n++] = OP_INCR(0x01B, 2); g[n++] = 0x00000200; g[n++] = 0x00000002;
-    g[n++] = OP_INCR(0x053, 2);
-    g[n++] = 1;
-    work_word = n;
-    g[n++] = 0;                           /* patched by the relocation */
+    memcpy(&g[n], isp_b_cal_data, words * 4);
+    n += words;
+    g[n - 2] = 0x00000001;                /* 0x053 */
+    g[n - 1] = 0x00000000;                /* 0x054 */
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
-    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
     g[n++] = OP_IMM(0, sp);
 
-    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    free(g);
 
-    struct nvhost_reloc rel = { cmd_h, (uint32_t)work_word * 4, work_h, 0 };
-    struct nvhost_reloc_shift sh = { 0 };
-    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
     struct nvhost_fence fence = { 0, 0 };
@@ -638,20 +638,18 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
-    sa.num_relocs = 1;
     sa.timeout = 3000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-    sa.relocs = (uint32_t)(uintptr_t)&rel;
-    sa.reloc_shifts = (uint32_t)(uintptr_t)&sh;
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
 
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("ISP init: enable 0x%08x, %d words, rc=%d (%s)\n",
-           enable, n, rc, rc == 0 ? "ok" : strerror(errno));
+    printf("ISP calibration: %u words, enable 0x%08x, rc=%d (%s)\n",
+           n, enable, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    (void)work_h;
     return rc;
 }
 

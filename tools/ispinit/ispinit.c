@@ -3024,56 +3024,73 @@ round_trip_end:;
              * the trace hook.
              */
             if (outblock_on) {
-                static const unsigned base[40] = {
-                    0x00000d00, 0x1e000001, 0x00070000,
-                    0x1e010001, 0x00070000,
-                    0x1e020001, 0x010000c9,
-                    0x1e030001, 0x00000000,
-                    0x1e040003, 0x811a0000, 0x00000000, 0x00000100,
-                    0x15000006, 0x00000003, 0x00000ca4,
-                    0x14400000, 0x0f300000, 0x00000000, 0x00080008,
-                    0x00000d00, 0x10150001, 0x04040007,
-                    0x00000d00, 0x11000004, 0x81e40000,
-                    0x00000000, 0x00000000, 0x00000000,
-                    0x00000d00, 0x00000d00,
-                    0x20000001, 0x00000424,
-                    0x20000001, 0x00000525,
-                    0x20000001, 0x00000627,
-                    0x00000d00, 0x200c0001, 0x00000005,
+                /*
+                 * Base = OUR OWN frame gather (46 words, captured from
+                 * our library's submission), extended with the missing
+                 * output-control block. Exactly two edits vs the
+                 * original, both required:
+                 *   [28] 0x11000004 -> 0x11000001: the stats command
+                 *        loses three zero data words, freeing space;
+                 *   [30..33] the output block: INCR(0xE04,3), plane
+                 *        address, 0, stride 0x100.
+                 * Word [29] = 0x80f40000 is UNTOUCHABLE: the kernel
+                 * relocates the stats buffer address into it at a
+                 * fixed offset. Length is exactly 46: the override is
+                 * clipped to the original gather length. Stale input
+                 * addresses are fine -- runtime RELOCs patch after.
+                 * Requires kernel tracing ON (submit counter lives in
+                 * the trace hook).
+                 */
+                static const unsigned base[46] = {
+                    0x00000d00, 0x1e000001, 0x00070000, 0x1e010001,
+                    0x00070000, 0x1e020001, 0x010000c9, 0x1e030001,
+                    0x00000000, 0x15000006, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x00080008,
+                    0x00000d00, 0x1e310001, 0x00080008, 0x1e330001,
+                    0x310000c9, 0x1e320001, 0x00000008, 0x10150001,
+                    0x00000007, 0x1e300001, 0x00000001, 0x00000d00,
+                    0x11000001, 0x80f40000, 0x1e040003, 0xaaaaaaaa,
+                    0x00000000, 0x00000100, 0x00000d00, 0x20000001,
+                    0x00000424, 0x20000001, 0x00000525, 0x20000001,
+                    0x00000627, 0x00000d00, 0x200c0001, 0x00000009,
+                    0x200c0001, 0x0000000b,
                 };
-                unsigned words[40];
-                unsigned addr = outblock_addr_set ? outblock_addr
-                                                  : out_devaddr;
+                unsigned words[46];
+                unsigned addr = outblock_addr_set != 0 ? outblock_addr
+                                                       : out_devaddr;
                 unsigned q6;
                 FILE *po;
-                char tline[64];
 
-                for (q6 = 0; q6 < 40; q6++)
+                for (q6 = 0; q6 < 46; q6++)
                     words[q6] = base[q6];
-                if (out_devaddr_valid != 0 || outblock_addr_set != 0)
-                    words[10] = addr; /* E04 plane address: OURS */
-                printf("[11c] outblock: %u words, E04 addr=0x%x "
+                if (outblock_addr_set != 0)
+                    words[31] = outblock_addr;
+                else if (out_devaddr_valid != 0)
+                    words[31] = out_devaddr; /* E04 plane: OURS */
+                printf("[11c] outblock: 46 words, E04 addr=0x%x "
                        "(submit=%u gather=0)\n",
-                       40u, words[10], outblock_submit);
-                for (q6 = 0; q6 < 40; q6 += 8) {
+                       words[31], outblock_submit);
+                for (q6 = 0; q6 < 46; q6 += 8) {
                     unsigned j;
-                    printf("[11c]   ");
-                    for (j = 0; j < 8 && q6 + j < 40; j++)
+                    printf("[11c]  ");
+                    for (j = 0; j < 8 && q6 + j < 46; j++)
                         printf(" %08x", words[q6 + j]);
                     printf("\n");
                 }
 
-                FILE *tf = fopen("/proc/isp_trace/enable", "r");
-                if (tf == 0) {
-                    printf("[11c] WARNING: cannot read "
-                           "/proc/isp_trace/enable -- override may not "
-                           "fire\n");
-                } else {
-                    char tb[16] = {0};
-                    if (fgets(tb, sizeof(tb), tf) != 0 && tb[0] == '0')
-                        printf("[11c] WARNING: /proc/isp_trace/enable "
-                               "is 0 -- override will NOT fire\n");
-                    fclose(tf);
+                {
+                    FILE *tf = fopen("/proc/isp_trace/enable", "r");
+                    if (tf == 0) {
+                        printf("[11c] WARNING: cannot read "
+                               "/proc/isp_trace/enable -- override may "
+                               "not fire\n");
+                    } else {
+                        char tb[16] = {0};
+                        if (fgets(tb, sizeof(tb), tf) != 0 && tb[0] == '0')
+                            printf("[11c] WARNING: /proc/isp_trace/enable"
+                                   " is 0 -- override will NOT fire\n");
+                        fclose(tf);
+                    }
                 }
 
                 po = fopen("/proc/isp_patch_override", "w");
@@ -3086,7 +3103,7 @@ round_trip_end:;
                     po = fopen("/proc/isp_patch_override", "w");
                     if (po != 0) {
                         fprintf(po, "data");
-                        for (q6 = 0; q6 < 40; q6++)
+                        for (q6 = 0; q6 < 46; q6++)
                             fprintf(po, " %08x", words[q6]);
                         fprintf(po, "\n");
                         fclose(po);
@@ -3097,11 +3114,10 @@ round_trip_end:;
                                 outblock_submit);
                         fclose(po);
                     }
-                    printf("[11c] outblock: reset_counter, data(40), "
+                    printf("[11c] outblock: reset_counter, data(46), "
                            "submit=%u gather=0 written\n",
                            outblock_submit);
                 }
-                (void)tline;
             }
 
             /* manual gate write, only when obj0=<val> is given */

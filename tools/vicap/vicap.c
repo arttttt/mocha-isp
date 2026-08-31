@@ -518,6 +518,17 @@ static void vi_wr(uint32_t off, uint32_t val)
     batch_n++;
 }
 
+/* The syncpoint counters live behind the control node, not the channel. */
+static uint32_t syncpt_read(uint32_t id)
+{
+    struct nvhost_ctrl_syncpt_read_args r = { id, 0 };
+    int fd = open("/dev/nvhost-ctrl", O_RDWR);
+    if (fd < 0) return 0;
+    ioctl(fd, NVHOST_IOCTL_CTRL_SYNCPT_READ, &r);
+    close(fd);
+    return r.value;
+}
+
 static int vi_flush(const char *what)
 {
     if (!batch_n) return 0;
@@ -1097,19 +1108,35 @@ int main(int argc, char **argv)
         sa.class_ids = (uint32_t)(uintptr_t)&cls;
         sa.fences = (uint32_t)(uintptr_t)&fence;
 
-        /* Fire more than once. Frames are arriving -- the frame-start
-         * syncpoint moves -- so a single shot may simply have landed in
-         * the middle of one and been consumed without a full frame to
-         * write. */
-        int rc = 0;
+        /* Submit once, only to get the surface address written through a
+         * relocation -- that is the sole reason this goes through host1x.
+         * The trigger is a different matter: the driver fires it with a
+         * plain register write, and doing it any other way is a difference
+         * we introduced and never justified. */
+        errno = 0;
+        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+        printf("surface programmed via host1x: %d words, rc=%d (%s)\n",
+               n, rc, rc == 0 ? "ok" : strerror(errno));
+        usleep(50000);
+
+        /* Now the shots, as the driver does them: re-arm the parser, arm the
+         * frame-start condition, write the trigger, and see whether the
+         * counter moves. Each attempt reports for itself. */
         for (int shot = 0; shot < shots; shot++) {
-            errno = 0;
-            rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-            if (rc < 0) break;
-            usleep(120000);
+            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8
+                  | sp_id);
+            vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+            vi_flush("shot");
+            usleep(150000);
+            printf("  shot %d: frame start %u, parser %08x, single shot %08x\n",
+                   shot, syncpt_read(sp_id),
+                   vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
+                               : T124_PP_A_PIXEL_PARSER_STATUS),
+                   vi_rd(base + VI_CSI_SINGLE_SHOT));
         }
-        printf("surface + shot submitted %d times: %d words, rc=%d (%s)\n",
-               shots, n, rc, rc == 0 ? "ok" : strerror(errno));
 
         /* Now that the shots are away, arm the acknowledge -- the driver's
          * order, and it costs nothing if the DMA has already finished. */

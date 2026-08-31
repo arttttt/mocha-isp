@@ -103,12 +103,10 @@ struct nvhost32_ctrl_module_regrdwr_args {
 static int isp_class = ISP_CLASS_B;  /* default ISP-B */
 #define ISP_CLASS isp_class
 
-/* Frame params */
-#define W 2592
-#define H 1944
+/* Frame params: W/H are runtime (--width/--height), defaults 2592x1944.
+   No compile-time geometry: every derived value is computed in main. */
 #define BPP 2
-#define IN_SIZE  (W * H * BPP)
-#define OUT_SIZE (W * 4 * H)
+static unsigned W = 2592, H = 1944;
 
 static int nvmap_fd = -1;
 
@@ -158,18 +156,35 @@ static uint32_t nvmap_pin(uint32_t handle) {
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("Usage: %s <raw_bayer_file> [format_hex] [isp_enable_hex] [--miui]\n", argv[0]);
+        printf("Usage: %s <raw_bayer_file> [format_hex] [isp_enable_hex] "
+               "[--width=N] [--height=N] [--yuv] [--nv12] [--nv12-layout] "
+               "[--rgba-in]\n"
+               "  defaults: 2592x1944\n", argv[0]);
         return 1;
     }
 
     int use_yuv = 0, rgba_input = 0, nv12_mode = 0, nv12_layout = 0;
     for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--width=", 8) == 0)
+            W = (unsigned)strtoul(argv[i] + 8, 0, 0);
+        if (strncmp(argv[i], "--height=", 9) == 0)
+            H = (unsigned)strtoul(argv[i] + 9, 0, 0);
         if (strcmp(argv[i], "--yuv") == 0) use_yuv = 1;
         if (strcmp(argv[i], "--rgba-in") == 0) rgba_input = 1;
-        /* --nv12 = format 0xE7 + 2 planes, same UV_STRIDE buffer */
+        /* --nv12 = format 0xE7 + 2 planes, same UV-stride buffer */
         if (strcmp(argv[i], "--nv12") == 0) { use_yuv = 1; nv12_mode = 1; }
-        /* --nv12-layout = format 0xE7 + 2 planes + UV stride=Y_STRIDE */
+        /* --nv12-layout = format 0xE7 + 2 planes + UV stride = Y stride */
         if (strcmp(argv[i], "--nv12-layout") == 0) { use_yuv = 1; nv12_mode = 1; nv12_layout = 1; }
+    }
+    if (W == 0 || H == 0 || (W & 1) || (H & 1)) {
+        printf("bad geometry: --width/--height must be nonzero even numbers\n");
+        return 1;
+    }
+    {
+        unsigned in_size = W * H * BPP;
+        unsigned out_size = W * 4 * H;
+        printf("Geometry: W=%u H=%u BPP=%u in=%u out=%u\n",
+               W, H, BPP, in_size, out_size);
     }
 
     printf("=== ISP Pure Reprocess (no blobs)%s ===\n",
@@ -277,9 +292,10 @@ int main(int argc, char **argv)
            isp_fd, sp_memory, sp_stats, sp_loadv);
 
     /* Allocate buffers */
-    uint32_t in_size = rgba_input ? OUT_SIZE : IN_SIZE;
+    uint32_t out_size = W * 4 * H;
+    uint32_t in_size = rgba_input ? out_size : W * H * BPP;
     uint32_t in_h = nvmap_create(in_size);
-    uint32_t out_h = nvmap_create(OUT_SIZE);
+    uint32_t out_h = nvmap_create(out_size);
     uint32_t work_h = nvmap_create(512 * 1024);  /* ISP work buffer */
     uint32_t cmd_h = nvmap_create(32768);  /* larger for lens shading + tone curves */
     uint32_t param_h = nvmap_create(4096); /* ISP demosaic parameter block */
@@ -317,6 +333,19 @@ int main(int argc, char **argv)
 
     /* Load raw frame */
     printf("Loading %s...\n", argv[1]);
+    {
+        FILE *sz = fopen(argv[1], "rb");
+        if (sz != 0) {
+            fseek(sz, 0, SEEK_END);
+            long fsz = ftell(sz);
+            fclose(sz);
+            unsigned expect = W * H * BPP;
+            if ((unsigned)fsz != expect)
+                printf("WARNING: input file %ld bytes, expected %u for "
+                       "%ux%u -- continuing (tool reads partial files)\n",
+                       fsz, expect, W, H);
+        }
+    }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror("open raw"); return 1; }
     uint8_t *raw_buf = malloc(in_size);
@@ -332,8 +361,8 @@ int main(int argc, char **argv)
 
     /* Zero output */
     uint8_t *zeros = calloc(1, chunk);
-    for (int off = 0; off < OUT_SIZE; off += chunk) {
-        int sz = (OUT_SIZE - off < chunk) ? OUT_SIZE - off : chunk;
+    for (int off = 0; off < out_size; off += chunk) {
+        int sz = (out_size - off < chunk) ? out_size - off : chunk;
         nvmap_write(out_h, off, zeros, sz);
     }
     free(zeros);
@@ -628,11 +657,13 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE02, 1);
 
     /* YUV420 planar: stride=(W+63)&~63, UV stride=((W/2)+63)&~63 */
-    #define Y_STRIDE  ((W + 63) & ~63)         /* 2624 */
-    #define UV_STRIDE (((W / 2) + 63) & ~63)   /* 1344 */
-    #define Y_SIZE    (Y_STRIDE * H)            /* 5101056 */
-    #define U_SIZE    (UV_STRIDE * (H / 2))     /* 1306368 */
-    #define V_SIZE    U_SIZE
+    uint32_t y_stride = (W + 63) & ~(uint32_t)63;
+    uint32_t uv_stride = ((W / 2) + 63) & ~(uint32_t)63;
+    uint32_t y_size = y_stride * H;
+    uint32_t u_size = uv_stride * (H / 2);
+    uint32_t v_size = u_size;
+    printf("Planes: Y stride=%u size=%u | UV stride=%u U=%u V=%u\n",
+           y_stride, y_size, uv_stride, u_size, v_size);
 
     uint32_t out_fmt;
     if (nv12_mode)         out_fmt = 0x010000E7;   /* NV12 (2-plane interleaved) */
@@ -645,17 +676,18 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE03, 1);
     cmd[n++] = 0x00000000;            /* output color config (stock=0) */
 
-    /* UV layout: NV12 has interleaved UV at stride Y_STRIDE (W bytes per row),
-     * YUV420P has separate U+V planes at UV_STRIDE (W/2 aligned 64). */
-    uint32_t uv_stride_used = nv12_layout ? Y_STRIDE : UV_STRIDE;
-    uint32_t uv_offset_used = nv12_layout ? Y_SIZE : 0x540000;
+    /* UV layout: NV12 has interleaved UV at Y stride (W bytes per row),
+     * YUV420P has separate U+V planes at UV stride (W/2 aligned 64). */
+    uint32_t uv_stride_used = nv12_layout ? y_stride : uv_stride;
+    uint32_t uv_offset_used = nv12_layout ? y_size
+                                          : (y_size + 4095u) & ~4095u;
 
     /* Output Y surface */
     cmd[n++] = OP_INCR(0xE04, 3);
     y_reloc = n;
     cmd[n++] = 0;
     cmd[n++] = 0x00000000;
-    cmd[n++] = use_yuv ? Y_STRIDE : W * 4;
+    cmd[n++] = use_yuv ? y_stride : W * 4;
     /* U surface (in NV12 this is UV interleaved plane) */
     cmd[n++] = OP_INCR(0xE07, 3);
     u_reloc = n;
@@ -668,7 +700,7 @@ int main(int argc, char **argv)
         v_reloc = n;
         cmd[n++] = 0;
         cmd[n++] = 0x00000000;
-        cmd[n++] = use_yuv ? UV_STRIDE : W * 4;
+        cmd[n++] = use_yuv ? uv_stride : W * 4;
     }
 
     /* Input: dims + format + surface + strip + trigger */
@@ -733,7 +765,7 @@ int main(int argc, char **argv)
     relocs[nr] = (struct nvhost_reloc){ cmd_h, u_reloc*4, out_h, use_yuv ? uv_offset_used : 0 };
     shifts[nr++].shift = 0;
     if (!nv12_mode) {
-        relocs[nr] = (struct nvhost_reloc){ cmd_h, v_reloc*4, out_h, use_yuv ? (0x540000 + U_SIZE) : 0 };
+        relocs[nr] = (struct nvhost_reloc){ cmd_h, v_reloc*4, out_h, use_yuv ? (uv_offset_used + u_size) : 0 };
         shifts[nr++].shift = 0;
     }
     relocs[nr] = (struct nvhost_reloc){ cmd_h, in_reloc*4, in_h, 0 };
@@ -796,7 +828,7 @@ int main(int argc, char **argv)
     /* Check U plane for YUV */
     if (use_yuv) {
         uint8_t ucheck[64];
-        nvmap_read(out_h, 0x540000, ucheck, 64);
+        nvmap_read(out_h, uv_offset_used, ucheck, 64);
         int unz = 0;
         for (int i = 0; i < 64; i++) if (ucheck[i]) unz++;
         printf("U plane first 64 bytes: %d non-zero → ", unz);
@@ -805,7 +837,8 @@ int main(int argc, char **argv)
     }
 
     /* Dump full output */
-    int dump_size = use_yuv ? (0x540000 + U_SIZE + V_SIZE) : OUT_SIZE;
+    int dump_size = use_yuv ? (int)(uv_offset_used + u_size + v_size)
+                         : (int)out_size;
     char outpath[128];
     snprintf(outpath, sizeof(outpath), "/data/local/tmp/isp_fmt_%08x.bin", out_fmt);
     FILE *fp = fopen(outpath, "wb");

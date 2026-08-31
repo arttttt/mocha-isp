@@ -1501,6 +1501,7 @@ int main(int argc, char **argv)
     /* Send the calibration with every frame rather than once, as stock
      * does. The init then carries only the clearing pass. */
     int per_frame_cal = 1;
+    int out_iovmm = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1569,6 +1570,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--out-kind=", 11) == 0)
             out_kind = (unsigned)strtoul(a + 11, 0, 16);
         else if (strcmp(a, "--no-init-a") == 0)    init_a = 0;
+        else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1768,8 +1770,16 @@ int main(int argc, char **argv)
 
         out_h = nvmap_create(out_bytes);
         if (out_h) {
+            /* The contiguous heap is what VI needs, but the ISP's output at
+             * full resolution is twenty megabytes and the write faults part
+             * way through -- five hundred rows in. Whether that heap can
+             * hand out a run that long is a fair question, so the output
+             * can come from the scattered one instead. */
+            uint32_t save = alloc_heap;
+            if (out_iovmm) alloc_heap = NVMAP_HEAP_IOVMM;
             int ok = out_kind ? nvmap_alloc_kind(out_h, out_kind)
                               : nvmap_alloc(out_h);
+            alloc_heap = save;
             if (ok == 0) out_iova = nvmap_pin(out_h);
         }
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"

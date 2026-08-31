@@ -717,6 +717,17 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
 
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
+
+    /* Hold the job until the ISP says it has finished writing. The output
+     * buffer's mapping belongs to this job, and letting it retire the
+     * instant the trigger was written left the ISP writing into an address
+     * that was no longer translated -- the memory controller faulted on the
+     * buffer's base and the picture came back part written. Waiting on the
+     * block's own completion releases the job exactly when it is safe. */
+    g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+    g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+    g[n++] = (sp_mem << 24) | ((syncpt_read(sp_mem) + 1) & 0xFFFFFF);
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);

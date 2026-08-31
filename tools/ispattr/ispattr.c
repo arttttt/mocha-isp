@@ -156,12 +156,14 @@ int main(int argc, char **argv)
          * else -- because the question is whether the stage comes on, not
          * yet what it computes. The library normalises these to ten-bit
          * fixed point and refuses anything above about eight. */
-        static float m[4][9], k[4][16];
+        static float m[4][9], k[4][16], k2[4][16];
         for (int q = 0; q < 4; q++) {
             memset(m[q], 0, sizeof m[q]);
             memset(k[q], 0, sizeof k[q]);
+            memset(k2[q], 0, sizeof k2[q]);
             m[q][4] = 1.0f;                  /* centre of the 3x3 */
-            k[q][5] = 1.0f;                  /* centre-ish of the 4x4 */
+            k[q][5] = 1.0f;
+            k2[q][5] = 1.0f;
         }
 
         uint8_t st[0x40];
@@ -175,6 +177,12 @@ int main(int argc, char **argv)
         memcpy(st + 0x1c, &sixteen, 4);
         for (int q = 0; q < 4; q++)
             memcpy(st + 0x20 + 4 * q, &(void *){ k[q] }, 4);
+        /* And a third set at +0x30: the handler reads pointers from there
+         * too, which is where it died last -- so the tail is not padding,
+         * and three groups of four pointers fill the sixty-four bytes
+         * exactly. */
+        for (int q = 0; q < 4; q++)
+            memcpy(st + 0x30 + 4 * q, &(void *){ k2[q] }, 4);
         (void)coeff;
 
         printf("block: enable=%u count=%u ptr=%08x  enable2=%u count2=%u"

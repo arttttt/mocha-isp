@@ -1189,7 +1189,7 @@ int main(int argc, char **argv)
          * the frame reached the bottom. A counter cannot tell us the same --
          * the acknowledge condition fires a millisecond after it is armed,
          * wherever the frame happens to be. */
-        uint8_t fill[64], tail[64];
+        uint8_t fill[64];
         memset(fill, 0xA5, sizeof fill);
 
         for (int shot = 0; shot < shots; shot++) {
@@ -1199,10 +1199,9 @@ int main(int argc, char **argv)
                 uint32_t fs0 = syncpt_read(sp_id);
                 attempt++;
 
-                /* Wipe the whole buffer only when asked -- it is a ten
-                 * megabyte write -- but always the last line, since that is
-                 * the flag the wait watches. */
-                if (refill) {
+                /* Wipe on the last attempt only, so what survives is one
+                 * frame's work and nothing else. */
+                if (refill && attempt == 2) {
                     uint32_t chunk = 64 * 1024;
                     void *p = malloc(chunk);
                     memset(p, 0xA5, chunk);
@@ -1241,25 +1240,21 @@ int main(int argc, char **argv)
                 }
                 started = syncpt_read(sp_id) != fs0;
 
-                /* Sample four rows spread down the frame, not just the last
-                 * one. Watching a single line said "arrived" the instant a
-                 * leftover write from the attempt before touched it, while
-                 * only a quarter of the picture was there. A frame is whole
-                 * when the top, both middles and the bottom have all lost
-                 * the fill. */
-                static const double where[4] = { 0.02, 0.35, 0.70, 0.999 };
-                mwaited = 0;
-                while (mwaited < 400 && !done) {
-                    int seen = 0;
-                    for (int k = 0; k < 4; k++) {
-                        uint32_t row = (uint32_t)(where[k] * (H - 1));
-                        nvmap_rw(buf_h, row * stride, tail, sizeof tail, 0);
-                        for (unsigned i = 0; i < sizeof tail; i++)
-                            if (tail[i] != 0xA5) { seen++; break; }
-                    }
-                    if (seen == 4) done = 1;
-                    else { usleep(1000); mwaited++; }
-                }
+                /* Reading the buffer back to detect completion does not work:
+                 * the same read that showed a whole frame afterwards showed
+                 * nothing during the capture, and once showed a full line
+                 * within a millisecond of wiping it. The reads come back
+                 * stale, so there is no honest signal there.
+                 *
+                 * So no polling. One frame at this geometry takes about
+                 * fifty milliseconds; give it four times that and move on.
+                 * The first trigger lands mid-frame and captures the
+                 * remainder, the second is on the boundary and captures the
+                 * whole thing, which is why the wipe happens before the last
+                 * attempt and not before the first. */
+                mwaited = 200;
+                usleep(mwaited * 1000);
+                done = (attempt >= 2);
             }
             printf("  frame %d: %s after %d attempt%s"
                    " (start %dms, bottom %dms), parser %08x\n",

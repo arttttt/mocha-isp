@@ -886,19 +886,14 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
 
-    /* Hold the job so the output buffer stays mapped: letting it retire the
-     * instant the trigger was written left the ISP writing into an address
-     * no longer translated, and the picture came back part written.
-     *
-     * The wait is on a counter WE raise, not on the ISP's own completion.
-     * Parking on the block's completion looked neater and killed the
-     * channel the first time a frame did not complete -- the wait never
-     * lifted, host1x timed the channel out, and that costs a reboot. */
-    g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-    g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-    g[n++] = (hold_sp << 24) | (hold_at & 0xFFFFFF);
-    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    /* No parked job here. Twice now a host1x wait held this channel past
+     * the timeout the kernel allows and killed it, and each time cost a
+     * reboot. It was never the right cure anyway: the buffer went
+     * unmapped because the ISP was still writing after our program had
+     * torn everything down, and waiting for the block to report the write
+     * before we tear down fixes that without holding anything. */
     g[n++] = OP_IMM(0, sp);
+    (void)hold_sp; (void)hold_at;
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
@@ -1934,11 +1929,10 @@ int main(int argc, char **argv)
                  * block has to be armed and waiting when the pixels cross,
                  * because nothing buffers them on the way. */
                 if (isp_fd >= 0 && out_iova && stats_h) {
-                    isp_hold_thresh = syncpt_read(sp_mw) + 1;
+                    isp_base_mem = syncpt_read(sp_mem);
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
-                              sp_mem, sp_stats, sp_loadv, isp_sp,
-                              sp_mw, isp_hold_thresh);
+                              sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0);
                 }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
@@ -1965,21 +1959,14 @@ int main(int argc, char **argv)
                  * running past the job timeout the kernel allows -- and a
                  * job that overruns takes the ISP channel with it, which
                  * costs a reboot. Short and self-limiting instead. */
-                if (isp_hold_thresh) {
+                if (isp_fd >= 0 && out_iova) {
                     int w2 = 0;
                     while (syncpt_read(sp_mem) == isp_base_mem && w2 < 600) {
                         usleep(1000);
                         w2++;
                     }
-                    int cfd = open("/dev/nvhost-ctrl", O_RDWR);
-                    if (cfd >= 0) {
-                        struct nvhost_ctrl_syncpt_incr_args ia = { sp_mw };
-                        ioctl(cfd, NVHOST_IOCTL_CTRL_SYNCPT_INCR, &ia);
-                        close(cfd);
-                    }
                     printf("  ISP wrote after %dms%s\n", w2,
                            syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
-                    isp_hold_thresh = 0;
                 }
 
                 /* One whole frame from the start, plus what the caller asks

@@ -1502,6 +1502,7 @@ int main(int argc, char **argv)
      * does. The init then carries only the clearing pass. */
     int per_frame_cal = 1;
     int out_iovmm = 0;
+    int isp_only = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1571,6 +1572,8 @@ int main(int argc, char **argv)
             out_kind = (unsigned)strtoul(a + 11, 0, 16);
         else if (strcmp(a, "--no-init-a") == 0)    init_a = 0;
         else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
+        else if (strcmp(a, "--isp-only") == 0)     { isp_only = 1;
+                                                     use_sensor = 0; }
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1932,6 +1935,14 @@ int main(int argc, char **argv)
         dump_regs = 1;      /* this is the state where capture works */
         goto readback;
     }
+
+    /* --isp-only: arm the ISP and touch nothing else. The kernel's own
+     * pattern facility drives VI -- it powers the block, enables the
+     * generator, sets the routing and fires the shot -- so this lets the
+     * colour path be tested on a synthetic frame, with the sensor and our
+     * whole receiver bring-up out of the picture. If the mosaic survives
+     * that too, the question is not about how we describe the sensor. */
+    if (isp_only) goto isp_wait;
 
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
@@ -2545,6 +2556,29 @@ int main(int argc, char **argv)
         }
     }
     usleep(200000);
+    goto after_readback;
+
+isp_wait:
+    /* Arm the ISP, then sit still while something else drives VI. */
+    if (isp_fd >= 0 && out_iova && stats_h) {
+        isp_base_mem = syncpt_read(sp_mem);
+        isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+                  isp_trigger, u_off, v_off, sp_mem, sp_stats, sp_loadv,
+                  isp_sp, 0, 0, isp_in_fmt, work_iova, per_frame_cal);
+        int w3 = 0;
+        while (syncpt_read(sp_mem) == isp_base_mem && w3 < 4000) {
+            isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off, isp_sp);
+            usleep(5000);
+            w3 += 5;
+        }
+        printf("ISP armed and waiting: wrote %s after %dms\n",
+               syncpt_read(sp_mem) != isp_base_mem ? "yes" : "NO", w3);
+        isp_stop(isp_fd, isp_sp);
+    }
+    goto after_readback;
+
+after_readback:
+    if (isp_only) goto readback;
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),

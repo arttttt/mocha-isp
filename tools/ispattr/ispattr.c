@@ -82,6 +82,22 @@ int main(int argc, char **argv)
     printf("NvIspOpen(instance %d): rc=%d handle=%p\n", instance, rc, hIsp);
     if (!hIsp) return 1;
 
+    /* Configure the session before asking for settings. The other tool that
+     * drives this library does it in this order, and a settings object made
+     * against an unconfigured session is a fair suspect for a handler that
+     * dies rather than answers. The selector set is the one the camera
+     * stack sends. */
+    int (*NvIspSetConfiguration)(void *, int, void *, unsigned *) =
+        dlsym(isp, "NvIspSetConfiguration");
+    if (NvIspSetConfiguration) {
+        uint32_t cfg[16] = {
+            1, 7, 9, 0xa, 3, 0, 6, 8, 0x11, 0xf, 0xc, 0xe, 0xb, 0, 0x10, 0xd
+        };
+        unsigned sz = sizeof cfg;
+        int crc = NvIspSetConfiguration(hIsp, 1, cfg, &sz);
+        printf("NvIspSetConfiguration: rc=%d\n", crc);
+    }
+
     void *hSet = 0;
     rc = HwSettingsCreate(hIsp, &hSet);
     printf("HwSettingsCreate: rc=%d handle=%p\n", rc, hSet);

@@ -223,6 +223,34 @@ struct regrdwr_args {
 };
 struct nvhost_get_param_arg { uint32_t param, value; };
 struct nvhost_set_nvmap_fd_args { uint32_t fd; };
+struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
+struct nvhost_cmdbuf { uint32_t mem, offset, words; };
+struct nvhost_reloc { uint32_t cmdbuf_mem, cmdbuf_offset, target, target_offset; };
+struct nvhost_reloc_shift { uint32_t shift; };
+struct nvhost_fence { uint32_t syncpt_id, value; };
+struct nvhost32_submit_args {
+    uint32_t submit_version, num_syncpt_incrs, num_cmdbufs, num_relocs,
+             num_waitchks, timeout, syncpt_incrs, cmdbufs, relocs,
+             reloc_shifts, waitchks, waitbases, class_ids, pad[2],
+             fences, fence;
+} __attribute__((packed));
+#define NVHOST32_IOCTL_CHANNEL_SUBMIT \
+    _IOWR(NVHOST_IOCTL_MAGIC, 15, struct nvhost32_submit_args)
+
+/* Host1x opcodes and the VI class. The surface address cannot be written
+ * by hand: it is an address in VI's own translation context, and the only
+ * way to get one is to let the kernel relocate a handle for us -- which
+ * means a real submit rather than a register poke.
+ *
+ * Method numbers are not the register offsets. Two known pairs from the
+ * kernel's own VI gather fix them: the image definition is offset 0x10C on
+ * channel 0 and method 0x242, and 0x20C on channel 1 and method 0x282. So
+ * method = offset/4 + 0x1FF, and both pairs agree. */
+#define OP_SETCLASS(c)     ((0u << 28) | ((c) << 6))
+#define OP_INCR(m, n)      ((1u << 28) | ((m) << 16) | (n))
+#define OP_IMM(m, v)       ((4u << 28) | ((m) << 16) | ((v) & 0xffff))
+#define VI_CLASS_ID        0x30
+#define VI_METHOD(off)     (((off) >> 2) + 0x1FF)
 #define NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD \
     _IOW(NVHOST_IOCTL_MAGIC, 5, struct nvhost_set_nvmap_fd_args)
 #define NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT \
@@ -666,8 +694,8 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
     vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);
-    vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
-    vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+    /* The surface address is left out of the register batch on purpose --
+     * it goes in through a submit below, where the kernel can relocate it. */
     vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
 
     /* Pixel parser: single shot, armed for one frame. */
@@ -689,9 +717,52 @@ int main(int argc, char **argv)
     /* And the trigger goes in the same batch: the receiver has to still be
      * powered and configured when the shot is fired, which is the whole
      * reason for doing this in one call. */
-    vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-    vi_flush("setup + single shot");
-    usleep(200000);
+    vi_flush("setup");
+
+    /* Surface address and trigger through host1x, so the buffer is mapped
+     * into VI's context and the address written is one it can reach. */
+    {
+        uint32_t cmd_h = nvmap_create(4096);
+        nvmap_alloc(cmd_h);
+        uint32_t g[10];
+        int n = 0, addr_word;
+        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+        g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
+        g[n++] = 0;
+        g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_LSB), 1);
+        addr_word = n;
+        g[n++] = 0;                       /* the kernel fills this in */
+        g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
+        g[n++] = SINGLE_SHOT_CAPTURE;
+        g[n++] = OP_IMM(0, sp_id);        /* retire the syncpoint */
+        nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+        struct nvhost_reloc rel = { cmd_h, (uint32_t)addr_word * 4, buf_h, 0 };
+        struct nvhost_reloc_shift sh = { 0 };
+        struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+        struct nvhost_syncpt_incr si = { sp_id, 1 };
+        uint32_t cls = VI_CLASS_ID;
+        struct nvhost_fence fence = { 0, 0 };
+        struct nvhost32_submit_args sa;
+        memset(&sa, 0, sizeof sa);
+        sa.num_syncpt_incrs = 1;
+        sa.num_cmdbufs = 1;
+        sa.num_relocs = 1;
+        sa.timeout = 3000;
+        sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+        sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+        sa.relocs = (uint32_t)(uintptr_t)&rel;
+        sa.reloc_shifts = (uint32_t)(uintptr_t)&sh;
+        sa.class_ids = (uint32_t)(uintptr_t)&cls;
+        sa.fences = (uint32_t)(uintptr_t)&fence;
+
+        errno = 0;
+        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+        printf("surface + shot submitted: %d words, rc=%d (%s), fence=%u\n",
+               n, rc, rc == 0 ? "ok" : strerror(errno), sa.fence);
+        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    }
+    usleep(300000);
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),

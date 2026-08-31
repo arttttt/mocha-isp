@@ -1157,7 +1157,10 @@ int main(int argc, char **argv)
         sa.num_syncpt_incrs = 1;
         sa.num_cmdbufs = 1;
         sa.num_relocs = 1;
-        sa.timeout = 3000;
+        /* Parked on purpose, so it has to outlive the capture: the default
+         * three seconds is shorter than a run and host1x kills the channel
+         * when a job overruns. */
+        sa.timeout = 60000;
         sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
         sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
         sa.relocs = (uint32_t)(uintptr_t)&rel;

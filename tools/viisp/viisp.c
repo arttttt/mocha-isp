@@ -1406,9 +1406,22 @@ int main(int argc, char **argv)
     {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
-        uint32_t g[16];
+        uint32_t g[24];
         int n = 0, addr_word;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
+
+        /* Routing to the ISP, through host1x methods rather than register
+         * writes. The note left in the 24.1 driver is explicit about the
+         * difference: writing these registers sets the bits but does not
+         * activate the pixel path, while the methods do. The numbering is
+         * the driver's own -- 0x099 for port B's ISP interface and 0x282
+         * for its image definition -- and it is not the +0x1FF form the
+         * rest of the channel uses. */
+        g[n++] = OP_INCR(0x099, 1);
+        g[n++] = ISPINTF_CONFIG_ENABLE;
+        g[n++] = OP_INCR(0x282, 1);
+        g[n++] = image_def;
+
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
         g[n++] = 0;
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_LSB), 1);
@@ -1443,7 +1456,11 @@ int main(int argc, char **argv)
         sa.num_syncpt_incrs = 1;
         sa.num_cmdbufs = 1;
         sa.num_relocs = 1;
-        sa.timeout = 3000;
+        /* This job is parked on purpose and must outlive the capture. Three
+         * seconds was the default and the capture grew past it once the ISP
+         * joined in, so host1x killed the VI channel -- vi0_stream timing
+         * out in the log. Long enough that only a genuine hang reaches it. */
+        sa.timeout = 60000;
         sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
         sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
         sa.relocs = (uint32_t)(uintptr_t)&rel;

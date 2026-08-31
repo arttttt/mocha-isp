@@ -741,6 +741,12 @@ int main(int argc, char **argv)
     /* objload=<path>: clone the stock gate object from a file captured
        by objread, into OUR object after Open (the object lives in our
        own address space, plain memcpy). objlen caps the write. */
+    int planes_on = 0;
+    const char *planesfile_path = "/data/local/tmp/planesfile.txt";
+    unsigned planes_submit = 0;
+    unsigned planes_uoff = 512, planes_voff = 256;
+    unsigned planes_sy = 64, planes_suv = 64;
+    int planes_fmt_note = 0;
     int objload_on = 0;
     const char *objload_path = "/data/local/tmp/stock_obj.bin";
     unsigned objlen = 0x1000; /* start small; 0x4000 is the full dump */
@@ -780,6 +786,9 @@ int main(int argc, char **argv)
                                syncpoints -- timeouts land late */
 
     unsigned retry_n = 1;                 /* submissions per run */
+    void *memh_in = 0;
+    void *memh_out = 0;
+    unsigned planes_y = 0;
     unsigned a10_val[44], a14_val[44];
     unsigned params_fill = 0x3f000000u; /* params filler word, fill= key */
     unsigned char a10_set[44] = {{0}}, a14_set[44] = {{0}};
@@ -1635,6 +1644,72 @@ int main(int argc, char **argv)
             inst = (unsigned)v;
             continue;
         }
+        if (strncmp(tok, "planes=", 7) == 0) {
+            if (strcmp(tok + 7, "on") == 0)
+                planes_on = 1;
+            else if (strcmp(tok + 7, "off") == 0)
+                planes_on = 0;
+            else {
+                printf("[0] bad planes '%s', use on|off\n", argv[ai]);
+                return 1;
+            }
+            continue;
+        }
+        if (strncmp(tok, "planesfile=", 11) == 0) {
+            planesfile_path = tok + 11;
+            continue;
+        }
+        if (strncmp(tok, "planessubmit=", 13) == 0) {
+            char *e35 = 0;
+            long v = strtol(tok + 13, &e35, 0);
+            if (e35 == tok + 13 || *e35 != '\0' || v < 0) {
+                printf("[0] bad planessubmit '%s'\n", argv[ai]);
+                return 1;
+            }
+            planes_submit = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "planesy=", 8) == 0) {
+            char *e36 = 0;
+            long v = strtol(tok + 8, &e36, 0);
+            if (e36 == tok + 8 || *e36 != '\0' || v <= 0) {
+                printf("[0] bad planesy '%s'\n", argv[ai]);
+                return 1;
+            }
+            planes_y = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "planesu=", 8) == 0) {
+            char *e37 = 0;
+            long v = strtol(tok + 8, &e37, 0);
+            if (e37 == tok + 8 || *e37 != '\0' || v <= 0) {
+                printf("[0] bad planesu '%s'\n", argv[ai]);
+                return 1;
+            }
+            planes_uoff = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "planesv=", 8) == 0) {
+            char *e38 = 0;
+            long v = strtol(tok + 8, &e38, 0);
+            if (e38 == tok + 8 || *e38 != '\0' || v <= 0) {
+                printf("[0] bad planesv '%s'\n", argv[ai]);
+                return 1;
+            }
+            planes_voff = (unsigned)v;
+            continue;
+        }
+        if (strncmp(tok, "planesstride=", 13) == 0) {
+            char *e39 = 0;
+            long v = strtol(tok + 13, &e39, 0);
+            if (e39 == tok + 13 || *e39 != '\0' || v <= 0) {
+                printf("[0] bad planesstride '%s'\n", argv[ai]);
+                return 1;
+            }
+            planes_sy = (unsigned)v;
+            planes_suv = (unsigned)v;
+            continue;
+        }
         if (strncmp(tok, "statshandle=", 12) == 0) {
             char *e33 = 0;
             long v = strtol(tok + 12, &e33, 0);
@@ -2273,6 +2348,280 @@ round_trip_end:;
     printf("rc=0x%x size-after=%u\n", (unsigned)rc, size);
 
     /*
+     * [5e] OUTPUT BUFFER: allocate, pin, read device address -- EARLY,
+     * before the init chain. The planes= override needs the device
+     * address before HwSettingsApply makes the early submission.
+     * Attrs are the stock-captured set; heap word attrs[1] is
+     * selectable per surface (heapi=/heapo= iovmm|carveout|<mask>).
+     */
+    {
+        unsigned attrs_base[8] = { 0, 0, 0x20, 2, 0x40000u, 0, 0, 0 };
+        unsigned attrs_in[8];
+        unsigned attrs_out[8];
+        unsigned char *pat_out = 0;   /* the 0xDEADBEEF reference */
+        unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
+                                        record size */
+        unsigned desc_out[44] = {0};
+        unsigned gh, gw, gf, gt, gs, gp;
+        unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
+        unsigned desc_no[44] = {0}; /* frame description, no handle */
+        unsigned fenceA[16] = {0};  /* fence-return capture (slot kind) */
+        unsigned fenceB[16] = {0};  /* fence-return capture (slot kind) */
+        unsigned sbuf10[44] = {0};  /* buffer behind slot10 */
+        unsigned sbuf14[44] = {0};  /* buffer behind slot14 */
+        /* pre-call snapshots for the post-call diff */
+        unsigned snap_in[16], snap_out[16], snap_no[16];
+        unsigned snap_aux[7][16];
+        unsigned snap_s08[16], snap_s10[16], snap_s14[16], snap_s18[16];
+        unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
+        unsigned a1;
+        unsigned sv[7];   /* stack slot values, +00..+20 in slot order */
+        unsigned s08, s10, s14, s18;
+        int i, k;
+        static const char aux_names[7][3] = {
+            "00", "04", "08", "0c", "18", "1c", "20"
+        };
+
+        /* stock-shape defaults for the two structured slots, built
+           from OUR session values (the stock's 3280/2460 were its
+           sensor geometry; ours are the frame's), then the a<slot>=
+           word overrides land on top:
+           +14 (slot14=aux): +1c mode, +30 width, +34 height,
+              +38.. 0x3f000000 (float 0.5) to the end;
+           +1c: 3, width, height, 1, 0, hIsp at +14, 2 at +38. */
+        /* mode 1: +0x08 is a POINTER to a structure whose first two
+           words are the frame geometry (ldm {r8,r10} at 0x3386) --
+           default-built here so the bare run is well-formed; the
+           a08= word overrides land on top. In mode 2 the slot is a
+           number (see the sv[] default below). */
+        bufs[2][0] = din_set[1] ? din_val[1] : 8; /* width */
+        bufs[2][1] = din_set[0] ? din_val[0] : 8; /* height */
+        bufs[5][0] = 3;
+        bufs[5][1] = din_set[1] ? din_val[1] : 8;
+        bufs[5][2] = din_set[0] ? din_val[0] : 8;
+        bufs[5][3] = 1;
+        bufs[5][4] = 0;
+        bufs[5][5] = (unsigned)hIsp;
+        bufs[5][14] = 2;
+        desc_no[0] = din_set[0] ? din_val[0] : 8;
+        desc_no[1] = din_set[1] ? din_val[1] : 8;
+        desc_no[2] = din_set[2] ? din_val[2] : 0x105a500cu;
+        desc_no[3] = din_set[3] ? din_val[3] : 1;
+        desc_no[4] = din_set[4] ? din_val[4] : 256;
+        desc_no[9] = din_set[9] ? din_val[9] : 1;
+
+        for (i = 0; i < 7; i++) {
+            for (k = 0; k < 44; k++) {
+                if (aux_isptr[i][k])
+                    bufs[i][k] = (unsigned)ptr_target;
+                else if (aux_set[i][k])
+                    bufs[i][k] = aux_val[i][k];
+            }
+        }
+
+        /* +00..+0c: each slot takes a NUMBER (n<slot>=<val>) or a
+           POINTER (aux=<slot>:on -> zeroed buffer), CLI-switchable --
+           the stock's +08/+0c = 3280/2460 numbers were read in mode 2,
+           and mode 1 may treat the same slots differently, so both
+           readings stay enumerable. Precedence: explicit number wins,
+           then pointer, then defaults (+08 = width number, +0c =
+           height number, +00/+04 = zero). */
+        {
+            unsigned gw_r = din_set[1] ? din_val[1] : 8;
+            unsigned gh_r = din_set[0] ? din_val[0] : 8;
+            for (i = 0; i < 4; i++) {
+                if (n_set[i])
+                    sv[i] = n_val[i];
+                else if (i == 2)
+                    sv[i] = 0; /* set after the descriptors are built */
+                else if (aux_on[i])
+                    sv[i] = (unsigned)bufs[i];
+                else
+                    sv[i] = (i == 2) ? gw_r : (i == 3) ? gh_r : 0;
+            }
+            sv[4] = aux_on[4] ? (unsigned)bufs[4] : 0;
+            sv[5] = aux_on[5] ? (unsigned)bufs[5] : 0;
+            sv[6] = aux_on[6] ? (unsigned)bufs[6] : 0;
+            printf("[12] slot values:");
+            for (i = 0; i < 7; i++)
+                printf(" +%s=%s0x%x", aux_names[i],
+                       (i < 4 && n_set[i]) ? "num " :
+                       (i < 4 && aux_on[i]) ? "ptr " : "    ", sv[i]);
+            printf("\n");
+            /* числа не снимаются диффом -- дифф только для буферных слотов */
+            for (i = 0; i < 7; i++)
+                for (k = 0; k < 16; k++)
+                    snap_aux[i][k] = bufs[i][k];
+
+        }
+
+        for (k = 0; k < 8; k++) {
+            attrs_in[k] = attrs_base[k];
+            attrs_out[k] = attrs_base[k];
+        }
+        /* attrs are the STOCK-CAPTURED values and are not modified by
+           default. heap_i/heap_o keys exist but heap selection is NOT
+           implemented: we do not yet know the attrs array layout
+           (pairs "tag,value" vs fixed fields) -- writing a guessed
+           word crashed libnvrm (mail-1087 report, reverted). The
+           kernel heap masks for reference: NVMAP_HEAP_IOVMM = 1<<30,
+           CARVEOUT_GENERIC = 1, CARVEOUT_IVM = 2. */
+        for (k = 0; k < 8; k++) {
+            if (attr_set[k]) {
+                attrs_in[k] = attr_val[k];
+                attrs_out[k] = attr_val[k];
+            }
+        }
+
+        printf("[10] attrs in|out:");
+        for (k = 0; k < 8; k++)
+            printf(" [%d]=0x%x|0x%x%s", k, attrs_in[k], attrs_out[k],
+                   attr_set[k] ? "*" : "");
+        printf("\n");
+
+        a1 = a1_set ? a1_val : (unsigned)dev;
+        printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_in) "
+               "[input] -> ", a1);
+        rc = nvRmMemHandleAllocAttr(a1, attrs_in, &memh_in);
+        printf("rc=0x%x memh_in=%p\n", (unsigned)rc, memh_in);
+
+        if (rc == 0 && memh_in != 0) {
+            printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_out) "
+                   "[output] -> ", a1);
+            rc = nvRmMemHandleAllocAttr(a1, attrs_out, &memh_out);
+            printf("rc=0x%x memh_out=%p\n", (unsigned)rc, memh_out);
+        }
+
+        if (rc != 0 || memh_in == 0 || memh_out == 0) {
+            printf("    alloc failed -- skipping submission, closing\n");
+        } else {
+            /* pin the output buffer and read its device address
+               (exports verified in libnvrm.so; both calls PRINT their
+               results -- a wrong arity shows in print, not in a crash) */
+            if (pin_on && memh_out != 0 && nvRmMemPin != 0) {
+                unsigned pa;
+                stage_now = "NvRmMemPin";
+                /* measured: Pin RETURNS the device address (0x800c0000
+                   in the field was an address, not an error code) */
+                pa = nvRmMemPin((unsigned)memh_out, 0);
+                stage_now = 0;
+                printf("[11a] NvRmMemPin(memh_out=0x%x) -> addr=0x%x\n",
+                       (unsigned)memh_out, pa);
+                if (pa != 0) {
+                    out_devaddr = pa;
+                    out_devaddr_valid = 1;
+                }
+            }
+            if (nvRmMemGetAddress != 0 && memh_out != 0) {
+                unsigned ga = nvRmMemGetAddress((unsigned)memh_out, 0);
+                printf("[11a] NvRmMemGetAddress(memh_out=0x%x, 0) -> "
+                       "0x%x\n",
+                       (unsigned)memh_out, ga);
+                if (out_devaddr_valid == 0) {
+                    out_devaddr = ga;
+                    out_devaddr_valid = 1;
+                }
+            }
+    }
+
+    /* planes=on: arm the EARLY override with the three-plane block */
+    if (planes_on) {
+        FILE *pf = fopen(planesfile_path, "r");
+        static unsigned pwords[8192];
+        unsigned pn = 0;
+        unsigned devY = planes_y != 0 ? planes_y
+                        : (out_devaddr_valid ? out_devaddr : 0);
+        unsigned devU = devY + planes_uoff;
+        unsigned devV = devU + planes_voff;
+        unsigned tail, place;
+        if (pf == 0) {
+            printf("[planes] cannot open %s -- not armed\n",
+                   planesfile_path);
+        } else {
+            char ln[256];
+            while (fgets(ln, sizeof(ln), pf) != 0 && pn < 8192) {
+                char *p2 = ln;
+                while (*p2) {
+                    while (*p2 == ' ' || *p2 == ',' || *p2 == '\n' ||
+                           *p2 == '\r' || *p2 == '\t')
+                        p2++;
+                    if (*p2 == '\0')
+                        break;
+                    {
+                        char *e34 = 0;
+                        unsigned long v3 = strtoul(p2, &e34, 16);
+                        if (e34 == p2)
+                            break;
+                        pwords[pn++] = (unsigned)v3;
+                        p2 = e34;
+                    }
+                }
+            }
+            fclose(pf);
+            printf("[planes] file: %u words\n", pn);
+        }
+        if (pn < 12) {
+            printf("[planes] too few words -- not armed\n");
+        } else if (out_devaddr_valid == 0) {
+            printf("[planes] no device address -- not armed\n");
+        } else {
+            /* find the trailing zero run; place the 12-word block so
+               it ends at the buffer end */
+            tail = 0;
+            while (tail < pn && pwords[pn - 1 - tail] == 0)
+                tail++;
+            if (tail < 12) {
+                printf("[planes] trailing zero run only %u words -- "
+                       "not armed\n", tail);
+            } else {
+                char tbuf[384];
+                place = pn - 12;
+                pwords[place + 0] = 0x1E040003u;
+                pwords[place + 1] = devY;
+                pwords[place + 2] = 0;
+                pwords[place + 3] = planes_sy;
+                pwords[place + 4] = 0x1E070003u;
+                pwords[place + 5] = devU;
+                pwords[place + 6] = 0;
+                pwords[place + 7] = planes_suv;
+                pwords[place + 8] = 0x1E0A0003u;
+                pwords[place + 9] = devV;
+                pwords[place + 10] = 0;
+                pwords[place + 11] = planes_suv;
+                printf("[planes] block at word %u: Y=0x%x U=0x%x V=0x%x "
+                       "strideY=%u strideUV=%u\n",
+                       place, devY, devU, devV, planes_sy, planes_suv);
+
+                /* arm: reset_counter, data, submit=planes_submit */
+                FILE *po = fopen("/proc/isp_patch_override", "w");
+                if (po != 0) {
+                    fprintf(po, "reset_counter\n");
+                    fclose(po);
+                }
+                po = fopen("/proc/isp_patch_override", "w");
+                if (po != 0) {
+                    fprintf(po, "data");
+                    for (unsigned z = 0; z < pn; z++)
+                        fprintf(po, " %08x", pwords[z]);
+                    fprintf(po, "\n");
+                    fclose(po);
+                }
+                po = fopen("/proc/isp_patch_override", "w");
+                if (po != 0) {
+                    fprintf(po, "submit=%u gather=0\n", planes_submit);
+                    fclose(po);
+                }
+                snprintf(tbuf, sizeof(tbuf),
+                         "[planes] armed: submit=%u gather=0, %u words, "
+                         "block at +%u\n",
+                         planes_submit, pn, place);
+                printf("%s", tbuf);
+            }
+        }
+    }
+
+
+    /*
      * [7b] the stock init chain, the calls we never made. Order and
      * arities are from the live hook log (out/hook-init-chain.txt),
      * not derived. After EACH step the stage-3 gate field prints:
@@ -2615,175 +2964,7 @@ round_trip_end:;
      * experiment lives in git history, commit be257b4.)
      */
     {
-        unsigned attrs_base[8] = { 0, 0, 0x20, 2, 0x40000u, 0, 0, 0 };
-        unsigned attrs_in[8];
-        unsigned attrs_out[8];
-        void *memh_in = 0;
-        void *memh_out = 0;
-        unsigned char *pat_out = 0;   /* the 0xDEADBEEF reference */
-        unsigned desc_in[44] = {0};  /* 0xb0 bytes each, the stock
-                                        record size */
-        unsigned desc_out[44] = {0};
-        unsigned gh, gw, gf, gt, gs, gp;
-        unsigned bufs[7][44] = {{0}}; /* one buffer per stack slot */
-        unsigned desc_no[44] = {0}; /* frame description, no handle */
-        unsigned fenceA[16] = {0};  /* fence-return capture (slot kind) */
-        unsigned fenceB[16] = {0};  /* fence-return capture (slot kind) */
-        unsigned sbuf10[44] = {0};  /* buffer behind slot10 */
-        unsigned sbuf14[44] = {0};  /* buffer behind slot14 */
-        /* pre-call snapshots for the post-call diff */
-        unsigned snap_in[16], snap_out[16], snap_no[16];
-        unsigned snap_aux[7][16];
-        unsigned snap_s08[16], snap_s10[16], snap_s14[16], snap_s18[16];
-        unsigned ptr_target[44] = {0}; /* shared target for word=ptr */
-        unsigned a1;
-        unsigned sv[7];   /* stack slot values, +00..+20 in slot order */
-        unsigned s08, s10, s14, s18;
-        int i, k;
-        static const char aux_names[7][3] = {
-            "00", "04", "08", "0c", "18", "1c", "20"
-        };
-
-        /* stock-shape defaults for the two structured slots, built
-           from OUR session values (the stock's 3280/2460 were its
-           sensor geometry; ours are the frame's), then the a<slot>=
-           word overrides land on top:
-           +14 (slot14=aux): +1c mode, +30 width, +34 height,
-              +38.. 0x3f000000 (float 0.5) to the end;
-           +1c: 3, width, height, 1, 0, hIsp at +14, 2 at +38. */
-        /* mode 1: +0x08 is a POINTER to a structure whose first two
-           words are the frame geometry (ldm {r8,r10} at 0x3386) --
-           default-built here so the bare run is well-formed; the
-           a08= word overrides land on top. In mode 2 the slot is a
-           number (see the sv[] default below). */
-        bufs[2][0] = din_set[1] ? din_val[1] : 8; /* width */
-        bufs[2][1] = din_set[0] ? din_val[0] : 8; /* height */
-        bufs[5][0] = 3;
-        bufs[5][1] = din_set[1] ? din_val[1] : 8;
-        bufs[5][2] = din_set[0] ? din_val[0] : 8;
-        bufs[5][3] = 1;
-        bufs[5][4] = 0;
-        bufs[5][5] = (unsigned)hIsp;
-        bufs[5][14] = 2;
-        desc_no[0] = din_set[0] ? din_val[0] : 8;
-        desc_no[1] = din_set[1] ? din_val[1] : 8;
-        desc_no[2] = din_set[2] ? din_val[2] : 0x105a500cu;
-        desc_no[3] = din_set[3] ? din_val[3] : 1;
-        desc_no[4] = din_set[4] ? din_val[4] : 256;
-        desc_no[9] = din_set[9] ? din_val[9] : 1;
-
-        for (i = 0; i < 7; i++) {
-            for (k = 0; k < 44; k++) {
-                if (aux_isptr[i][k])
-                    bufs[i][k] = (unsigned)ptr_target;
-                else if (aux_set[i][k])
-                    bufs[i][k] = aux_val[i][k];
-            }
-        }
-
-        /* +00..+0c: each slot takes a NUMBER (n<slot>=<val>) or a
-           POINTER (aux=<slot>:on -> zeroed buffer), CLI-switchable --
-           the stock's +08/+0c = 3280/2460 numbers were read in mode 2,
-           and mode 1 may treat the same slots differently, so both
-           readings stay enumerable. Precedence: explicit number wins,
-           then pointer, then defaults (+08 = width number, +0c =
-           height number, +00/+04 = zero). */
-        {
-            unsigned gw_r = din_set[1] ? din_val[1] : 8;
-            unsigned gh_r = din_set[0] ? din_val[0] : 8;
-            for (i = 0; i < 4; i++) {
-                if (n_set[i])
-                    sv[i] = n_val[i];
-                else if (i == 2)
-                    sv[i] = 0; /* set after the descriptors are built */
-                else if (aux_on[i])
-                    sv[i] = (unsigned)bufs[i];
-                else
-                    sv[i] = (i == 2) ? gw_r : (i == 3) ? gh_r : 0;
-            }
-            sv[4] = aux_on[4] ? (unsigned)bufs[4] : 0;
-            sv[5] = aux_on[5] ? (unsigned)bufs[5] : 0;
-            sv[6] = aux_on[6] ? (unsigned)bufs[6] : 0;
-            printf("[12] slot values:");
-            for (i = 0; i < 7; i++)
-                printf(" +%s=%s0x%x", aux_names[i],
-                       (i < 4 && n_set[i]) ? "num " :
-                       (i < 4 && aux_on[i]) ? "ptr " : "    ", sv[i]);
-            printf("\n");
-            /* числа не снимаются диффом -- дифф только для буферных слотов */
-            for (i = 0; i < 7; i++)
-                for (k = 0; k < 16; k++)
-                    snap_aux[i][k] = bufs[i][k];
-
-        }
-
-        for (k = 0; k < 8; k++) {
-            attrs_in[k] = attrs_base[k];
-            attrs_out[k] = attrs_base[k];
-        }
-        /* attrs are the STOCK-CAPTURED values and are not modified by
-           default. heap_i/heap_o keys exist but heap selection is NOT
-           implemented: we do not yet know the attrs array layout
-           (pairs "tag,value" vs fixed fields) -- writing a guessed
-           word crashed libnvrm (mail-1087 report, reverted). The
-           kernel heap masks for reference: NVMAP_HEAP_IOVMM = 1<<30,
-           CARVEOUT_GENERIC = 1, CARVEOUT_IVM = 2. */
-        for (k = 0; k < 8; k++) {
-            if (attr_set[k]) {
-                attrs_in[k] = attr_val[k];
-                attrs_out[k] = attr_val[k];
-            }
-        }
-
-        printf("[10] attrs in|out:");
-        for (k = 0; k < 8; k++)
-            printf(" [%d]=0x%x|0x%x%s", k, attrs_in[k], attrs_out[k],
-                   attr_set[k] ? "*" : "");
-        printf("\n");
-
-        a1 = a1_set ? a1_val : (unsigned)dev;
-        printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_in) "
-               "[input] -> ", a1);
-        rc = nvRmMemHandleAllocAttr(a1, attrs_in, &memh_in);
-        printf("rc=0x%x memh_in=%p\n", (unsigned)rc, memh_in);
-
-        if (rc == 0 && memh_in != 0) {
-            printf("[10] NvRmMemHandleAllocAttr(a1=0x%x, attrs, &memh_out) "
-                   "[output] -> ", a1);
-            rc = nvRmMemHandleAllocAttr(a1, attrs_out, &memh_out);
-            printf("rc=0x%x memh_out=%p\n", (unsigned)rc, memh_out);
-        }
-
-        if (rc != 0 || memh_in == 0 || memh_out == 0) {
-            printf("    alloc failed -- skipping submission, closing\n");
-        } else {
-            /* pin the output buffer and read its device address
-               (exports verified in libnvrm.so; both calls PRINT their
-               results -- a wrong arity shows in print, not in a crash) */
-            if (pin_on && memh_out != 0 && nvRmMemPin != 0) {
-                unsigned pa;
-                stage_now = "NvRmMemPin";
-                /* measured: Pin RETURNS the device address (0x800c0000
-                   in the field was an address, not an error code) */
-                pa = nvRmMemPin((unsigned)memh_out, 0);
-                stage_now = 0;
-                printf("[11a] NvRmMemPin(memh_out=0x%x) -> addr=0x%x\n",
-                       (unsigned)memh_out, pa);
-                if (pa != 0) {
-                    out_devaddr = pa;
-                    out_devaddr_valid = 1;
-                }
-            }
-            if (nvRmMemGetAddress != 0 && memh_out != 0) {
-                unsigned ga = nvRmMemGetAddress((unsigned)memh_out, 0);
-                printf("[11a] NvRmMemGetAddress(memh_out=0x%x, 0) -> "
-                       "0x%x\n",
-                       (unsigned)memh_out, ga);
-                if (out_devaddr_valid == 0) {
-                    out_devaddr = ga;
-                    out_devaddr_valid = 1;
-                }
-            }
+    /* buffers allocated at [5e] -- see above */
 
             /* [11] two descriptors, stock dummy layout with seven live
                words. Geometry/format fields are CLI-overridable

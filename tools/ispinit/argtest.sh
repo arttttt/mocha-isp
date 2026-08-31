@@ -178,6 +178,13 @@ check "outaddr=0x1678:on"      1 4194303 rggb outaddr=0x1678:on
 check "outaddr=0xdead"         1 4194303 rggb outaddr=0xdead
 check "outaddr junk rejected"  0 4194303 rggb outaddr=junk
 check "pin junk rejected"      0 4194303 rggb pin=yes
+check "planes=on"              1 4194303 rggb planes=on planesfile=/data/local/tmp/p.txt
+check "planes off default"     1 4194303 rggb
+check "planesy=0x1000"         1 4194303 rggb planes=on planesy=0x1000
+check "planesu=512"            1 4194303 rggb planes=on planesu=512
+check "planesstride=64"        1 4194303 rggb planes=on planesstride=64
+check "planessubmit=0"         1 4194303 rggb planes=on planessubmit=0
+check "planes junk rejected"   0 4194303 rggb planes=junk
 check "heapi=iovmm"            1 4194303 rggb heapi=iovmm
 check "heapo=carveout"         1 4194303 rggb heapo=carveout
 check "heapi=0x40000000"       1 4194303 rggb heapi=0x40000000

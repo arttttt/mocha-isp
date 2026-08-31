@@ -112,6 +112,7 @@ int main(int argc, char **argv)
     int instance = 2;          /* ISP-B; the other tool uses 1 for ISP-A */
     unsigned maxattr = 256;
     int do_set = 0, do_apply = 0;
+    long dump_off = 0, dump_len = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -119,6 +120,11 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--max=", 6) == 0)  maxattr = (unsigned)atoi(a + 6);
         else if (strcmp(a, "--set") == 0)       do_set = 1;
         else if (strcmp(a, "--apply") == 0)     { do_set = 1; do_apply = 1; }
+        else if (strncmp(a, "--dump=", 7) == 0) {
+            do_set = 1;
+            dump_off = strtol(a + 7, (char **)&a, 0);
+            dump_len = (*a == ',') ? strtol(a + 1, 0, 0) : 0x200;
+        }
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -308,6 +314,27 @@ int main(int argc, char **argv)
         if (before && after) memcpy(after, watch, snap);
 
         printf("demosaic attribute: rc=%d, size now %u\n", src, size);
+
+        /* A window of the object read out in full, marking what the call
+         * touched -- the fields that did not change are half the story,
+         * since they carry the counts and the mode beside the method. */
+        if (before && after && dump_len) {
+            size_t o = (uintptr_t)hSet + dump_off - (uintptr_t)watch;
+            printf("\nwindow at hSet%+ld (%08lx):\n", dump_off,
+                   (unsigned long)((uintptr_t)hSet + dump_off));
+            for (long i = 0; i < dump_len && o + i + 4 <= snap; i += 16) {
+                printf("  %08lx:",
+                       (unsigned long)((uintptr_t)watch + o + i));
+                for (long j = 0; j < 16 && o + i + j + 4 <= snap; j += 4) {
+                    uint32_t v = *(const uint32_t *)(after + o + i + j);
+                    int ch = memcmp(before + o + i + j,
+                                    after + o + i + j, 4) != 0;
+                    printf(" %08x%c", v, ch ? '*' : ' ');
+                }
+                printf("\n");
+            }
+        }
+
         if (before && after)
             report_blocks(before, after, (uintptr_t)watch, snap);
 

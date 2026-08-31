@@ -1218,6 +1218,7 @@ int main(int argc, char **argv)
      * default now: it is what the camera on this device actually does. */
     int zero_init = 1;
     int isp_apply = 1;
+    uint32_t opt_u_off = 0, opt_v_off = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1279,6 +1280,10 @@ int main(int argc, char **argv)
             ispintf = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
         else if (strcmp(a, "--no-apply") == 0)     isp_apply = 0;
+        else if (strncmp(a, "--u-off=", 8) == 0)
+            opt_u_off = (uint32_t)strtoul(a + 8, 0, 16);
+        else if (strncmp(a, "--v-off=", 8) == 0)
+            opt_v_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1351,8 +1356,14 @@ int main(int argc, char **argv)
     int isp_planar = (isp_fmt & 0xFF) == 0xE6;
     uint32_t stride_y = isp_planar ? ((W + 63) & ~63u) : W * 4;
     uint32_t stride_uv = ((W / 2) + 63) & ~63u;
-    uint32_t u_off = (stride_y * OH + 0xFFFF) & ~0xFFFFu;
-    uint32_t v_off = (u_off + stride_uv * (OH / 2) + 0xFFFF) & ~0xFFFFu;
+    /* Stock's own plane offsets for this sensor are 0x540000 and 0x6a0000 --
+     * a wider gap than the planes need, and not what rounding the sizes up
+     * produces. Overridable for that reason. */
+    uint32_t u_off = opt_u_off ? opt_u_off
+                               : ((stride_y * OH + 0xFFFF) & ~0xFFFFu);
+    uint32_t v_off = opt_v_off ? opt_v_off
+                               : ((u_off + stride_uv * (OH / 2) + 0xFFFF)
+                                  & ~0xFFFFu);
     uint32_t out_bytes = isp_planar ? v_off + stride_uv * (OH / 2)
                                     : stride_y * OH;
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);

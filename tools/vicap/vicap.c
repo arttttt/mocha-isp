@@ -542,8 +542,11 @@ static int vi_flush(const char *what)
     a.write = 1;
     errno = 0;
     int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a);
-    printf("  %s: %d registers in one call, rc=%d (%s)\n",
-           what, batch_n, rc, rc == 0 ? "ok" : strerror(errno));
+    /* A null label means the caller reports for itself -- the per-shot loop
+     * runs this often enough that a line each would bury the result. */
+    if (what)
+        printf("  %s: %d registers in one call, rc=%d (%s)\n",
+               what, batch_n, rc, rc == 0 ? "ok" : strerror(errno));
     batch_n = 0;
     return rc;
 }
@@ -1124,19 +1127,46 @@ int main(int argc, char **argv)
          * frame-start condition, write the trigger, and see whether the
          * counter moves. Each attempt reports for itself. */
         for (int shot = 0; shot < shots; shot++) {
+            uint32_t fs0 = syncpt_read(sp_id);
+
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
                   (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8
                   | sp_id);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-            vi_flush("shot");
-            usleep(150000);
-            printf("  shot %d: frame start %u, parser %08x, single shot %08x\n",
-                   shot, syncpt_read(sp_id),
+            vi_flush(0);
+
+            /* Wait for the frame to start, then -- and only then -- arm the
+             * acknowledge, which is what the driver's two threads do between
+             * them. Firing and sleeping a fixed time was leaving the buffer
+             * half written, because the shot lands wherever the sensor
+             * happens to be in its frame. */
+            int waited = 0;
+            while (syncpt_read(sp_id) == fs0 && waited < 400) {
+                usleep(1000);
+                waited++;
+            }
+            int started = syncpt_read(sp_id) != fs0;
+
+            uint32_t mw0 = syncpt_read(sp_mw), mwa0 = syncpt_read(sp_cmd);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_cmd);
+            vi_flush(0);
+
+            int mwaited = 0;
+            while (syncpt_read(sp_mw) == mw0 &&
+                   syncpt_read(sp_cmd) == mwa0 && mwaited < 400) {
+                usleep(1000);
+                mwaited++;
+            }
+            printf("  shot %d: start %s (%dms), write B %s A %s (%dms),"
+                   " parser %08x\n",
+                   shot, started ? "yes" : "NO", waited,
+                   syncpt_read(sp_mw) != mw0 ? "yes" : "no",
+                   syncpt_read(sp_cmd) != mwa0 ? "yes" : "no", mwaited,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                               : T124_PP_A_PIXEL_PARSER_STATUS),
-                   vi_rd(base + VI_CSI_SINGLE_SHOT));
+                               : T124_PP_A_PIXEL_PARSER_STATUS));
         }
 
         /* Now that the shots are away, arm the acknowledge -- the driver's

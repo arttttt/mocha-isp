@@ -511,7 +511,7 @@ int main(int argc, char **argv)
                          IMAGE_DEF_DEST_MEM;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
     uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
-    int tpg = 0;
+    int tpg = 0, shots = 8;
     int hold = 0, dump_regs = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -853,10 +853,19 @@ int main(int argc, char **argv)
         sa.class_ids = (uint32_t)(uintptr_t)&cls;
         sa.fences = (uint32_t)(uintptr_t)&fence;
 
-        errno = 0;
-        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-        printf("surface + shot submitted: %d words, rc=%d (%s), fence=%u\n",
-               n, rc, rc == 0 ? "ok" : strerror(errno), sa.fence);
+        /* Fire more than once. Frames are arriving -- the frame-start
+         * syncpoint moves -- so a single shot may simply have landed in
+         * the middle of one and been consumed without a full frame to
+         * write. */
+        int rc = 0;
+        for (int shot = 0; shot < shots; shot++) {
+            errno = 0;
+            rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+            if (rc < 0) break;
+            usleep(120000);
+        }
+        printf("surface + shot submitted %d times: %d words, rc=%d (%s)\n",
+               shots, n, rc, rc == 0 ? "ok" : strerror(errno));
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
     usleep(1500000);

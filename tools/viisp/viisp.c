@@ -950,6 +950,153 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     return rc;
 }
 
+/* The other block's runtime configuration, as the stock camera sends it.
+ *
+ * Stock sets ISP-A up in full -- submits of 3654, 1817, 1817 and 1238 words
+ * -- before ISP-B, which is the one the front sensor feeds, ever gets more
+ * than a clearing pass. If the two share anything that has to be configured
+ * once, this is where it happens, and we have never done it.
+ *
+ * Values decoded from a live session on this device. The sensor-specific
+ * words are the rear camera's, because that is whose block this is. */
+static int isp_init_a(int fd, uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(8192);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t g[512];
+    unsigned n = 0;
+    g[n++] = OP_SETCLASS(ISP_CLASS_A);
+
+    g[n++] = OP_INCR(0x400, 12);
+    g[n++] = 0x00000001; g[n++] = 0x004b0000;
+    g[n++] = 0x00930000; g[n++] = 0x00220000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x00030000; g[n++] = 0x00000000;
+    g[n++] = 0x00020000; g[n++] = 0x00000000;
+
+    g[n++] = OP_INCR(0x800, 3);
+    g[n++] = 0x85001000; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0x820, 3);
+    g[n++] = 0x85001000; g[n++] = 0; g[n++] = 0;
+
+    g[n++] = OP_INCR(0x930, 18);
+    g[n++] = 0x0000001c; g[n++] = 0x88888888;
+    g[n++] = 0x78787800; g[n++] = 0x00000078;
+    g[n++] = 0x88888888; g[n++] = 0x78787800;
+    g[n++] = 0x00000078; g[n++] = 0x88888888;
+    g[n++] = 0x78787800; g[n++] = 0x00000078;
+    g[n++] = 0x88888888; g[n++] = 0x78787800;
+    g[n++] = 0x00000078; g[n++] = 0x3fc00000;
+    g[n++] = 0x00000000; g[n++] = 0x00070000;
+    g[n++] = 0x00000000; g[n++] = 0x00070000;
+
+    g[n++] = OP_INCR(0xC00, 3);
+    g[n++] = 0x00000101; g[n++] = 0; g[n++] = 0x00100000;
+
+    g[n++] = OP_INCR(0x202, 3);
+    g[n++] = 0x00000001; g[n++] = 0x02000200; g[n++] = 0x02000200;
+    g[n++] = OP_INCR(0x200, 2);
+    g[n++] = 0x00000001; g[n++] = 0x00000000;
+    g[n++] = OP_INCR(0x205, 4);
+    g[n++] = 0x00000000; g[n++] = 0x000600c8;
+    g[n++] = 0x000f000f; g[n++] = 0x00003333;
+
+    g[n++] = OP_INCR(0x700, 16);
+    g[n++] = 0x00000001; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0; g[n++] = 0x00001dc0;
+    g[n++] = 0; g[n++] = 0x10000000;
+    g[n++] = 0; g[n++] = 0;
+    g[n++] = 0x00001000; g[n++] = 0x00001c50;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+
+    g[n++] = OP_INCR(0x750, 16);
+    g[n++] = 0x00000003;
+    for (int i = 0; i < 11; i++) g[n++] = 0;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+
+    g[n++] = OP_INCR(0xD20, 6);
+    g[n++] = 0x00003101; g[n++] = 0;
+    g[n++] = 0x01ec0000; g[n++] = 0x01ec0000;
+    g[n++] = 0x01ec0000; g[n++] = 0x01ec0000;
+
+    g[n++] = OP_INCR(0x900, 2); g[n++] = 1; g[n++] = 1;
+    g[n++] = OP_INCR(0x904, 2); g[n++] = 0x00005555; g[n++] = 1;
+    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
+
+    g[n++] = OP_INCR(0x920, 10);
+    g[n++] = 0x00000002; g[n++] = 0x10001660;
+    g[n++] = 0x00000000; g[n++] = 0x1000f4a0;
+    g[n++] = 0x0000fa80; g[n++] = 0x10000000;
+    g[n++] = 0x00001c50; g[n++] = 0x30001000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+
+    g[n++] = OP_INCR(0x909, 7);
+    g[n++] = 0x00000001; g[n++] = 0xfc000f00;
+    g[n++] = 0xf680f320; g[n++] = 0x0d80fde0;
+    g[n++] = 0x00000000; g[n++] = 0x1400002a;
+    g[n++] = 0x3c00002b;
+
+    g[n++] = OP_INCR(0x910, 9);
+    g[n++] = 0x00000003; g[n++] = 0x00000028;
+    g[n++] = 0x01480029; g[n++] = 0x00177e0b;
+    g[n++] = 0x00990030; g[n++] = 0x00000800;
+    g[n++] = 0x007b0666; g[n++] = 0x00000039;
+    g[n++] = 0x00000000;
+
+    g[n++] = OP_NONINCR(0x91C, 9);
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0x00000001; g[n++] = 0x00000026;
+    g[n++] = 0; g[n++] = 0x00000026; g[n++] = 0x00000361;
+    g[n++] = OP_NONINCR(0x91E, 9);
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0; g[n++] = 0x00000780;
+    g[n++] = 0; g[n++] = 0x00000780; g[n++] = 0x00000200;
+    g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000032;
+
+    g[n++] = OP_INCR(0x506, 9);
+    g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
+    g[n++] = 0x04c1304c; g[n++] = 0x08220882;
+    g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
+    g[n++] = 0x08621886; g[n++] = 0x01204812;
+    g[n++] = 0x06e1b86e;
+
+    g[n++] = OP_INCR(0x600, 16);
+    g[n++] = 0x00000005;
+    for (int i = 0; i < 11; i++) g[n++] = 0;
+    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
+    g[n++] = 0x3fff0000; g[n++] = 0x10001000;
+
+    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = 0;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_A;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("ISP-A configured: %u words, rc=%d (%s)\n", n, rc,
+           rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 /* Put the block back to sleep. Without this it stays armed and writes a
  * later frame into a buffer we have already let go -- the memory controller
  * faults on it after the sensor has powered down, which is exactly where
@@ -1266,6 +1413,8 @@ int main(int argc, char **argv)
     /* The kind to allocate the ISP's output as. Zero means an ordinary
      * pitch-linear buffer; 0xFE is what the block-linear format wants. */
     unsigned out_kind = 0;
+    /* Configure the other block first, the way stock does. */
+    int init_a = 1;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1333,6 +1482,7 @@ int main(int argc, char **argv)
             opt_v_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--out-kind=", 11) == 0)
             out_kind = (unsigned)strtoul(a + 11, 0, 16);
+        else if (strcmp(a, "--no-init-a") == 0)    init_a = 0;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1489,6 +1639,35 @@ int main(int argc, char **argv)
          * it reaches 0x3f4a0 into this buffer. */
         work_h = nvmap_create(512 * 1024);
         if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
+
+        /* Stock configures the other block first and in full. Do the same
+         * before touching ours -- a separate channel, its own wake-up
+         * write and its own syncpoint. */
+        if (init_a) {
+            int afd = open("/dev/nvhost-isp", O_RDWR);
+            if (afd < 0) printf("open /dev/nvhost-isp: %s\n", strerror(errno));
+            else {
+                struct nvhost_set_nvmap_fd_args anf = { (uint32_t)nvmap_fd };
+                ioctl(afd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &anf);
+                struct nvhost_get_param_arg ap = { .param = 0, .value = 0 };
+                uint32_t asp = 0;
+                if (ioctl(afd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ap) == 0)
+                    asp = ap.value;
+                struct nvhost_clk_rate_args ac;
+                ac.moduleid = 0; ac.rate = 384000000;
+                ioctl(afd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ac);
+                uint32_t aoff = 0xFC, aval = 0x20;
+                struct regrdwr_args ara;
+                memset(&ara, 0, sizeof ara);
+                ara.id = 0; ara.num_offsets = 1; ara.block_size = 4;
+                ara.offsets = (uint32_t)(uintptr_t)&aoff;
+                ara.values = (uint32_t)(uintptr_t)&aval;
+                ara.write = 1;
+                ioctl(afd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ara);
+                if (asp) isp_init_a(afd, asp);
+                close(afd);
+            }
+        }
 
         stats_h = nvmap_create(64 * 1024);
         if (stats_h && nvmap_alloc(stats_h) == 0) {

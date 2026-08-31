@@ -74,14 +74,21 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Old NvRm exposes both spellings depending on the build; take whichever
-     * is there rather than guessing which one this device ships. */
+    /* Old NvRm exposes both spellings and they do not agree on their
+     * signature between builds, so try each and judge by the handle that
+     * comes back rather than by the return value -- NvRmInit here returned
+     * something that looked like a stack address and left the handle null. */
     void *hRm = 0;
     int rc = -1;
-    if (NvRmInit)       rc = NvRmInit(&hRm);
-    else if (NvRmOpen)  rc = NvRmOpen(&hRm, 0);
-    printf("NvRm init: rc=%d handle=%p\n", rc, hRm);
-    if (rc != 0 || !hRm) { printf("no NvRm handle -- stopping\n"); return 1; }
+    if (NvRmOpen) {
+        rc = NvRmOpen(&hRm, 0);
+        printf("NvRmOpen(&h, 0): rc=%d handle=%p\n", rc, hRm);
+    }
+    if (!hRm && NvRmInit) {
+        rc = NvRmInit(&hRm);
+        printf("NvRmInit(&h): rc=%d handle=%p\n", rc, hRm);
+    }
+    if (!hRm) { printf("no NvRm handle -- stopping\n"); return 1; }
 
     void *hIsp = 0;
     rc = NvIspOpen(hRm, 1, &hIsp);          /* instance 1 = ISP-A */

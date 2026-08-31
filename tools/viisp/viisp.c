@@ -986,10 +986,14 @@ int main(int argc, char **argv)
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
      * frame that came from VI rather than from memory. */
-    /* Pitch-linear planar YUV. The 0x04FE00E6 in the stock trace is the
-     * block-linear form and wants buffers allocated as such; ours are
-     * ordinary ones. */
-    uint32_t isp_fmt = 0x010000E6, isp_e03 = 0;
+    /* Pitch-linear planar YUV, three planes. The format word carries the
+     * plane count in its third byte -- 0xFE for three, zero for one -- and
+     * the memory layout in its top byte. The trace's 0x04FE00E6 is three
+     * planes block-linear, which wants buffers we do not have; 0x010000E6
+     * is pitch-linear but ONE plane, which is why the luma surface stayed
+     * empty and a single quarter-size plane came back written. Both fields
+     * together: 0x01FE00E6. */
+    uint32_t isp_fmt = 0x01FE00E6, isp_e03 = 0;
     uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
     /* Which of the two routing writes go through host1x methods rather than
      * registers: bit 0 the ISP interface, bit 1 the image definition. */

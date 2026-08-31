@@ -48,7 +48,13 @@ int main(int argc, char **argv)
     int (*NvIspClose)(void *) = dlsym(isp, "NvIspClose");
     int (*HwSettingsCreate)(void *, void **) =
         dlsym(isp, "NvIspHwSettingsCreate");
-    int (*HwSettingsSetAttribute)(void *, uint32_t, const void *, uint32_t) =
+    /* Five arguments, not four. The code moves r1 into r7 as the attribute
+     * number, shifts r2 and r3 down, and picks a fifth off the stack --
+     * then does `attr - 1` against 15 and jumps through a table, so the
+     * numbers it knows are 1 to 16 and nothing else. Passing four left the
+     * fifth as stack rubbish, which is what crashed it. */
+    int (*HwSettingsSetAttribute)(void *, uint32_t, uint32_t, uint32_t,
+                                  uint32_t) =
         dlsym(isp, "NvIspHwSettingsSetAttribute");
     int (*HwSettingsGetAttribute)(void *, uint32_t, void *, uint32_t) =
         dlsym(isp, "NvIspHwSettingsGetAttribute");
@@ -86,15 +92,22 @@ int main(int argc, char **argv)
      * write is the real entry point, so probe that -- an attribute number
      * the library knows will be accepted, one it does not will be refused,
      * and the pattern of the two maps the surface. */
-    printf("attributes the library accepts:\n");
+    /* One number per run when asked for one: a wrong guess about what the
+     * three payload words mean can take the process down, and losing the
+     * whole sweep to that would be a waste. */
+    unsigned first = 1, last = 16;
+    if (maxattr <= 16 && maxattr >= 1 && do_set) { first = maxattr; last = maxattr; }
+    printf("attributes the library accepts (it knows 1..16):\n");
     unsigned ok = 0;
-    for (unsigned id = 0; id < maxattr; id++) {
-        uint32_t one = 1;
-        int src = HwSettingsSetAttribute(hSet, id, &one, sizeof one);
-        if (src == 0) { ok++; printf("  attr %3u (0x%02x): accepted\n", id, id); }
+    for (unsigned id = first; id <= last; id++) {
+        fflush(stdout);
+        int src = HwSettingsSetAttribute(hSet, id, 0, 0, 0);
+        printf("  attr %2u: rc=%d%s\n", id, src, src == 0 ? "  accepted" : "");
+        fflush(stdout);
+        if (src == 0) ok++;
     }
-    printf("%u of %u accepted\n", ok, maxattr);
-    (void)HwSettingsGetAttribute; (void)do_set;
+    printf("%u accepted\n", ok);
+    (void)HwSettingsGetAttribute;
 
     if (HwSettingsDestroy) HwSettingsDestroy(hSet);
     if (NvIspClose) NvIspClose(hIsp);

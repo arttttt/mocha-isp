@@ -1194,20 +1194,14 @@ int main(int argc, char **argv)
              * and release the module. Doing that in the middle of a running
              * DMA is what cut the picture: the tear sat around row 1830, a
              * fixed time into the frame rather than a fixed place in it. */
-            uint32_t mw0 = syncpt_read(sp_mw), mwa0 = syncpt_read(sp_cmd);
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
                   (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8
                   | sp_id);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_cmd);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
             vi_flush(0);
 
-            /* From here until the frame is written, VI is left alone. The
-             * counters live behind the control node, which does not touch
-             * the module at all. */
             int waited = 0;
             while (syncpt_read(sp_id) == fs0 && waited < 400) {
                 usleep(1000);
@@ -1215,12 +1209,20 @@ int main(int argc, char **argv)
             }
             int started = syncpt_read(sp_id) != fs0;
 
+            /* The baseline for the acknowledge has to be taken here, after
+             * our frame has started -- taking it before the trigger caught
+             * the previous frame's completion instead, which read as an
+             * instant acknowledge and had us stop the capture ten rows in. */
+            uint32_t mw0 = syncpt_read(sp_mw);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+            vi_flush(0);
+
             int mwaited = 0;
-            while (syncpt_read(sp_mw) == mw0 &&
-                   syncpt_read(sp_cmd) == mwa0 && mwaited < 400) {
+            while (syncpt_read(sp_mw) == mw0 && mwaited < 400) {
                 usleep(1000);
                 mwaited++;
             }
+            uint32_t mwa0 = mw0;    /* only the B side is armed now */
             printf("  shot %d: start %s (%dms), write B %s A %s (%dms),"
                    " parser %08x, syncpt err %08x\n",
                    shot, started ? "yes" : "NO", waited,

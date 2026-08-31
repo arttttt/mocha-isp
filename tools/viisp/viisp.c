@@ -612,6 +612,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp)
     uint32_t g[16];
     int n = 0, work_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    /* The DMA pipeline registers. The reprocess tool calls these required
+     * for any pixel output at all, and dropping them when this was rewritten
+     * around the stock trace was a mistake: the trace shows what stock sends
+     * per frame, not what its driver had already set up. */
+    g[n++] = OP_INCR(0x019, 1); g[n++] = 0x00000400;
+    g[n++] = OP_INCR(0x01B, 2); g[n++] = 0x00000200; g[n++] = 0x00000002;
     g[n++] = OP_INCR(0x053, 2);
     g[n++] = 1;
     work_word = n;
@@ -943,6 +949,7 @@ int main(int argc, char **argv)
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
     uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
+    uint32_t isp_base_mem = 0, isp_base_stats = 0, isp_base_loadv = 0;
     if (isp_fd < 0) {
         printf("open /dev/nvhost-isp.1: %s\n", strerror(errno));
     } else {
@@ -1450,10 +1457,17 @@ int main(int argc, char **argv)
 
         /* The ISP goes in before the trigger: it has to be waiting when the
          * pixels arrive, since nothing buffers them on the way. */
-        if (isp_fd >= 0 && out_iova && stats_h)
+        if (isp_fd >= 0 && out_iova && stats_h) {
+            /* Baselines, because a counter's value says nothing on its own
+             * -- reading 10 there once had us believe the stats stage was
+             * running when the number was simply where it already stood. */
+            isp_base_mem = syncpt_read(sp_mem);
+            isp_base_stats = syncpt_read(sp_stats);
+            isp_base_loadv = syncpt_read(sp_loadv);
             isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                       isp_trigger, u_off, v_off,
                       sp_mem, sp_stats, sp_loadv, isp_sp);
+        }
 
         /* Which event numbers does this hardware actually raise? The two we
          * use for the write acknowledge came from a header that says
@@ -1757,10 +1771,10 @@ readback:
                " non-zero\n", changed, out_bytes, nz);
         /* Whether the ISP believes it did anything: the three conditions the
          * per-frame gather arms. All still means it never ran. */
-        printf("ISP syncpoints: memory %u = %u, stats %u = %u,"
-               " read %u = %u\n", sp_mem, syncpt_read(sp_mem),
-               sp_stats, syncpt_read(sp_stats),
-               sp_loadv, syncpt_read(sp_loadv));
+        printf("ISP syncpoints moved by: memory %+d, stats %+d, read %+d\n",
+               (int)(syncpt_read(sp_mem) - isp_base_mem),
+               (int)(syncpt_read(sp_stats) - isp_base_stats),
+               (int)(syncpt_read(sp_loadv) - isp_base_loadv));
 
         /* The stats condition is the one that fires, so this is where to
          * look for proof that pixels reached the ISP at all. Numbers here

@@ -757,7 +757,10 @@ int main(int argc, char **argv)
        INCR(0xE04,3) output-plane block. Requires kernel tracing ON
        (isp_patch counts submits inside the trace hook). */
     int outblock_on = 0;
-    unsigned outblock_submit = 6;   /* our frame is submit #6 */
+    unsigned outblock_submit = 1;   /* our frame is submit #1: the
+                                       counter is reset right before
+                                       the submission, so numbering
+                                       starts from this moment */
     unsigned outblock_off = 0x1674; /* rec0 last word: device address */
     unsigned outblock_addr = 0;     /* override the pinned address */
     int outblock_addr_set = 0;
@@ -3094,16 +3097,36 @@ round_trip_end:;
                  * overwritten by our own block.
                  */
                 unsigned stats_addr = 0;
+                /* Pin FIRST: unpinned handles return an error code
+                   (-22 = 0xffffffea in the last run) instead of an
+                   address. Plausibility check before anything reaches
+                   hardware: nonzero, 4K-aligned, inside the device
+                   physical window 0x80000000..0x8fffffff. RULE: any
+                   value returned by a foreign function is checked for
+                   plausibility before going into the command stream --
+                   twice today garbage reached the buffer and cost a
+                   run. */
+                if (nvRmMemPin != 0) {
+                    unsigned pa = nvRmMemPin(statshandle, 0);
+                    printf("[11c] outblock: NvRmMemPin(handle=0x%x) -> "
+                           "addr=0x%x\n", statshandle, pa);
+                }
                 if (nvRmMemGetAddress != 0)
-                    stats_addr =
-                        nvRmMemGetAddress(statshandle, 0);
+                    stats_addr = nvRmMemGetAddress(statshandle, 0);
                 printf("[11c] outblock: stats handle=0x%x -> addr=0x%x "
                        "(goes to word [29])\n",
                        statshandle, stats_addr);
-                if (stats_addr == 0) {
-                    printf("[11c] outblock: stats addr is zero -- NOT "
-                           "armed, run is clean\n");
-                    goto skip_arm;
+                {
+                    unsigned aligned = (stats_addr & 0xFFFu) == 0;
+                    unsigned in_win = stats_addr >= 0x80000000u &&
+                                      stats_addr <= 0x8FFFFFFFu;
+                    if (stats_addr == 0 || aligned == 0 || in_win == 0) {
+                        printf("[11c] outblock: stats addr 0x%x is not "
+                               "plausible (want 4K-aligned, "
+                               "0x80000000..0x8fffffff) -- NOT armed, "
+                               "run is clean\n", stats_addr);
+                        goto skip_arm;
+                    }
                 }
 
                 for (q6 = 0; q6 < 46; q6++)

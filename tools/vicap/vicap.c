@@ -672,9 +672,23 @@ int main(int argc, char **argv)
      * session offline. */
     if (dump_regs) {
         printf("=== VI aperture ===\n");
-        for (uint32_t o = 0; o < 0xC00; o += 4) {
-            uint32_t v = vi_rd(o);
-            if (v && v != 0xdeadbeef) printf("  +0x%03x = 0x%08x\n", o, v);
+        /* Sixteen at a time: one register per ioctl turned a dump of the
+         * aperture into hundreds of round trips and never finished. */
+        for (uint32_t o = 0; o < 0xC00; o += 64) {
+            uint32_t offs[16], vals[16];
+            for (int i = 0; i < 16; i++) { offs[i] = o + i * 4; vals[i] = 0; }
+            struct regrdwr_args a;
+            memset(&a, 0, sizeof a);
+            a.id = 0;
+            a.num_offsets = 16;
+            a.block_size = 4;
+            a.offsets = (uint32_t)(uintptr_t)offs;
+            a.values = (uint32_t)(uintptr_t)vals;
+            a.write = 0;
+            if (ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a) < 0)
+                continue;
+            for (int i = 0; i < 16; i++)
+                if (vals[i]) printf("  +0x%03x = 0x%08x\n", offs[i], vals[i]);
         }
         printf("=== end ===\n");
     }

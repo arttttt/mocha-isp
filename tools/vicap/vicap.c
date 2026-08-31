@@ -640,6 +640,7 @@ int main(int argc, char **argv)
     uint32_t phy_cil_cmd = 0x12020000;   /* brick E, one lane */
     int tpg = 0, shots = 8, piggyback = 0;
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
+    int settle = 200;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -664,6 +665,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
         else if (strncmp(a, "--shots=", 8) == 0)  shots = atoi(a + 8);
         else if (strcmp(a, "--refill") == 0)      refill = 1;
+        else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1252,7 +1254,7 @@ int main(int argc, char **argv)
                  * remainder, the second is on the boundary and captures the
                  * whole thing, which is why the wipe happens before the last
                  * attempt and not before the first. */
-                mwaited = 200;
+                mwaited = settle;
                 usleep(mwaited * 1000);
                 done = (attempt >= 2);
             }

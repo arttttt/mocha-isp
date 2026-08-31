@@ -828,8 +828,11 @@ int main(int argc, char **argv)
     /* Two different syncpoints, as the driver uses: one for the frame
      * start and a separate one for the memory-write acknowledge. We had
      * been arming both conditions against the same id. */
-    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-          (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_mw);
+    /* Both acknowledge conditions. The header says outright that these
+     * event numbers were found by trial rather than derived, so which of
+     * the two belongs to this port is worth not assuming. */
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWA_ACK_DONE << 8 | sp_mw);
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
     vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
           (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8 | sp_id);
 

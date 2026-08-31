@@ -90,6 +90,13 @@ static void report_blocks(const uint8_t *before, const uint8_t *after,
         size_t s = off;
         while (off + 4 <= len && memcmp(before + off, after + off, 4) != 0)
             off += 4;
+        /* What sits just before a change is the header that names it: the
+         * method the words are destined for, and how many of them. */
+        size_t ctx = s > 0x20 ? s - 0x20 : 0;
+        printf("  before +%06zx:", s);
+        for (size_t i = ctx; i < s; i += 4)
+            printf(" %08x", *(const uint32_t *)(after + i));
+        printf("\n");
         printf("  +%06zx (%08lx) %zu words:", s, (unsigned long)(base + s),
                (off - s) / 4);
         for (size_t i = s; i < off && i < s + 32; i += 4)

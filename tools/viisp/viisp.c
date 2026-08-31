@@ -612,7 +612,7 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
-                    uint32_t rt_luma, uint32_t ccm_word)
+                    uint32_t rt_luma, uint32_t ccm_word, unsigned skip)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -641,17 +641,24 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * nowhere to work without the addresses in 0x700 and 0x750. None of
      * this appears in the per-frame trace because stock had already sent it
      * at init. */
-    /* The three words after the enable are 75, 147 and 34 -- the BT.601
-     * luma weights. This block folds the three channels into one, which is
-     * exactly the shape of what comes back: red carrying everything, green
-     * and blue at zero. Its enable is a knob for that reason. */
-    g[n++] = OP_INCR(0x400, 12);
-    g[n++] = rt_luma; g[n++] = 0x004b0000;
-    g[n++] = 0x00930000; g[n++] = 0x00220000;
-    g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
-    g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
-    g[n++] = 0x00030000; g[n++] = 0x00000000;
-    g[n++] = 0x00020000; g[n++] = 0x00000000;
+    /* Everything from here to the calibration blob is the driver's
+     * streaming init, and none of it appears in the stock per-frame trace
+     * -- stock sent it at open time, and whether every block of it is right
+     * is not settled. Since the output comes back with one channel and the
+     * others exactly zero, the blocks that touch channels are worth being
+     * able to leave out one at a time. */
+    if (!(skip & 0x01)) {
+        /* The three words after the enable are 75, 147 and 34 -- the BT.601
+         * luma weights, which is what folding three channels into one looks
+         * like. */
+        g[n++] = OP_INCR(0x400, 12);
+        g[n++] = rt_luma; g[n++] = 0x004b0000;
+        g[n++] = 0x00930000; g[n++] = 0x00220000;
+        g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
+        g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
+        g[n++] = 0x00030000; g[n++] = 0x00000000;
+        g[n++] = 0x00020000; g[n++] = 0x00000000;
+    }
 
     g[n++] = OP_INCR(0x800, 3);
     g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
@@ -673,13 +680,15 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
 
     /* The input stage: dimensions, then the enable, then stride and format. */
-    g[n++] = OP_INCR(0x202, 3);
-    g[n++] = 0x00000001; g[n++] = 0x00780078; g[n++] = 0x00780078;
-    g[n++] = OP_INCR(0x200, 2);
-    g[n++] = 0x00000001; g[n++] = 0x00000000;
-    g[n++] = OP_INCR(0x205, 4);
-    g[n++] = 0x00000000; g[n++] = 0x000600c8;
-    g[n++] = 0x000f000f; g[n++] = 0x00000000;
+    if (!(skip & 0x04)) {
+        g[n++] = OP_INCR(0x202, 3);
+        g[n++] = 0x00000001; g[n++] = 0x00780078; g[n++] = 0x00780078;
+        g[n++] = OP_INCR(0x200, 2);
+        g[n++] = 0x00000001; g[n++] = 0x00000000;
+        g[n++] = OP_INCR(0x205, 4);
+        g[n++] = 0x00000000; g[n++] = 0x000600c8;
+        g[n++] = 0x000f000f; g[n++] = 0x00000000;
+    }
 
     g[n++] = OP_INCR(0x700, 16);
     g[n++] = 0x00000001; g[n++] = 0x00000000;
@@ -760,6 +769,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
         g[n++] = 0x06e1b86e;
     }
 
+    if (!(skip & 0x02)) {
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
@@ -769,6 +779,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000000; g[n++] = 0x00000000;
     g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
     g[n++] = 0x3fff0000; g[n++] = work_iova + 0x31000;
+    }
 
     g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
@@ -1041,6 +1052,12 @@ int main(int argc, char **argv)
     int demosaic_zero = 0;
     uint32_t rt_luma = 1;
     uint32_t ccm_word = 0;
+    /* Which blocks of the driver's streaming init to leave out. None of
+     * them appear in the stock per-frame trace, and whether every one of
+     * them is right is not settled: bit 0 the luma weights at 0x400, bit 1
+     * the GPP at 0x600, bit 2 the input stage, bit 3 the statistics, bit 4
+     * the second processing channel. */
+    unsigned isp_skip = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1085,6 +1102,8 @@ int main(int argc, char **argv)
             rt_luma = (uint32_t)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--ccm=", 6) == 0)
             ccm_word = (uint32_t)strtoul(a + 6, 0, 16);
+        else if (strncmp(a, "--isp-skip=", 11) == 0)
+            isp_skip = (unsigned)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1250,7 +1269,8 @@ int main(int argc, char **argv)
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
-                     work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word);
+                     work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
+                     isp_skip);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
@@ -1938,6 +1958,29 @@ int main(int argc, char **argv)
                     waited++;
                 }
                 started = syncpt_read(sp_id) != fs0;
+
+                /* Release the ISP's parked job as soon as the block says it
+                 * has written, and give up after a bounded wait either way.
+                 * Holding it until the end of the whole capture is what kept
+                 * running past the job timeout the kernel allows -- and a
+                 * job that overruns takes the ISP channel with it, which
+                 * costs a reboot. Short and self-limiting instead. */
+                if (isp_hold_thresh) {
+                    int w2 = 0;
+                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < 600) {
+                        usleep(1000);
+                        w2++;
+                    }
+                    int cfd = open("/dev/nvhost-ctrl", O_RDWR);
+                    if (cfd >= 0) {
+                        struct nvhost_ctrl_syncpt_incr_args ia = { sp_mw };
+                        ioctl(cfd, NVHOST_IOCTL_CTRL_SYNCPT_INCR, &ia);
+                        close(cfd);
+                    }
+                    printf("  ISP wrote after %dms%s\n", w2,
+                           syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
+                    isp_hold_thresh = 0;
+                }
 
                 /* One whole frame from the start, plus what the caller asks
                  * for on top. */

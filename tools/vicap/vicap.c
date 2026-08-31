@@ -95,8 +95,11 @@ struct regrdwr_args {
 #define IMAGE_SIZE_HEIGHT_OFFSET    16
 #define SINGLE_SHOT_CAPTURE         0x1
 
+/* Port B's command register is 0x87C -- 0x86C is its INPUT_STREAM_CONTROL,
+ * and having the wrong one here meant the final write landed on top of the
+ * stock value the bring-up had just put there. */
 #define PP_A_PIXEL_STREAM_PP_COMMAND 0x848
-#define PP_B_PIXEL_STREAM_PP_COMMAND 0x86c
+#define PP_B_PIXEL_STREAM_PP_COMMAND 0x87C
 #define CSI_PP_ENABLE                0x1
 #define CSI_PP_SINGLE_SHOT_ENABLE    (0x1 << 2)
 #define CSI_PP_START_MARKER_FRAME_MAX_OFFSET 12
@@ -464,8 +467,14 @@ int main(int argc, char **argv)
     }
 
     if (sfd >= 0) {
-        uint32_t off = 0;
-        ioctl(sfd, SENSOR_IOCTL_SET_POWER, &off);
+        /* Only the rear sensor has a power call. The front one powers down
+         * when its node is closed, and asking it for a power write hits a
+         * different command entirely on that driver -- one that writes back
+         * through the pointer we hand it. */
+        if (!front) {
+            uint32_t off = 0;
+            ioctl(sfd, SENSOR_IOCTL_SET_POWER, &off);
+        }
         close(sfd);
         printf("sensor powered down\n");
     }

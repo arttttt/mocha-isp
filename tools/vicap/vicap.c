@@ -124,10 +124,16 @@ static void mipi_calibrate_csie(void)
     mem_wr(MIPI_CAL_BASE + MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
     mem_wr(MIPI_CAL_BASE + MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
     mem_wr(MIPI_CAL_BASE + MIPI_CAL_CTRL, MIPI_CAL_START, 0);
-    usleep(20000);
-    mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &st);
-    printf("  MIPI calibration: status 0x%08x (%s)\n", st,
-           (st & MIPI_CAL_DONE) ? "done" : "NOT done");
+    /* The driver polls up to five hundred times at a couple of hundred
+     * microseconds; a single short sleep was not giving it time. */
+    int tries = 500;
+    while (tries--) {
+        if (mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &st) < 0) break;
+        if (st & MIPI_CAL_DONE) break;
+        usleep(300);
+    }
+    printf("  MIPI calibration: status 0x%08x after %d polls (%s)\n",
+           st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done");
 }
 
 static int pmc_dpd_release(uint32_t bit)

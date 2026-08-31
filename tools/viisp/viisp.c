@@ -592,15 +592,27 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  * Submitted once, before the shot. Whether the ISP then needs re-arming per
  * frame is one of the things this is meant to find out. */
 static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
-                   unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
-                   uint32_t enable, uint32_t trigger, uint32_t sp)
+                   uint32_t work_h, unsigned W, unsigned H, uint32_t fmt,
+                   uint32_t e03, uint32_t enable, uint32_t trigger,
+                   uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     uint32_t g[64];
-    int n = 0, addr_word;
+    int n = 0, addr_word, work_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* The pipeline registers the reprocess tool calls required for any
+     * pixel output at all, and the work buffer it calls required for a cold
+     * start. Neither has anything to do with where the frame comes from, so
+     * they belong here too. */
+    g[n++] = OP_INCR(0x019, 1); g[n++] = 0x00000400;
+    g[n++] = OP_INCR(0x01B, 2); g[n++] = 0x00000200; g[n++] = 0x00000002;
+    g[n++] = OP_INCR(0x053, 2);
+    g[n++] = 1;
+    work_word = n;
+    g[n++] = 0;                       /* patched by the relocation */
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
@@ -620,8 +632,11 @@ static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
-    struct nvhost_reloc rel = { cmd_h, (uint32_t)addr_word * 4, out_h, 0 };
-    struct nvhost_reloc_shift sh = { 0 };
+    struct nvhost_reloc rel[2] = {
+        { cmd_h, (uint32_t)addr_word * 4, out_h, 0 },
+        { cmd_h, (uint32_t)work_word * 4, work_h, 0 },
+    };
+    struct nvhost_reloc_shift sh[2] = { { 0 }, { 0 } };
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
@@ -630,12 +645,12 @@ static int isp_arm(int isp_fd, uint32_t out_h, uint32_t out_iova,
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
-    sa.num_relocs = 1;
+    sa.num_relocs = 2;
     sa.timeout = 3000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-    sa.relocs = (uint32_t)(uintptr_t)&rel;
-    sa.reloc_shifts = (uint32_t)(uintptr_t)&sh;
+    sa.relocs = (uint32_t)(uintptr_t)rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
 
@@ -841,7 +856,7 @@ int main(int argc, char **argv)
      * feeds; the node is nvhost-isp.1, nvhost-isp being ISP-A. */
     uint32_t out_bytes = W * 4 * (vi_height ? vi_height : H);
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
-    uint32_t out_h = 0, out_iova = 0, isp_sp = 0;
+    uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0;
     if (isp_fd < 0) {
         printf("open /dev/nvhost-isp.1: %s\n", strerror(errno));
     } else {
@@ -850,6 +865,34 @@ int main(int argc, char **argv)
         struct nvhost_get_param_arg ip = { .param = 0, .value = 0 };
         if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
             isp_sp = ip.value;
+
+        /* The ISP's own clocks, at the rates the reprocess tool uses. */
+        struct nvhost_clk_rate_args ic;
+        ic.moduleid = 0; ic.rate = 384000000;
+        ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        ic.moduleid = 1; ic.rate = 768000000;
+        ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+
+        /* Wake the block: 0xFC takes 0x20, the write the reprocess tool
+         * makes before anything else reaches the ISP. */
+        {
+            uint32_t off = 0xFC, val = 0x20;
+            struct regrdwr_args ra;
+            memset(&ra, 0, sizeof ra);
+            ra.id = 0;
+            ra.num_offsets = 1;
+            ra.block_size = 4;
+            ra.offsets = (uint32_t)(uintptr_t)&off;
+            ra.values = (uint32_t)(uintptr_t)&val;
+            ra.write = 1;
+            ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ra);
+        }
+
+        /* A scratch buffer the ISP wants for its own working state. The
+         * reprocess tool calls it required for a cold start. */
+        work_h = nvmap_create(512 * 1024);
+        if (work_h && nvmap_alloc(work_h) == 0) nvmap_pin(work_h);
+
         out_h = nvmap_create(out_bytes);
         if (out_h && nvmap_alloc(out_h) == 0)
             out_iova = nvmap_pin(out_h);
@@ -1284,9 +1327,10 @@ int main(int argc, char **argv)
 
         /* The ISP goes in before the trigger: it has to be waiting when the
          * pixels arrive, since nothing buffers them on the way. */
-        if (isp_fd >= 0 && out_iova)
-            isp_arm(isp_fd, out_h, out_iova, W, vi_height ? vi_height : H,
-                    isp_fmt, isp_e03, isp_enable, isp_trigger, isp_sp);
+        if (isp_fd >= 0 && out_iova && work_h)
+            isp_arm(isp_fd, out_h, out_iova, work_h, W,
+                    vi_height ? vi_height : H, isp_fmt, isp_e03,
+                    isp_enable, isp_trigger, isp_sp);
 
         /* Which event numbers does this hardware actually raise? The two we
          * use for the write acknowledge came from a header that says

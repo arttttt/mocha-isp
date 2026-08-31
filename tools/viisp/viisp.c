@@ -990,19 +990,29 @@ int main(int argc, char **argv)
         ic.moduleid = 1; ic.rate = 768000000;
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
 
-        /* Wake the block: 0xFC takes 0x20, the write the reprocess tool
-         * makes before anything else reaches the ISP. */
+        /* Two register writes before anything else, both of which stock
+         * makes when it opens the ISP. 0xFC is the block's own enable. 0x54
+         * is the pipeline mode -- the same thing method 0x015 addresses,
+         * four times the method number -- and the driver's own commit for
+         * it describes our symptom exactly: without it the ISP accepts
+         * gathers and moves syncpoints but processes no pixels, and the
+         * output stays black. A gather cannot substitute; it has to be a
+         * register write. */
         {
-            uint32_t off = 0xFC, val = 0x20;
+            uint32_t off[2] = { 0xFC, 0x54 };
+            uint32_t val[2] = { 0x20, isp_enable };
             struct regrdwr_args ra;
             memset(&ra, 0, sizeof ra);
             ra.id = 0;
-            ra.num_offsets = 1;
+            ra.num_offsets = 2;
             ra.block_size = 4;
-            ra.offsets = (uint32_t)(uintptr_t)&off;
-            ra.values = (uint32_t)(uintptr_t)&val;
+            ra.offsets = (uint32_t)(uintptr_t)off;
+            ra.values = (uint32_t)(uintptr_t)val;
             ra.write = 1;
-            ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ra);
+            errno = 0;
+            int rrc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ra);
+            printf("ISP registers: 0xFC=0x20, 0x54=0x%08x, rc=%d (%s)\n",
+                   isp_enable, rrc, rrc == 0 ? "ok" : strerror(errno));
         }
 
         /* A scratch buffer the ISP wants for its own working state. The
@@ -1538,18 +1548,13 @@ int main(int argc, char **argv)
     }
 
     {
-        /* The ISP goes in before the trigger: it has to be waiting when the
-         * pixels arrive, since nothing buffers them on the way. */
+        /* Baselines, because a counter's value says nothing on its own --
+         * reading 10 there once had us believe the stats stage was running
+         * when the number was simply where it already stood. */
         if (isp_fd >= 0 && out_iova && stats_h) {
-            /* Baselines, because a counter's value says nothing on its own
-             * -- reading 10 there once had us believe the stats stage was
-             * running when the number was simply where it already stood. */
             isp_base_mem = syncpt_read(sp_mem);
             isp_base_stats = syncpt_read(sp_stats);
             isp_base_loadv = syncpt_read(sp_loadv);
-            isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                      isp_trigger, u_off, v_off,
-                      sp_mem, sp_stats, sp_loadv, isp_sp);
         }
 
         /* Which event numbers does this hardware actually raise? The two we
@@ -1692,6 +1697,15 @@ int main(int argc, char **argv)
                  * unchanged, but the driver reprogramming it per frame is
                  * not decoration, and one capture per programming is what
                  * the short frames look like. */
+                /* The ISP's per-frame gather goes out just before the
+                 * trigger, the way the driver's start-thread does it: the
+                 * block has to be armed and waiting when the pixels cross,
+                 * because nothing buffers them on the way. */
+                if (isp_fd >= 0 && out_iova && stats_h)
+                    isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+                              isp_trigger, u_off, v_off,
+                              sp_mem, sp_stats, sp_loadv, isp_sp);
+
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
                 vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);

@@ -728,8 +728,8 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
         g[n++] = luma_lo ? 0x0000004b : 0x004b0000;
         g[n++] = luma_lo ? 0x00000093 : 0x00930000;
         g[n++] = luma_lo ? 0x00000022 : 0x00220000;
-        g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
-        g[n++] = work_iova + 0x10000; g[n++] = work_iova + 0x10000;
+        g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+        g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
         g[n++] = 0x00030000; g[n++] = 0x00000000;
         g[n++] = 0x00020000; g[n++] = 0x00000000;
     }
@@ -782,13 +782,18 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * matters: stock puts constants where we were putting addresses of our
      * own scratch buffer -- 0x1e700000 in the eighth word, 0x30001000 in
      * the last four. */
+    /* The live stock configuration puts a constant in the eighth word and
+     * four more in the tail. The reconstruction we were following read
+     * those as pointers into a scratch buffer and substituted ours -- they
+     * are nothing of the kind, and every one of them was garbage to the
+     * hardware. */
     g[n++] = OP_INCR(0x700, 16);
     g[n++] = 0x00000001; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x000045b0;
-    g[n++] = 0x00000000; g[n++] = 0x1e700000;
+    g[n++] = 0x00000000; g[n++] = 0x00001a40;
+    g[n++] = 0x00000000; g[n++] = 0x10000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00001e70; g[n++] = 0x00002960;
+    g[n++] = 0x00001000; g[n++] = 0x00001a00;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
@@ -799,8 +804,8 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000000; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
-    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
 
     g[n++] = OP_INCR(0xD20, 6);
     g[n++] = 0x00001101; g[n++] = 0x00000000;
@@ -814,11 +819,11 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
 
     g[n++] = OP_INCR(0x920, 10);
-    g[n++] = 0x00000002; g[n++] = work_iova + 0x31660;
-    g[n++] = 0x00000000; g[n++] = work_iova + 0x3f4a0;
-    g[n++] = 0x0000fa80; g[n++] = work_iova + 0x30000;
-    g[n++] = 0x00001c50; g[n++] = work_iova + 0x20000;
-    g[n++] = work_iova + 0x20000; g[n++] = work_iova + 0x20000;
+    g[n++] = 0x00000002; g[n++] = 0x10001660;
+    g[n++] = 0x00000000; g[n++] = 0x1000f4a0;
+    g[n++] = 0x0000fa80; g[n++] = 0x10000000;
+    g[n++] = 0x00001c50; g[n++] = 0x30001000;
+    g[n++] = 0x30001000; g[n++] = 0x30001000;
 
     g[n++] = OP_INCR(0x909, 7);
     g[n++] = 0x00000001; g[n++] = 0xfc000f00;
@@ -875,7 +880,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * attenuated some sixty-fold against the raw capture, which is what a
      * gain in the wrong fixed-point format would do. */
     g[n++] = gpp_gain; g[n++] = gpp_gain;
-    g[n++] = gpp_gain; g[n++] = work_iova + 0x31000;
+    g[n++] = gpp_gain; g[n++] = 0x10001000;
     }
 
     g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;

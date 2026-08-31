@@ -646,8 +646,12 @@ int main(int argc, char **argv)
                 unsigned b  = r0[x];
                 unsigned g  = (r0[x + 1] + r1[x]) / 2;
                 unsigned r  = r1[x + 1];
-                uint8_t p[4] = { (uint8_t)(r >> 2), (uint8_t)(g >> 2),
-                                 (uint8_t)(b >> 2), 0xff };
+                /* ARGB, not RGBA: the hardware takes the first byte of the
+                 * pixel as alpha on input as well as output -- written the
+                 * other way round, the red channel lands in alpha and is
+                 * dropped, which is exactly what the first run showed. */
+                uint8_t p[4] = { 0xff, (uint8_t)(r >> 2),
+                                 (uint8_t)(g >> 2), (uint8_t)(b >> 2) };
                 for (unsigned dy = 0; dy < 2; dy++) {
                     uint8_t *o = rgba + (((size_t)(y + dy) * W) + x) * 4;
                     memcpy(o, p, 4);

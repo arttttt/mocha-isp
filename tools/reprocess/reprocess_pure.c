@@ -278,6 +278,7 @@ int main(int argc, char **argv)
     uint32_t opt_isp_enable = 0x00000007;   /* from blob gather RE */
     uint32_t opt_stat_bytes = 4u << 20;     /* readback scan budget per plane */
     uint32_t opt_param_fill = 0;            /* word written across the 0x100 block */
+    int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -298,6 +299,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--isp-enable=", 13) == 0) opt_isp_enable = strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
+        else if (strcmp(a, "--commit") == 0)          opt_commit = 1;
+        else if (strcmp(a, "--commit-full") == 0)     opt_commit = 2;
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
         else if (strcmp(a, "--rgba-in") == 0)         rgba_input = 1;
         else if (strncmp(a, "--curve=", 8) == 0)      opt_scurve = (strcmp(a + 8, "scurve") == 0);
@@ -854,6 +857,26 @@ int main(int argc, char **argv)
         for (int i = 4; i < 8; i++) cmd[n++] = ccm[i];
         printf("CCM 0x300/0x304: %08x %08x %08x %08x %08x %08x %08x %08x\n",
                ccm[0], ccm[1], ccm[2], ccm[3], ccm[4], ccm[5], ccm[6], ccm[7]);
+    }
+
+    /* Commit the settings just written. 0x00C is the trigger register, and
+     * 0x0F means "apply the configuration": the cal submit issues one, but
+     * every colour block above is written after that, so without a second
+     * commit here they sit in a shadow bank and the frame trigger never
+     * sees them -- which is exactly why curves, CCM, the 0x100 page and
+     * E03 all produced byte-identical output. */
+    if (opt_commit) {
+        cmd[n++] = OP_SETCLASS(ISP_CLASS, 0, 0);
+        if (opt_commit > 1) {
+            cmd[n++] = OP_INCR(0x01F, 1);
+            cmd[n++] = 0x00000001;
+            cmd[n++] = OP_INCR(0x05F, 1);
+            cmd[n++] = 0x00000010;
+        }
+        cmd[n++] = OP_NONINCR(0x00C, 1);
+        cmd[n++] = 0x0000000F;
+        printf("Commit: 0x00C=0x0F after the settings blocks%s\n",
+               opt_commit > 1 ? " (with 0x01F/0x05F)" : "");
     }
 
     /* === MIUI-only register blocks (from stock camera gather #8) === */

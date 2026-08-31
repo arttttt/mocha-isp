@@ -1281,7 +1281,9 @@ int main(int argc, char **argv)
         for (int shot = 0; shot < shots; shot++) {
             int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;
 
-            while (attempt < 8 && !done) {
+            /* Two at most: the first trigger aligns, the second captures.
+             * More only stretches the run, and the parked job has a limit. */
+            while (attempt < 2 && !done) {
                 uint32_t fs0 = syncpt_read(sp_id);
                 attempt++;
 

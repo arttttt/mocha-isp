@@ -840,6 +840,9 @@ int main(int argc, char **argv)
      * frame that came from VI rather than from memory. */
     uint32_t isp_fmt = 0x04FE00E6, isp_e03 = 0;
     uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
+    /* Which of the two routing writes go through host1x methods rather than
+     * registers: bit 0 the ISP interface, bit 1 the image definition. */
+    unsigned isp_route = 3;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -877,6 +880,8 @@ int main(int argc, char **argv)
             isp_enable = (uint32_t)strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--isp-trigger=", 14) == 0)
             isp_trigger = (uint32_t)strtoul(a + 14, 0, 16);
+        else if (strncmp(a, "--isp-route=", 12) == 0)
+            isp_route = (unsigned)strtoul(a + 12, 0, 0);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1401,9 +1406,51 @@ int main(int argc, char **argv)
      * reason for doing this in one call. */
     vi_flush("setup");
 
-    /* Surface address and trigger through host1x, so the buffer is mapped
-     * into VI's context and the address written is one it can reach. */
-    {
+    /* When the frame goes to the ISP there is no surface for VI to write and
+     * so nothing to keep mapped -- which is just as well, because the job we
+     * used to park for that purpose is what killed the VI channel twice: the
+     * kernel caps its timeout at ten seconds and a run with retries in it
+     * goes past that. Nothing here goes through host1x on the VI side at
+     * all; the routing and the trigger are plain register writes. */
+    /* The routing methods on their own, in a job that carries nothing and
+     * finishes at once -- no relocation to keep alive, nothing to park on.
+     * The driver's note says register writes set the bits without opening
+     * the pixel path and only the methods do; sending both together made
+     * the frame start disappear, so each is selectable. */
+    if (isp_route && !(image_def & IMAGE_DEF_DEST_MEM)) {
+        uint32_t cmd_h = nvmap_create(4096);
+        nvmap_alloc(cmd_h);
+        uint32_t g[10];
+        int n = 0;
+        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+        if (isp_route & 1) { g[n++] = OP_INCR(0x099, 1);
+                             g[n++] = ISPINTF_CONFIG_ENABLE; }
+        if (isp_route & 2) { g[n++] = OP_INCR(0x282, 1);
+                             g[n++] = image_def; }
+        g[n++] = OP_IMM(0, sp_cmd);
+        nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+        struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+        struct nvhost_syncpt_incr si = { sp_cmd, 1 };
+        uint32_t cls = VI_CLASS_ID;
+        struct nvhost_fence fence = { 0, 0 };
+        struct nvhost32_submit_args sa;
+        memset(&sa, 0, sizeof sa);
+        sa.num_syncpt_incrs = 1;
+        sa.num_cmdbufs = 1;
+        sa.timeout = 3000;
+        sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+        sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+        sa.class_ids = (uint32_t)(uintptr_t)&cls;
+        sa.fences = (uint32_t)(uintptr_t)&fence;
+        errno = 0;
+        int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+        printf("VI routing via host1x (mask %u): %d words, rc=%d (%s)\n",
+               isp_route, n, rc, rc == 0 ? "ok" : strerror(errno));
+        ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    }
+
+    if (image_def & IMAGE_DEF_DEST_MEM) {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
         uint32_t g[24];
@@ -1417,10 +1464,17 @@ int main(int argc, char **argv)
          * the driver's own -- 0x099 for port B's ISP interface and 0x282
          * for its image definition -- and it is not the +0x1FF form the
          * rest of the channel uses. */
-        g[n++] = OP_INCR(0x099, 1);
-        g[n++] = ISPINTF_CONFIG_ENABLE;
-        g[n++] = OP_INCR(0x282, 1);
-        g[n++] = image_def;
+        /* Sent together they reproduce exactly what the driver's note
+         * records: the frame start never arrives. Which of the two does it
+         * is worth knowing, so each is separately selectable. */
+        if (isp_route & 1) {
+            g[n++] = OP_INCR(0x099, 1);
+            g[n++] = ISPINTF_CONFIG_ENABLE;
+        }
+        if (isp_route & 2) {
+            g[n++] = OP_INCR(0x282, 1);
+            g[n++] = image_def;
+        }
 
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
         g[n++] = 0;
@@ -1595,7 +1649,10 @@ int main(int argc, char **argv)
         for (int shot = 0; shot < shots; shot++) {
             int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;
 
-            while (attempt < 8 && !done) {
+            /* Two at most. The first trigger aligns, the second captures;
+             * more than that only stretches the run, and a long run is what
+             * took the parked job past the timeout the kernel allows. */
+            while (attempt < 2 && !done) {
                 uint32_t fs0 = syncpt_read(sp_id);
                 attempt++;
 

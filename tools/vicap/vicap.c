@@ -582,9 +582,13 @@ int main(int argc, char **argv)
                          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
                          IMAGE_DEF_DEST_MEM;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
-    uint32_t phy_cil_cmd = 0x00000000;   /* zero in the working state */
+    /* The front sensor is on CIL E. The reference dump that had this word
+     * at zero came from a session driving CIL A and B -- the other brick
+     * entirely -- so it says nothing about ours. Back to the value that
+     * brings E up, which is the one that reads 0x110 back from it. */
+    uint32_t phy_cil_cmd = 0x12020000;   /* brick E, one lane */
     int tpg = 0, shots = 8, piggyback = 0;
-    int hold = 0, dump_regs = 0;
+    int hold = 0, dump_regs = 0, scan_cil = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -606,6 +610,7 @@ int main(int argc, char **argv)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
+        else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
         else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }
@@ -753,6 +758,47 @@ int main(int argc, char **argv)
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
 
+    if (scan_cil) {
+        /* Which brick does this sensor actually arrive on? Nothing we have
+         * answers it: the board file leaves the port to userspace, and the
+         * device tree's prose and its own property disagree. So ask the
+         * hardware -- the sensor is streaming by now, so bring every pad
+         * out of power-down, enable both halves of the brick command, and
+         * read all five lane interfaces. The one carrying the sensor is the
+         * one whose status stops reading zero. */
+        static const struct { const char *name; unsigned pad, phy, st, cst; }
+        cil[] = {
+            { "A", 0x92C, 0x934, 0x93C, 0x940 },
+            { "B", 0x960, 0x968, 0x970, 0x974 },
+            { "C", 0x994, 0x99C, 0x9A4, 0x9A8 },
+            { "D", 0x9C8, 0x9D0, 0x9D8, 0x9DC },
+            { "E", 0xA08, 0xA10, 0xA18, 0xA1C },
+        };
+        pmc_dpd_release(0x1 | 0x2 | 0x4 | 0x8 | PMC_DPD_BIT_CSIE);
+        vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
+        for (unsigned i = 0; i < 5; i++) {
+            vi_wr(cil[i].pad, 0x00000005);
+            vi_wr(cil[i].phy, 0x00000002);
+            vi_wr(cil[i].st, 0xFFFFFFFF);
+            vi_wr(cil[i].cst, 0xFFFFFFFF);
+        }
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x12021202);
+        vi_flush("scan bring-up");
+
+        for (int pass = 0; pass < 3; pass++) {
+            usleep(200000);
+            printf("pass %d:", pass);
+            for (unsigned i = 0; i < 5; i++)
+                printf("  %s=%08x/%08x", cil[i].name,
+                       vi_rd(cil[i].st), vi_rd(cil[i].cst));
+            printf("\n");
+        }
+        printf("parser A=%08x B=%08x\n",
+               vi_rd(T124_PP_A_PIXEL_PARSER_STATUS),
+               vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
+        goto done;
+    }
+
     if (front) {
         printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");
         vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
@@ -773,18 +819,9 @@ int main(int argc, char **argv)
          * the A/B brick. Every driver constant for the C/E side sits in the
          * upper half too, so we had been enabling the wrong one all along.
          * 0xAEC goes with it; stock holds a 2 there and we held nothing. */
-        /* 0x10000000 is what a live stock session reads, but that may be a
-         * value between frames. The 24.1 driver -- whose capture into
-         * memory did work -- writes 0x12020000 for this camera: CSI-C,
-         * one lane, through CILE. Take the one from working code. */
-        /* In the state where a frame lands this word is ZERO, and the A/B
-         * pads are configured -- the opposite of both things we had done.
-         * Those pads were not leftovers to clean up. */
+        /* Brick E only. A and B belong to the rear path and are not ours to
+         * touch either way. */
         vi_wr(T124_CSI_PHY_CIL_COMMAND, phy_cil_cmd);
-        vi_wr(T124_CILA_PAD_CONFIG0, 0x00000007);
-        vi_wr(T124_PHY_CILA_CONTROL0, 0x00000002);
-        vi_wr(T124_CILB_PAD_CONFIG0, 0x00000007);
-        vi_wr(T124_PHY_CILB_CONTROL0, 0x00000002);
 
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
               (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
@@ -1139,6 +1176,11 @@ readback:
         close(sfd);
         printf("sensor powered down\n");
     }
+    goto shutdown;
+
+done:
+    if (sfd >= 0) close(sfd);
+shutdown:
     nvmap_unpin(buf_h);
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);

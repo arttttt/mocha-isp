@@ -27,6 +27,45 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+
+/* The CSI pads sit in deep power down until something asks the PMC to let
+ * them out, and reading the register confirms it: CSIE comes up as
+ * 0x80001000, the "sleep on" code with its own bit set. The kernel puts it
+ * back when the sensor is powered down, so releasing it from a separate
+ * program does not survive to the capture -- it has to happen here, after
+ * the sensor is up. Offsets from the stock kernel's pmc.c; CSIE is bit 12
+ * of the second request register per the driver's own table. */
+#define PMC_BASE            0x7000E400UL
+#define PMC_IO_DPD2_REQ     0x1C0
+#define PMC_DPD_CODE_OFF    0x40000000u
+#define PMC_DPD_BIT_CSIE    (1u << 12)
+
+static int pmc_dpd_release(uint32_t bit)
+{
+    long page = sysconf(_SC_PAGESIZE);
+    unsigned long addr = PMC_BASE + PMC_IO_DPD2_REQ;
+    unsigned long base = addr & ~(unsigned long)(page - 1);
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) { printf("dpd: /dev/mem %s\n", strerror(errno)); return -1; }
+    void *m = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_SHARED,
+                   fd, (off_t)base);
+    if (m == MAP_FAILED) {
+        printf("dpd: mmap %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    volatile uint32_t *r = (volatile uint32_t *)((char *)m + (addr - base));
+    uint32_t before = *r;
+    *r = PMC_DPD_CODE_OFF | bit;
+    __sync_synchronize();
+    uint32_t after = *r;
+    printf("  CSI pads out of deep power down: 0x%08x -> 0x%08x\n",
+           before, after);
+    munmap(m, (size_t)page * 2);
+    close(fd);
+    return 0;
+}
 
 /* ---- sensor node (stock kernel include/media/imx179.h) ---- */
 struct sensor_mode {
@@ -75,6 +114,9 @@ struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; 
 struct regrdwr_args {
     uint32_t id, num_offsets, block_size, offsets, values, write;
 };
+struct nvhost_get_param_arg { uint32_t param, value; };
+#define NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT \
+    _IOWR(NVHOST_IOCTL_MAGIC, 16, struct nvhost_get_param_arg)
 #define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR \
     _IOWR(NVHOST_IOCTL_MAGIC, 14, struct regrdwr_args)
 
@@ -141,6 +183,12 @@ struct regrdwr_args {
  * two registers that only exist as relative offsets resolve from there. */
 #define T124_CSI_CLKEN_OVERRIDE              (0x838 + 0x218)
 #define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
+
+#define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
+#define T124_PPA_FRAME_START            9
+#define T124_PPB_FRAME_START            10
+#define T124_MWA_ACK_DONE               6
+#define T124_MWB_ACK_DONE               7
 
 #define BRICK_CLOCK_A_4X                (0x1 << 16)
 #define T124_CIL_PHY_CONTROL_DEFAULT    0x09
@@ -303,6 +351,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* The channel's own syncpoint, asked for rather than assumed. */
+    struct nvhost_get_param_arg gp = { .param = 0, .value = 0 };
+    uint32_t sp_id = 0;
+    if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0)
+        sp_id = gp.value;
+    printf("VI syncpoint: %u\n", sp_id);
+
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
     uint32_t iova = nvmap_pin(buf_h);
@@ -368,6 +423,8 @@ int main(int argc, char **argv)
      * its preview was running. Copying them verbatim is the point: if the
      * capture still does not happen with the working configuration in
      * place, the missing piece is somewhere other than the CSI setup. */
+    pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
+
     if (front) {
         printf("bringing up the CSI receiver (port B / CIL E, from stock)\n");
         vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
@@ -458,6 +515,16 @@ int main(int argc, char **argv)
                              : PP_B_PIXEL_STREAM_PP_COMMAND;
     vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
               CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+
+    /* Arm the syncpoint conditions before the shot. VI_INCR_SYNCPT is a
+     * command register -- it takes a condition and a syncpoint id and arms
+     * one increment -- so it reads back as zero and never showed up in the
+     * comparison against stock. The memory-write acknowledge is the one
+     * that has to be armed before the DMA starts. */
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+          (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_id);
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+          (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8 | sp_id);
 
     /* And the trigger goes in the same batch: the receiver has to still be
      * powered and configured when the shot is fired, which is the whole

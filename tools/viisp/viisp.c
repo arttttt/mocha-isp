@@ -611,7 +611,7 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 #include "isp_b_cal.h"
 
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
-                    uint32_t work_iova, uint32_t stats_iova)
+                    uint32_t work_iova, uint32_t stats_iova, int demosaic_zero)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t bytes = (words + 256) * 4;
@@ -739,12 +739,21 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0; g[n++] = 0x00000780; g[n++] = 0x00000200;
     g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000032;
 
+    /* Demosaic. Only red comes out of the pipeline -- green and blue are
+     * exactly zero in every packed format -- and the reprocess notes say
+     * stock sends nine zeros here and lets the hardware use its own
+     * defaults, while these coefficients are the tool's own. Selectable
+     * because that is the difference worth testing. */
     g[n++] = OP_INCR(0x506, 9);
-    g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
-    g[n++] = 0x04c1304c; g[n++] = 0x08220882;
-    g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
-    g[n++] = 0x08621886; g[n++] = 0x01204812;
-    g[n++] = 0x06e1b86e;
+    if (demosaic_zero) {
+        for (int i = 0; i < 9; i++) g[n++] = 0;
+    } else {
+        g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
+        g[n++] = 0x04c1304c; g[n++] = 0x08220882;
+        g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
+        g[n++] = 0x08621886; g[n++] = 0x01204812;
+        g[n++] = 0x06e1b86e;
+    }
 
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
@@ -1006,6 +1015,7 @@ int main(int argc, char **argv)
     /* Which of the two routing writes go through host1x methods rather than
      * registers: bit 0 the ISP interface, bit 1 the image definition. */
     unsigned isp_route = 3;
+    int demosaic_zero = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1045,6 +1055,7 @@ int main(int argc, char **argv)
             isp_trigger = (uint32_t)strtoul(a + 14, 0, 16);
         else if (strncmp(a, "--isp-route=", 12) == 0)
             isp_route = (unsigned)strtoul(a + 12, 0, 0);
+        else if (strcmp(a, "--demosaic-zero") == 0) demosaic_zero = 1;
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1210,7 +1221,7 @@ int main(int argc, char **argv)
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
-                     work_iova, stats_iova);
+                     work_iova, stats_iova, demosaic_zero);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

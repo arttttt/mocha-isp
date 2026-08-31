@@ -313,7 +313,8 @@ int main(int argc, char **argv)
     int opt_teardown = 1;                   /* quiesce the ISP on the way out */
     int opt_dump = 1;                       /* write the surface to a file */
     int opt_in_shift = 0;                   /* restack samples in the container */
-    int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
+    int opt_blk400 = 0;                     /* 0x400 from the host settings */
+    int opt_blk400_live = 0;                /* 0x400 as the hardware gets it */
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     uint32_t r200[2], r202[3], r205[4];
     int n200 = 0, n202 = 0, n205 = 0;       /* 0 = use the class default */
@@ -345,6 +346,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-dump") == 0)         opt_dump = 0;
         else if (strncmp(a, "--in-shift=", 11) == 0)  opt_in_shift = atoi(a + 11);
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
+        else if (strcmp(a, "--blk400-live") == 0)     opt_blk400_live = 1;
         else if (strncmp(a, "--r400=", 7) == 0) {
             n400 = parse_words(a + 7, r400, 12); opt_blk400 = 1;
             if (n400 < 0) { printf("bad --r400 list\n"); return 1; }
@@ -1012,6 +1014,22 @@ int main(int argc, char **argv)
                opt_commit > 1 ? " (with 0x01F/0x05F)" : "");
     }
 
+    /* The live form of 0x400. What the tool sent before came out of the
+     * library's host-side settings structure; what the hardware actually
+     * receives every frame is a six-word NONINCR describing the ring of
+     * 0x250-byte records -- slot index, and the stride packed with it.
+     * We have one slot, so the index stays 0. */
+    if (opt_blk400_live) {
+        cmd[n++] = OP_NONINCR(0x400, 6);
+        cmd[n++] = 0x00000000;          /* slot index */
+        cmd[n++] = 0x00000d00;
+        cmd[n++] = 0x00000040;
+        cmd[n++] = 0x20080001;
+        cmd[n++] = (0x250 << 16) | 0;   /* record stride | slot */
+        cmd[n++] = 0x00000d00;
+        printf("0x400: live ring form (6 words)\n");
+    }
+
     /* Pipeline mode. 0x200 alone was tried in April and turned the frame
      * solid red; stock never sends it alone, it sends three blocks
      * together, and the companions carry real values (0x780078 pairs,
@@ -1217,6 +1235,24 @@ int main(int argc, char **argv)
         printf("TIMEOUT (syncpt %u thresh %u)\n", sp_memory, thresh);
     } else {
         printf("Done (syncpt=%u val=%u)\n", sp_memory, wa.value);
+    }
+
+    /* The 0x100 buffer is the ISP's, not ours: the hardware writes a small
+     * per-frame record into it every frame and the library reads it back in
+     * GetStats. We have been handing it a page and never once looking at
+     * what came back -- the only channel the block has to talk to us. */
+    {
+        uint32_t st[16];
+        memset(st, 0, sizeof(st));
+        if (nvmap_read(param_h, 0, st, sizeof(st)) == 0) {
+            int any = 0;
+            for (int i = 0; i < 16; i++) if (st[i] != opt_param_fill) any = 1;
+            printf("Stats block at 0x100 (%s):\n",
+                   any ? "ISP WROTE SOMETHING" : "unchanged");
+            for (int i = 0; i < 16; i += 4)
+                printf("  +0x%02x: %08x %08x %08x %08x\n",
+                       i * 4, st[i], st[i+1], st[i+2], st[i+3]);
+        }
     }
 
     /* Read back per plane: first bytes, a non-zero count and the byte range.

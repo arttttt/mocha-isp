@@ -1200,6 +1200,21 @@ int main(int argc, char **argv)
                 printf("  %s min=%u max=%u mean=%.1f\n",
                        chans == 4 ? cn[c] : plane_name(&L, pl),
                        lo[c], hi[c], cnt[c] ? (double)sum[c] / cnt[c] : 0.0);
+
+            /* Say the fill colour out loud. Configurations that all read
+             * as "solid" can still differ in the value they fill with,
+             * and that difference is the only signal such a run carries. */
+            int flat = 1;
+            for (int c = 0; c < chans; c++)
+                if (lo[c] != hi[c]) flat = 0;
+            if (flat) {
+                printf("  SOLID FILL:");
+                for (int c = 0; c < chans; c++) printf(" %02x", lo[c]);
+                if (chans == 4)
+                    printf("   (R=%u G=%u B=%u A=%u)",
+                           lo[0], lo[1], lo[2], lo[3]);
+                printf("\n");
+            }
         }
         free(buf);
     }

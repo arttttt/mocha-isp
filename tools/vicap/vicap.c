@@ -325,6 +325,20 @@ struct nvhost32_submit_args {
 #define T124_CILE_PAD_CONFIG0                0xA08
 #define T124_PHY_CILE_CONTROL0               0xA10
 #define T124_CSI_CIL_E_INT_MASK              0xA14
+
+/* The pattern generator, at the parser base plus 0x18C, the same way the
+ * lane interface sits at plus 0xF4. */
+#define TPG_B_BASE                           (0x86C + 0x18C)
+#define TPG_CTRL                             0x000
+#define TPG_PHASE                            0x008
+#define TPG_RED_FREQ                         0x00C
+#define TPG_RED_FREQ_RATE                    0x010
+#define TPG_GREEN_FREQ                       0x014
+#define TPG_GREEN_FREQ_RATE                  0x018
+#define TPG_BLUE_FREQ                        0x01C
+#define TPG_BLUE_FREQ_RATE                   0x020
+#define PG_MODE_OFFSET                       2
+#define PG_ENABLE                            0x1
 #define T124_PHY_CILB_CONTROL0               0x968
 #define T124_CSI_CIL_B_INT_MASK              0x96C
 /* The CSI block sits at 0x838 in the VI aperture: 0x838+0xF4 is CILA and
@@ -484,6 +498,7 @@ int main(int argc, char **argv)
     uint32_t image_def = 0x00200004;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
     uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
+    int tpg = 0;
     int hold = 0, dump_regs = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -507,6 +522,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
+        else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
         else if (strncmp(a, "--phy-cil=", 10) == 0)
             phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
@@ -662,8 +678,25 @@ int main(int argc, char **argv)
          * down, then the CSI and PHY brought up, and the calibration last
          * -- trimming pads that have not been enabled yet is what a
          * calibration that never finishes looks like. */
+        /* --tpg: let the receiver make its own picture. This splits the
+         * problem in half -- if the pattern lands in the buffer then VI,
+         * the parser and the write path are all sound and the fault is on
+         * the wire; if it does not, the fault is in our channel setup and
+         * the sensor was never the question. */
+        if (tpg) {
+            printf("  pattern generator on (port B)\n");
+            vi_wr(TPG_B_BASE + TPG_CTRL, ((1u - 1) << PG_MODE_OFFSET) | PG_ENABLE);
+            vi_wr(TPG_B_BASE + TPG_PHASE, 0);
+            vi_wr(TPG_B_BASE + TPG_RED_FREQ, (0x10u << 16) | 0x10u);
+            vi_wr(TPG_B_BASE + TPG_RED_FREQ_RATE, 0);
+            vi_wr(TPG_B_BASE + TPG_GREEN_FREQ, (0x10u << 16) | 0x10u);
+            vi_wr(TPG_B_BASE + TPG_GREEN_FREQ_RATE, 0);
+            vi_wr(TPG_B_BASE + TPG_BLUE_FREQ, (0x10u << 16) | 0x10u);
+            vi_wr(TPG_B_BASE + TPG_BLUE_FREQ_RATE, 0);
+        }
+
         vi_flush("CSI bring-up");
-        mipi_calibrate_csie();
+        if (!tpg) mipi_calibrate_csie();
     } else {
     printf("bringing up the CSI receiver (port A, 4 lanes)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);

@@ -1241,12 +1241,24 @@ int main(int argc, char **argv)
                 }
                 started = syncpt_read(sp_id) != fs0;
 
+                /* Sample four rows spread down the frame, not just the last
+                 * one. Watching a single line said "arrived" the instant a
+                 * leftover write from the attempt before touched it, while
+                 * only a quarter of the picture was there. A frame is whole
+                 * when the top, both middles and the bottom have all lost
+                 * the fill. */
+                static const double where[4] = { 0.02, 0.35, 0.70, 0.999 };
                 mwaited = 0;
-                while (mwaited < 300 && !done) {
-                    nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
-                    for (unsigned i = 0; i < sizeof tail; i++)
-                        if (tail[i] != 0xA5) { done = 1; break; }
-                    if (!done) { usleep(1000); mwaited++; }
+                while (mwaited < 400 && !done) {
+                    int seen = 0;
+                    for (int k = 0; k < 4; k++) {
+                        uint32_t row = (uint32_t)(where[k] * (H - 1));
+                        nvmap_rw(buf_h, row * stride, tail, sizeof tail, 0);
+                        for (unsigned i = 0; i < sizeof tail; i++)
+                            if (tail[i] != 0xA5) { seen++; break; }
+                    }
+                    if (seen == 4) done = 1;
+                    else { usleep(1000); mwaited++; }
                 }
             }
             printf("  frame %d: %s after %d attempt%s"

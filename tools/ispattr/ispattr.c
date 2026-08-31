@@ -112,8 +112,9 @@ int main(int argc, char **argv)
         memset(st, 0, sizeof st);
         st[0] = 1;                                   /* run the stage */
         memcpy(st + 4, &(void *){ coeff }, 4);
-        st[0x18] = 1;
-        memcpy(st + 0x1c, &(void *){ coeff }, 4);
+        /* The second pair is left alone. Filling it with the same pointer
+         * was a guess, and the handler rejects the block on a check deeper
+         * than the shape ones -- so give it only what we know. */
 
         uint32_t size = 0x40;
         int src = HwSettingsSetAttribute(hSet, 8, 0, (uint32_t)(uintptr_t)st,

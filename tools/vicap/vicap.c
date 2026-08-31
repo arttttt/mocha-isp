@@ -1,0 +1,304 @@
+/*
+ * vicap — pull one frame out of the sensor through VI, into memory.
+ *
+ * No ISP yet and no NVIDIA userspace at all. The sensor already streams
+ * from our own code (/dev/imx179 takes a power call and a mode, the tables
+ * live in the kernel driver), and the VI registers answer a read through
+ * nvhost's module register ioctl. This puts the two together: configure the
+ * CSI channel, point it at an nvmap buffer, fire a single shot, and see
+ * what lands.
+ *
+ * Everything here comes from the 24.1 tree's camera driver -- registers.h
+ * for the offsets, core.c for the format codes and the word count, and
+ * channel.c for the order the writes go in. Nothing is guessed; if a frame
+ * does not arrive, the missing piece is the CSI PHY bring-up, which the
+ * stock VI driver does and we do not.
+ *
+ * Build: tools/vicap/build-vicap.sh (on the build server)
+ * Usage: ./vicap [--width=N] [--height=N] [--sensor=imx179|ov5693]
+ *                [--port=N] [--no-sensor] [--dump]
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+
+/* ---- sensor node (stock kernel include/media/imx179.h) ---- */
+struct sensor_mode {
+    int xres, yres;
+    uint32_t frame_length, coarse_time;
+    uint16_t gain;
+};
+#define SENSOR_IOCTL_SET_MODE   _IOW('o', 1, struct sensor_mode)
+#define SENSOR_IOCTL_SET_POWER  _IOW('o', 20, uint32_t)
+
+/* ---- nvmap ---- */
+#define NVMAP_IOC_MAGIC 'N'
+struct nvmap_create_handle {
+    union { uint32_t id; uint32_t size; int32_t fd; };
+    uint32_t handle;
+};
+struct nvmap_alloc_handle { uint32_t handle, heap_mask, flags, align; };
+struct nvmap_rw_handle {
+    unsigned long addr; uint32_t handle, offset, elem_size,
+                  hmem_stride, user_stride, count;
+};
+struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; };
+#define NVMAP_IOC_CREATE     _IOWR(NVMAP_IOC_MAGIC, 0, struct nvmap_create_handle)
+#define NVMAP_IOC_ALLOC      _IOW(NVMAP_IOC_MAGIC, 3, struct nvmap_alloc_handle)
+#define NVMAP_IOC_FREE       _IO(NVMAP_IOC_MAGIC, 4)
+#define NVMAP_IOC_WRITE      _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
+#define NVMAP_IOC_READ       _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
+#define NVMAP_IOC_PIN_MULT   _IOWR(NVMAP_IOC_MAGIC, 10, struct nvmap_pin_handle)
+#define NVMAP_IOC_UNPIN_MULT _IOW(NVMAP_IOC_MAGIC, 11, struct nvmap_pin_handle)
+#define NVMAP_HEAP_IOVMM     (1 << 30)
+#define NVMAP_HANDLE_WRITE_COMBINE 2
+
+/* ---- nvhost register access ---- */
+#define NVHOST_IOCTL_MAGIC 'H'
+struct regrdwr_args {
+    uint32_t id, num_offsets, block_size, offsets, values, write;
+};
+#define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR \
+    _IOWR(NVHOST_IOCTL_MAGIC, 14, struct regrdwr_args)
+
+/* ---- VI / CSI registers (24.1 registers.h, t124_registers.h) ---- */
+#define VI_CSI_BASE(n)              (0x100 + (n) * 0x100)
+#define VI_CSI_SINGLE_SHOT          0x004
+#define VI_CSI_IMAGE_DEF            0x00c
+#define VI_CSI_IMAGE_SIZE           0x018
+#define VI_CSI_IMAGE_SIZE_WC        0x01c
+#define VI_CSI_IMAGE_DT             0x020
+#define VI_CSI_SURFACE0_OFFSET_MSB  0x024
+#define VI_CSI_SURFACE0_OFFSET_LSB  0x028
+#define VI_CSI_SURFACE0_STRIDE      0x054
+#define VI_CSI_ERROR_STATUS         0x084
+
+#define BYPASS_PXL_TRANSFORM_OFFSET 24
+#define IMAGE_DEF_FORMAT_OFFSET     16
+#define IMAGE_SIZE_HEIGHT_OFFSET    16
+#define SINGLE_SHOT_CAPTURE         0x1
+
+#define PP_A_PIXEL_STREAM_PP_COMMAND 0x848
+#define PP_B_PIXEL_STREAM_PP_COMMAND 0x86c
+#define CSI_PP_ENABLE                0x1
+#define CSI_PP_SINGLE_SHOT_ENABLE    (0x1 << 2)
+#define CSI_PP_START_MARKER_FRAME_MAX_OFFSET 12
+
+#define IMAGE_FORMAT_T_R16_I        32      /* raw pass-through */
+#define IMAGE_DT_RAW10              43
+
+static int nvmap_fd = -1, vi_fd = -1;
+
+static int vi_reg(uint32_t off, uint32_t *val, int write)
+{
+    uint32_t offsets[1] = { off }, values[1] = { *val };
+    struct regrdwr_args a;
+    memset(&a, 0, sizeof a);
+    a.id = 0;
+    a.num_offsets = 1;
+    a.block_size = 4;
+    a.offsets = (uint32_t)(uintptr_t)offsets;
+    a.values = (uint32_t)(uintptr_t)values;
+    a.write = (uint32_t)write;
+    int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a);
+    if (rc == 0 && !write) *val = values[0];
+    return rc;
+}
+static int vi_wr(uint32_t off, uint32_t val)
+{
+    uint32_t v = val;
+    int rc = vi_reg(off, &v, 1);
+    if (rc) printf("  WR 0x%03x = 0x%08x FAILED (%s)\n", off, val, strerror(errno));
+    return rc;
+}
+static uint32_t vi_rd(uint32_t off)
+{
+    uint32_t v = 0;
+    if (vi_reg(off, &v, 0)) return 0xdeadbeef;
+    return v;
+}
+
+static uint32_t nvmap_create(uint32_t size) {
+    struct nvmap_create_handle ch = { .size = size };
+    if (ioctl(nvmap_fd, NVMAP_IOC_CREATE, &ch) < 0) { perror("nvmap create"); return 0; }
+    return ch.handle;
+}
+static int nvmap_alloc(uint32_t h) {
+    struct nvmap_alloc_handle ah = { h, NVMAP_HEAP_IOVMM,
+                                     NVMAP_HANDLE_WRITE_COMBINE, 4096 };
+    if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC, &ah) < 0) { perror("nvmap alloc"); return -1; }
+    return 0;
+}
+static uint32_t nvmap_pin(uint32_t h) {
+    struct nvmap_pin_handle ph = { h, 0, 1 };
+    if (ioctl(nvmap_fd, NVMAP_IOC_PIN_MULT, &ph) < 0) { perror("nvmap pin"); return 0; }
+    return (uint32_t)ph.addr;
+}
+static void nvmap_unpin(uint32_t h) {
+    struct nvmap_pin_handle ph = { h, 0, 1 };
+    ioctl(nvmap_fd, NVMAP_IOC_UNPIN_MULT, &ph);
+}
+static int nvmap_rw(uint32_t h, uint32_t off, void *d, uint32_t n, int wr) {
+    struct nvmap_rw_handle rw = { (unsigned long)d, h, off, n, n, n, 1 };
+    return ioctl(nvmap_fd, wr ? NVMAP_IOC_WRITE : NVMAP_IOC_READ, &rw);
+}
+
+int main(int argc, char **argv)
+{
+    unsigned W = 1920, H = 1080, port = 0;
+    const char *sensor = "imx179";
+    int use_sensor = 1, dump = 0;
+
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
+        else if (strncmp(a, "--height=", 9) == 0) H = (unsigned)strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--port=", 7) == 0)   port = (unsigned)strtoul(a + 7, 0, 0);
+        else if (strncmp(a, "--sensor=", 9) == 0) sensor = a + 9;
+        else if (strcmp(a, "--no-sensor") == 0)   use_sensor = 0;
+        else if (strcmp(a, "--dump") == 0)        dump = 1;
+        else { printf("unknown option %s\n", a); return 1; }
+    }
+
+    uint32_t base = VI_CSI_BASE(port);
+    uint32_t stride = W * 2;                 /* RAW10 lands in 16-bit words */
+    uint32_t frame = stride * H;
+    uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
+
+    printf("=== vicap: %s %ux%u, CSI port %u ===\n", sensor, W, H, port);
+    printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
+
+    nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
+    vi_fd = open("/dev/nvhost-vi", O_RDWR);
+    if (nvmap_fd < 0 || vi_fd < 0) {
+        printf("open failed: nvmap=%d vi=%d\n", nvmap_fd, vi_fd);
+        return 1;
+    }
+
+    uint32_t buf_h = nvmap_create(frame);
+    if (!buf_h || nvmap_alloc(buf_h)) return 1;
+    uint32_t iova = nvmap_pin(buf_h);
+    printf("frame buffer: handle %u, iova 0x%08x\n", buf_h, iova);
+    if (!iova) return 1;
+
+    /* Fill with a pattern, so anything the hardware writes is visible as
+     * a change rather than being confused with a buffer that was empty. */
+    {
+        uint32_t chunk = 65536;
+        uint8_t *p = malloc(chunk);
+        memset(p, 0xA5, chunk);
+        for (uint32_t o = 0; o < frame; o += chunk)
+            nvmap_rw(buf_h, o, p, frame - o < chunk ? frame - o : chunk, 1);
+        free(p);
+    }
+
+    int sfd = -1;
+    if (use_sensor) {
+        char sn[64];
+        snprintf(sn, sizeof sn, "/dev/%s", sensor);
+        sfd = open(sn, O_RDWR);
+        if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
+        uint32_t on = 1;
+        if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
+            printf("sensor power: %s\n", strerror(errno));
+        struct sensor_mode m = { (int)W, (int)H, 0, 0, 0 };
+        if (ioctl(sfd, SENSOR_IOCTL_SET_MODE, &m) < 0)
+            printf("sensor mode: %s\n", strerror(errno));
+        else
+            printf("sensor streaming at %ux%u\n", W, H);
+    }
+
+    /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
+     * is 1 here: we want the raw bayer in memory, not a converted image. */
+    printf("configuring CSI channel at 0x%03x\n", base);
+    vi_wr(base + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
+    vi_wr(base + VI_CSI_IMAGE_DEF,
+          (1u << BYPASS_PXL_TRANSFORM_OFFSET) |
+          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET));
+    vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
+    vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
+    vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);
+    vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+    vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+    vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+
+    /* Pixel parser: single shot, armed for one frame. */
+    uint32_t pp = (port == 0) ? PP_A_PIXEL_STREAM_PP_COMMAND
+                             : PP_B_PIXEL_STREAM_PP_COMMAND;
+    vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+
+    printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
+           vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),
+           vi_rd(base + VI_CSI_IMAGE_SIZE), vi_rd(base + VI_CSI_IMAGE_SIZE_WC));
+    printf("readback: SURFACE0=0x%08x STRIDE=0x%08x PP=0x%08x\n",
+           vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
+           vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
+
+    /* Fire. */
+    printf("single shot...\n");
+    vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+    usleep(200000);
+
+    uint32_t err = vi_rd(base + VI_CSI_ERROR_STATUS);
+    printf("ERROR_STATUS = 0x%08x, SINGLE_SHOT = 0x%08x\n",
+           err, vi_rd(base + VI_CSI_SINGLE_SHOT));
+
+    /* Did anything land? The buffer was filled with 0xA5. */
+    {
+        uint32_t chunk = 65536, scan = frame < (2u << 20) ? frame : (2u << 20);
+        uint8_t *p = malloc(chunk);
+        uint32_t changed = 0, nz = 0;
+        uint8_t head[16];
+        nvmap_rw(buf_h, 0, head, 16, 0);
+        printf("first bytes:");
+        for (int i = 0; i < 16; i++) printf(" %02x", head[i]);
+        printf("\n");
+        for (uint32_t o = 0; o < scan; o += chunk) {
+            uint32_t part = scan - o < chunk ? scan - o : chunk;
+            if (nvmap_rw(buf_h, o, p, part, 0) < 0) break;
+            for (uint32_t i = 0; i < part; i++) {
+                if (p[i] != 0xA5) changed++;
+                if (p[i]) nz++;
+            }
+        }
+        printf("scanned %u bytes: %u differ from the fill, %u non-zero\n",
+               scan, changed, nz);
+        free(p);
+    }
+
+    if (dump) {
+        FILE *f = fopen("/data/local/tmp/vicap.raw", "wb");
+        if (f) {
+            uint32_t chunk = 65536;
+            uint8_t *p = malloc(chunk);
+            for (uint32_t o = 0; o < frame; o += chunk) {
+                uint32_t part = frame - o < chunk ? frame - o : chunk;
+                nvmap_rw(buf_h, o, p, part, 0);
+                fwrite(p, 1, part, f);
+            }
+            free(p);
+            fclose(f);
+            printf("saved /data/local/tmp/vicap.raw (%u bytes)\n", frame);
+        }
+    }
+
+    if (sfd >= 0) {
+        uint32_t off = 0;
+        ioctl(sfd, SENSOR_IOCTL_SET_POWER, &off);
+        close(sfd);
+        printf("sensor powered down\n");
+    }
+    nvmap_unpin(buf_h);
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
+    close(vi_fd);
+    close(nvmap_fd);
+    printf("=== done ===\n");
+    return 0;
+}

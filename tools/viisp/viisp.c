@@ -815,7 +815,7 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
-                     uint32_t sp)
+                     uint32_t sp, uint32_t hold_sp, uint32_t hold_at)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -862,15 +862,17 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
 
-    /* Hold the job until the ISP says it has finished writing. The output
-     * buffer's mapping belongs to this job, and letting it retire the
+    /* Hold the job so the output buffer stays mapped: letting it retire the
      * instant the trigger was written left the ISP writing into an address
-     * that was no longer translated -- the memory controller faulted on the
-     * buffer's base and the picture came back part written. Waiting on the
-     * block's own completion releases the job exactly when it is safe. */
+     * no longer translated, and the picture came back part written.
+     *
+     * The wait is on a counter WE raise, not on the ISP's own completion.
+     * Parking on the block's completion looked neater and killed the
+     * channel the first time a frame did not complete -- the wait never
+     * lifted, host1x timed the channel out, and that costs a reboot. */
     g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
     g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-    g[n++] = (sp_mem << 24) | ((syncpt_read(sp_mem) + 1) & 0xFFFFFF);
+    g[n++] = (hold_sp << 24) | (hold_at & 0xFFFFFF);
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_IMM(0, sp);
 
@@ -1119,7 +1121,7 @@ int main(int argc, char **argv)
         sp_cmd = gp.value;
     printf("VI syncpoints: frame %u, memory write %u, command %u\n",
            sp_id, sp_mw, sp_cmd);
-    uint32_t hold_thresh = 0;
+    uint32_t hold_thresh = 0, isp_hold_thresh = 0;
 
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
@@ -1892,10 +1894,13 @@ int main(int argc, char **argv)
                  * trigger, the way the driver's start-thread does it: the
                  * block has to be armed and waiting when the pixels cross,
                  * because nothing buffers them on the way. */
-                if (isp_fd >= 0 && out_iova && stats_h)
+                if (isp_fd >= 0 && out_iova && stats_h) {
+                    isp_hold_thresh = syncpt_read(sp_mw) + 1;
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
-                              sp_mem, sp_stats, sp_loadv, isp_sp);
+                              sp_mem, sp_stats, sp_loadv, isp_sp,
+                              sp_mw, isp_hold_thresh);
+                }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
@@ -1941,14 +1946,17 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
 
-        if (hold_thresh) {
+        /* Release whichever job is parked -- VI's on the memory path, the
+         * ISP's on this one. Both wait on the same counter and neither can
+         * strand a channel, because raising it is ours to do. */
+        if (hold_thresh || isp_hold_thresh) {
             int cfd = open("/dev/nvhost-ctrl", O_RDWR);
             if (cfd >= 0) {
                 struct nvhost_ctrl_syncpt_incr_args ia = { sp_mw };
                 int irc = ioctl(cfd, NVHOST_IOCTL_CTRL_SYNCPT_INCR, &ia);
                 close(cfd);
-                printf("held mapping released: syncpoint %u to %u, rc=%d\n",
-                       sp_mw, hold_thresh, irc);
+                printf("held mapping released: syncpoint %u, rc=%d\n",
+                       sp_mw, irc);
             }
         }
     }

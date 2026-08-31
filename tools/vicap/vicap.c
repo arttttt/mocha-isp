@@ -1231,14 +1231,20 @@ int main(int argc, char **argv)
                    vi_rd(TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR));
         }
 
-        /* Now that the shots are away, arm the acknowledge -- the driver's
-         * order, and it costs nothing if the DMA has already finished. */
-        vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-              (front ? T124_MWB_ACK_DONE : T124_MWA_ACK_DONE) << 8 | sp_mw);
-        vi_flush("arm memory-write acknowledge");
+        /* Stop the capture before reading a single byte. The trigger bit
+         * stays set once written and the acknowledge kept firing at once,
+         * frame after frame -- so while we sat waiting, VI was overwriting
+         * the buffer from the top with a newer frame and leaving the tail of
+         * an older one below. That is the tear: not a write that stopped
+         * short, but one that had started again. */
+        vi_wr(pp, 0);
+        vi_wr(base + VI_CSI_SINGLE_SHOT, 0);
+        vi_wr(base + VI_CSI_SW_RESET, 0xF);
+        vi_wr(base + VI_CSI_SW_RESET, 0x0);
+        vi_flush("capture stopped");
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
-    usleep(1500000);
+    usleep(200000);
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),

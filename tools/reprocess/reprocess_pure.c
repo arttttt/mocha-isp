@@ -749,6 +749,22 @@ int main(int argc, char **argv)
         cal[cn++] = OP_INCR(0x304, 4);
         for (int i=4;i<8;i++) cal[cn++] = (opt_cal_colour && have_ccm) ? ccm[i] : 0;
 
+        /* The two blocks that only ever appear in the stock init gather,
+         * alongside the colour coefficients: 0x400 (luma weights and the
+         * per-channel words) and 0xC00. Neither has been in our cal. */
+        if (opt_cal_colour) {
+            static const uint32_t c400[12] = {
+                0x00000001, 0x004b0000, 0x00930000, 0x00220000,
+                0x2ff01000, 0x2ff01000, 0x2ff01000, 0x2ff01000,
+                0x00030000, 0x00000000, 0x00020000, 0x00000000
+            };
+            cal[cn++] = OP_INCR(0x400, 12);
+            for (int i = 0; i < 12; i++) cal[cn++] = c400[i];
+            cal[cn++] = OP_INCR(0xC00, 3);
+            cal[cn++] = 0x00000101; cal[cn++] = 0x00000000;
+            cal[cn++] = 0x00100000;
+        }
+
         if (opt_cal_colour)
             printf("Cal: colour blocks carry real coefficients "
                    "(demosaic, gpp 0x%08x, curve=%s, ccm=%s)\n",

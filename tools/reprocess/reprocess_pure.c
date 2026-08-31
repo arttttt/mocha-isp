@@ -315,6 +315,8 @@ int main(int argc, char **argv)
     int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     uint32_t r200[2], r202[3], r205[4];
     int n200 = 0, n202 = 0, n205 = 0;       /* 0 = use the class default */
+    uint32_t r400[12];
+    int n400 = 0;                           /* leading words of 0x400 to replace */
     int opt_blk500 = 0;                     /* stock 0x500 words instead of ours */
 
     for (int i = 1; i < argc; i++) {
@@ -339,6 +341,10 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--no-teardown") == 0)     opt_teardown = 0;
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
+        else if (strncmp(a, "--r400=", 7) == 0) {
+            n400 = parse_words(a + 7, r400, 12); opt_blk400 = 1;
+            if (n400 < 0) { printf("bad --r400 list\n"); return 1; }
+        }
         else if (strcmp(a, "--pipeline") == 0)        opt_pipeline = 1;
         else if (strncmp(a, "--r200=", 7) == 0) {
             n200 = parse_words(a + 7, r200, 2); opt_pipeline = 1;
@@ -1030,14 +1036,17 @@ int main(int argc, char **argv)
      * settings object. Words 4..7 are one value per bayer channel. Taken
      * verbatim from a stock session that produces colour. */
     if (opt_blk400) {
-        static const uint32_t blk400[12] = {
+        uint32_t blk400[12] = {
             0x00000001, 0x004b0000, 0x00930000, 0x00220000,
             0x2ff01000, 0x2ff01000, 0x2ff01000, 0x2ff01000,
             0x00030000, 0x00000000, 0x00020000, 0x00000000
         };
+        for (int i = 0; i < n400 && i < 12; i++) blk400[i] = r400[i];
         cmd[n++] = OP_INCR(0x400, 12);
         for (int i = 0; i < 12; i++) cmd[n++] = blk400[i];
-        printf("0x400: stock RGB->YUV block (12 words)\n");
+        printf("0x400:");
+        for (int i = 0; i < 12; i++) printf(" %08x", blk400[i]);
+        printf("\n");
     }
 
     /* === MIUI-only register blocks (from stock camera gather #8) === */

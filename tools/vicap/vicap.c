@@ -684,8 +684,13 @@ int main(int argc, char **argv)
 
         vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
         vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
-        vi_wr(T124_CILE_PAD_CONFIG0, 0x0);
-        vi_wr(T124_PHY_CILE_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
+        /* Read out of a state where a frame demonstrably lands, not taken
+         * from a driver constant: the pad configuration is 5 and the PHY
+         * control is 2. We had been writing 0 and 9. */
+        vi_wr(T124_CILE_PAD_CONFIG0, 0x00000005);
+        vi_wr(T124_PHY_CILE_CONTROL0, 0x00000002);
+        vi_wr(0x9EC, 0x00000010);
+        vi_wr(0x9F0, 0x00000086);
 
         /* The front camera's brick lives in the UPPER half of this word.
          * A full dump against a live stock session shows 0x10000000 there,
@@ -839,6 +844,22 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
     vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
     vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+
+    /* The rest of the channel, as it stands when a frame lands. None of
+     * these were in our setup at all -- copied from that state rather than
+     * derived, and the one whose meaning is plain, the second stride at
+     * +0x58, agrees with our geometry. */
+    vi_wr(base + 0x08, 0x00000001);
+    vi_wr(base + 0x10, 0x001c984c);
+    vi_wr(base + 0x30, 0x0054c004);
+    vi_wr(base + 0x38, 0x0c232102);
+    vi_wr(base + 0x40, 0x08080808);
+    vi_wr(base + 0x48, 0x30210015);
+    vi_wr(base + 0x50, 0x202021ba);
+    vi_wr(base + 0x58, 0x00001110);
+    vi_wr(base + 0x5c, 0x00000484);
+    vi_wr(base + 0x60, 0x00000001);
+    vi_wr(base + 0x64, 0x00000003);
 
     /* Pixel parser: single shot, armed for one frame. */
     uint32_t pp = (port == 0) ? PP_A_PIXEL_STREAM_PP_COMMAND

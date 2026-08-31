@@ -233,6 +233,9 @@ struct regrdwr_args {
 };
 struct nvhost_get_param_arg { uint32_t param, value; };
 struct nvhost_set_nvmap_fd_args { uint32_t fd; };
+struct nvhost_ctrl_syncpt_read_args { uint32_t id, value; };
+#define NVHOST_IOCTL_CTRL_SYNCPT_READ \
+    _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
 struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
 struct nvhost_cmdbuf { uint32_t mem, offset, words; };
 struct nvhost_reloc { uint32_t cmdbuf_mem, cmdbuf_offset, target, target_offset; };
@@ -864,6 +867,21 @@ int main(int argc, char **argv)
     printf("readback: SURFACE0=0x%08x STRIDE=0x%08x PP=0x%08x\n",
            vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
            vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
+
+    /* Ask the hardware whether it saw anything at all. The frame-start and
+     * memory-write conditions each increment a syncpoint, so a value that
+     * has not moved says plainly that no frame started and nothing was
+     * written -- which is a different failure from a frame that arrived
+     * and went astray. */
+    {
+        int ctrl_fd = open("/dev/nvhost-ctrl", O_RDWR);
+        struct nvhost_ctrl_syncpt_read_args r1 = { sp_id, 0 }, r2 = { sp_mw, 0 };
+        ioctl(ctrl_fd, NVHOST_IOCTL_CTRL_SYNCPT_READ, &r1);
+        ioctl(ctrl_fd, NVHOST_IOCTL_CTRL_SYNCPT_READ, &r2);
+        close(ctrl_fd);
+        printf("syncpoints after: frame %u = %u, memory write %u = %u\n",
+               sp_id, r1.value, sp_mw, r2.value);
+    }
 
     /* Read the lane interface while the sensor is still powered. A stock
      * session shows 0x110 here; zero means nothing ever arrived on the

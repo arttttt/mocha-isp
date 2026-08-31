@@ -513,7 +513,7 @@ int main(int argc, char **argv)
                          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
                          IMAGE_DEF_DEST_MEM;
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
-    uint32_t phy_cil_cmd = 0x12020000;   /* CSI-C, one lane, via CILE */
+    uint32_t phy_cil_cmd = 0x00000000;   /* zero in the working state */
     int tpg = 0, shots = 8, piggyback = 0;
     int hold = 0, dump_regs = 0;
 
@@ -702,28 +702,28 @@ int main(int argc, char **argv)
          * value between frames. The 24.1 driver -- whose capture into
          * memory did work -- writes 0x12020000 for this camera: CSI-C,
          * one lane, through CILE. Take the one from working code. */
+        /* In the state where a frame lands this word is ZERO, and the A/B
+         * pads are configured -- the opposite of both things we had done.
+         * Those pads were not leftovers to clean up. */
         vi_wr(T124_CSI_PHY_CIL_COMMAND, phy_cil_cmd);
-
-        /* Leave the A/B brick alone: values left there by an earlier run on
-         * the rear port are not ours to keep. */
-        vi_wr(T124_CILA_PAD_CONFIG0, 0);
-        vi_wr(T124_PHY_CILA_CONTROL0, 0);
-        vi_wr(T124_CILB_PAD_CONFIG0, 0);
-        vi_wr(T124_PHY_CILB_CONTROL0, 0);
+        vi_wr(T124_CILA_PAD_CONFIG0, 0x00000007);
+        vi_wr(T124_PHY_CILA_CONTROL0, 0x00000002);
+        vi_wr(T124_CILB_PAD_CONFIG0, 0x00000007);
+        vi_wr(T124_PHY_CILB_CONTROL0, 0x00000002);
 
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND,
               (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
               CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x080301f1);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x080301f0);
         /* Stock leaves this at zero; the top-field bits the driver writes
          * for interlaced sources are not what this sensor needs. */
         vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, 0x00000000);
-        vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
+        /* the gap register is zero in the working state */
         vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x007f0014);
+        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x00ff0004);
         vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
+        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f004);
 
         /* Calibrate only now. The driver's order is pads out of deep power
          * down, then the CSI and PHY brought up, and the calibration last
@@ -801,7 +801,7 @@ int main(int argc, char **argv)
      * against stock's 0x10100010, and clock management is exactly the kind
      * of thing that can hold the memory client off without reporting
      * anything. */
-    vi_wr(0x0F0, 0x10100010);
+    /* 0x0F0 is 0x4040007f where capture works: leave it alone. */
 
     /* Frames start but nothing is ever written, with no fault reported --
      * which is what a memory client with no bandwidth reserved looks like.

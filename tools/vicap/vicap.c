@@ -221,6 +221,9 @@ struct regrdwr_args {
     uint32_t id, num_offsets, block_size, offsets, values, write;
 };
 struct nvhost_get_param_arg { uint32_t param, value; };
+struct nvhost_set_nvmap_fd_args { uint32_t fd; };
+#define NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD \
+    _IOW(NVHOST_IOCTL_MAGIC, 5, struct nvhost_set_nvmap_fd_args)
 #define NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT \
     _IOWR(NVHOST_IOCTL_MAGIC, 16, struct nvhost_get_param_arg)
 #define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR \
@@ -460,6 +463,18 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Tell the channel which memory context our buffers live in. Without
+     * this the address we program is not one VI can resolve -- it has its
+     * own translation context, which is what the kernel's dual-mapping fix
+     * was about -- and the write has nowhere to land however correct the
+     * rest of the configuration is. */
+    {
+        struct nvhost_set_nvmap_fd_args nf = { (uint32_t)nvmap_fd };
+        int rc = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &nf);
+        printf("channel memory context: rc=%d (%s)\n", rc,
+               rc == 0 ? "ok" : strerror(errno));
+    }
+
     /* The channel's own syncpoint, asked for rather than assumed. */
     struct nvhost_get_param_arg gp = { .param = 0, .value = 0 };
     uint32_t sp_id = 0;
@@ -551,7 +566,6 @@ int main(int argc, char **argv)
          * upper half too, so we had been enabling the wrong one all along.
          * 0xAEC goes with it; stock holds a 2 there and we held nothing. */
         vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x10000000);
-        vi_wr(0xAEC, 0x00000002);
 
         /* Leave the A/B brick alone: values left there by an earlier run on
          * the rear port are not ours to keep. */

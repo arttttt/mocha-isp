@@ -641,6 +641,11 @@ int main(int argc, char **argv)
     int tpg = 0, shots = 8, piggyback = 0;
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
     int settle = 200;
+    /* The memory-side rate the channel asks for. The driver does not set a
+     * number here at all -- it computes an isochronous bandwidth from the
+     * frame size and sets a latency allowance, neither of which we can reach
+     * from userspace. This is the nearest lever we have. */
+    unsigned long emc_rate = 528000000;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -668,6 +673,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strncmp(a, "--vi-height=", 12) == 0)
             vi_height = (unsigned)strtoul(a + 12, 0, 0);
+        else if (strncmp(a, "--emc=", 6) == 0)
+            emc_rate = strtoul(a + 6, 0, 0);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1009,7 +1016,7 @@ int main(int argc, char **argv)
          * streaming. We had been asking for 408. */
         c.moduleid = 0; c.rate = 600000000;
         int a1 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
-        c.moduleid = 1; c.rate = 528000000;      /* memory */
+        c.moduleid = 1; c.rate = emc_rate;        /* memory */
         int a2 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
         printf("clock/bandwidth request: module rc=%d, memory rc=%d\n", a1, a2);
     }

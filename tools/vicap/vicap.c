@@ -1265,7 +1265,11 @@ int main(int argc, char **argv)
                     usleep(1000);
                     mwaited++;
                 }
-                done = 1;
+                /* Never on the first trigger. That one lands wherever the
+                 * sensor happens to be and as often as not does not start a
+                 * capture at all -- stopping there left the buffer exactly
+                 * as we had filled it. */
+                done = (attempt >= 2);
             }
             printf("  frame %d: %s after %d attempt%s"
                    " (start %dms, bottom %dms), parser %08x\n",

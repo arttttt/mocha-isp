@@ -320,6 +320,15 @@ struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
     _IOW(NVHOST_IOCTL_MAGIC, 10, struct nvhost_clk_rate_args)
 #define NVHOST_IOCTL_CTRL_SYNCPT_READ \
     _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
+struct nvhost_ctrl_syncpt_incr_args { uint32_t id; };
+#define NVHOST_IOCTL_CTRL_SYNCPT_INCR \
+    _IOW(NVHOST_IOCTL_MAGIC, 2, struct nvhost_ctrl_syncpt_incr_args)
+
+/* host1x's own class, and the method that parks a channel until a syncpoint
+ * reaches a threshold. A parked job holds everything it pinned, which is how
+ * the buffer stays mapped for longer than the submit itself. */
+#define HOST1X_CLASS_ID             0x01
+#define HOST1X_WAIT_SYNCPT          0x08
 struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
 struct nvhost_cmdbuf { uint32_t mem, offset, words; };
 struct nvhost_reloc { uint32_t cmdbuf_mem, cmdbuf_offset, target, target_offset; };
@@ -672,7 +681,13 @@ static uint32_t nvmap_create(uint32_t size) {
  * that nvmap hands us for the virtual heap need not mean anything there --
  * a write would go nowhere, silently, however right the rest is. Carveout
  * is physically contiguous, so the address is the address. */
-static uint32_t alloc_heap = NVMAP_HEAP_IOVMM;
+/* Contiguous by default. Out of the scattered heap the address nvmap hands
+ * back is not one VI can reach: the memory controller logs a translation
+ * fault on the buffer's own base the moment the capture runs long enough to
+ * outlive the host1x job that mapped it, and the picture stops at whatever
+ * row that happened on. Out of the carveout heap those faults do not occur
+ * at all. --iovmm asks for the old behaviour. */
+static uint32_t alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
 
 static int nvmap_alloc(uint32_t h) {
     struct nvmap_alloc_handle ah = { h, alloc_heap,
@@ -845,6 +860,7 @@ int main(int argc, char **argv)
         sp_cmd = gp.value;
     printf("VI syncpoints: frame %u, memory write %u, command %u\n",
            sp_id, sp_mw, sp_cmd);
+    uint32_t hold_thresh = 0;
 
     uint32_t buf_h = nvmap_create(frame);
     if (!buf_h || nvmap_alloc(buf_h)) return 1;
@@ -1278,7 +1294,7 @@ int main(int argc, char **argv)
     {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
-        uint32_t g[10];
+        uint32_t g[16];
         int n = 0, addr_word;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
@@ -1288,6 +1304,15 @@ int main(int argc, char **argv)
         g[n++] = 0;                       /* the kernel fills this in */
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
         g[n++] = SINGLE_SHOT_CAPTURE;
+
+        /* Park the job so the mapping outlives the submit. Without this the
+         * memory controller faults on the buffer's own base part way
+         * through the capture and the picture stops there. */
+        hold_thresh = syncpt_read(sp_mw) + 1;
+        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+        g[n++] = (sp_mw << 24) | (hold_thresh & 0xFFFFFF);
+        g[n++] = OP_SETCLASS(VI_CLASS_ID);
         /* Retire the command buffer on a syncpoint of its own. It used to
          * share one with the frame-start condition, so that counter moved
          * once per submit whether or not a frame ever started -- which is
@@ -1512,6 +1537,17 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
+
+        if (hold_thresh) {
+            int cfd = open("/dev/nvhost-ctrl", O_RDWR);
+            if (cfd >= 0) {
+                struct nvhost_ctrl_syncpt_incr_args ia = { sp_mw };
+                int irc = ioctl(cfd, NVHOST_IOCTL_CTRL_SYNCPT_INCR, &ia);
+                close(cfd);
+                printf("held mapping released: syncpoint %u to %u, rc=%d\n",
+                       sp_mw, hold_thresh, irc);
+            }
+        }
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
     usleep(200000);

@@ -1003,7 +1003,9 @@ int main(int argc, char **argv)
      * does before it moves a frame. */
     {
         struct nvhost_clk_rate_args c;
-        c.moduleid = 0; c.rate = 408000000;
+        /* The driver asks for the maximum, 600MHz, whenever a channel starts
+         * streaming. We had been asking for 408. */
+        c.moduleid = 0; c.rate = 600000000;
         int a1 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
         c.moduleid = 1; c.rate = 528000000;      /* memory */
         int a2 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
@@ -1266,23 +1268,35 @@ int main(int argc, char **argv)
                  * frame -- eight attempts, eight short frames. Left alone,
                  * the parser finishes one capture at the end of a frame and
                  * the next trigger is already on the boundary. */
-                /* Ride the frame we are in, wake just before it ends, and
-                 * write the trigger into the gap. The subtraction is what
-                 * matters: aim at the start we are about to reach, not the
-                 * one we just saw. */
-                waited = WAIT_FRAME_START(400);
-                started = waited >= 0;
-                if (!started) continue;
-                usleep((useconds_t)(period - 3) * 500);
-
+                /* The surface goes in again before every frame, exactly as
+                 * the driver's start-thread does it. We had written it once
+                 * through host1x and assumed it stayed -- it reads back
+                 * unchanged, but the driver reprogramming it per frame is
+                 * not decoration, and one capture per programming is what
+                 * the short frames look like. */
+                vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+                vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+                vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
+                      << 8 | sp_id);
                 vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
                 vi_flush(0);
 
-                /* One frame, plus the settle the caller asked for. */
+                waited = 0;
+                while (syncpt_read(sp_id) == fs0 && waited < 400) {
+                    usleep(1000);
+                    waited++;
+                }
+                started = syncpt_read(sp_id) != fs0;
+
+                /* One whole frame from the start, plus what the caller asks
+                 * for on top. */
                 usleep((useconds_t)period * 500 + settle * 1000);
                 mwaited = settle;
-                done = 1;
-                (void)fs0;
+                done = started;
             }
             printf("  frame %d: %s after %d attempt%s"
                    " (start %dms, bottom %dms), parser %08x\n",

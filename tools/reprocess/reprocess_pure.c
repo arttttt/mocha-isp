@@ -281,6 +281,7 @@ int main(int argc, char **argv)
     int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
     int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
+    int opt_pipeline = 0;                   /* stock 0x200/0x202/0x205 */
     int opt_blk500 = 0;                     /* stock 0x500 words instead of ours */
 
     for (int i = 1; i < argc; i++) {
@@ -304,6 +305,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
+        else if (strcmp(a, "--pipeline") == 0)        opt_pipeline = 1;
         else if (strcmp(a, "--blk500") == 0)          opt_blk500 = 1;
         else if (strcmp(a, "--commit") == 0)          opt_commit = 1;
         else if (strcmp(a, "--commit-full") == 0)     opt_commit = 2;
@@ -919,6 +921,21 @@ int main(int argc, char **argv)
         cmd[n++] = 0x0000000F;
         printf("Commit: 0x00C=0x0F after the settings blocks%s\n",
                opt_commit > 1 ? " (with 0x01F/0x05F)" : "");
+    }
+
+    /* Pipeline mode. 0x200 alone was tried in April and turned the frame
+     * solid red; stock never sends it alone, it sends three blocks
+     * together, and the companions carry real values (0x780078 pairs,
+     * 0x600c8, 0xf000f). This is that combination. */
+    if (opt_pipeline) {
+        cmd[n++] = OP_INCR(0x200, 2);
+        cmd[n++] = 0x00000001; cmd[n++] = 0x00000000;
+        cmd[n++] = OP_INCR(0x202, 3);
+        cmd[n++] = 0x00000001; cmd[n++] = 0x00780078; cmd[n++] = 0x00780078;
+        cmd[n++] = OP_INCR(0x205, 4);
+        cmd[n++] = 0x00000000; cmd[n++] = 0x000600c8;
+        cmd[n++] = 0x000f000f; cmd[n++] = 0x00000000;
+        printf("0x200/0x202/0x205: stock pipeline mode\n");
     }
 
     /* 0x400, 12 words -- the block the tool has never programmed. Words

@@ -119,12 +119,27 @@ int main(int argc, char **argv)
          * it reads the arrays inline, and sixteen entries starting at +0x20
          * do not fit in sixty-four. Reading into our own slack is harmless;
          * reading off the end of a tight buffer is what just killed it. */
+        /* And the fields at +0x08 and +0x20 are pointers after all -- to
+         * arrays of FLOATS. The routine at 0x1db4 walks them looking for
+         * the largest magnitude and scales the lot into fixed point, which
+         * is where the register words come from. That is why a zero there
+         * killed the process: it was dereferenced.
+         *
+         * So the coefficients are given as nine and sixteen real numbers
+         * and the library does the conversion. Ones to begin with -- what
+         * matters first is whether the stage comes on at all. */
+        static float c9[9]  = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+        static float c16[16] = { 1, 1, 1, 1, 1, 1, 1, 1,
+                                 1, 1, 1, 1, 1, 1, 1, 1 };
         uint8_t st[256];
         memset(st, 0, sizeof st);
         st[0] = 1;                                   /* run the stage */
         uint32_t nine = 9, sixteen = 16;
         memcpy(st + 0x04, &nine, 4);
+        memcpy(st + 0x08, &(void *){ c9 }, 4);
+        st[0x18] = 1;
         memcpy(st + 0x1c, &sixteen, 4);
+        memcpy(st + 0x20, &(void *){ c16 }, 4);
         (void)coeff;
 
         uint32_t size = 0x40;

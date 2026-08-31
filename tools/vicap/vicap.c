@@ -762,7 +762,7 @@ int main(int argc, char **argv)
                n, rc, rc == 0 ? "ok" : strerror(errno), sa.fence);
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
-    usleep(300000);
+    usleep(1500000);
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),

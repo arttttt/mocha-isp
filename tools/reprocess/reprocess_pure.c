@@ -280,6 +280,8 @@ int main(int argc, char **argv)
     uint32_t opt_param_fill = 0;            /* word written across the 0x100 block */
     int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
     int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
+    int opt_blk400 = 0;                     /* stock 0x400 RGB->YUV block */
+    int opt_blk500 = 0;                     /* stock 0x500 words instead of ours */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -301,6 +303,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
+        else if (strcmp(a, "--blk400") == 0)          opt_blk400 = 1;
+        else if (strcmp(a, "--blk500") == 0)          opt_blk500 = 1;
         else if (strcmp(a, "--commit") == 0)          opt_commit = 1;
         else if (strcmp(a, "--commit-full") == 0)     opt_commit = 2;
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
@@ -917,15 +921,43 @@ int main(int argc, char **argv)
                opt_commit > 1 ? " (with 0x01F/0x05F)" : "");
     }
 
+    /* 0x400, 12 words -- the block the tool has never programmed. Words
+     * 1..3 are 75/147/34, which over 256 are 0.293/0.574/0.133: the BT.601
+     * luma weights, the same numbers that sit as floats in the library's
+     * settings object. Words 4..7 are one value per bayer channel. Taken
+     * verbatim from a stock session that produces colour. */
+    if (opt_blk400) {
+        static const uint32_t blk400[12] = {
+            0x00000001, 0x004b0000, 0x00930000, 0x00220000,
+            0x2ff01000, 0x2ff01000, 0x2ff01000, 0x2ff01000,
+            0x00030000, 0x00000000, 0x00020000, 0x00000000
+        };
+        cmd[n++] = OP_INCR(0x400, 12);
+        for (int i = 0; i < 12; i++) cmd[n++] = blk400[i];
+        printf("0x400: stock RGB->YUV block (12 words)\n");
+    }
+
     /* === MIUI-only register blocks (from stock camera gather #8) === */
-    /* 0x500: processing block (from verified reprocess sequence) */
+    /* 0x500: processing block. Ours is five zeros and (H<<16)|W in the
+     * last word; stock sends {3, 0xca4, 0x14400000, 0x0f300000, 0, 0x80008}
+     * on every frame -- so the last word is not dimensions, and word 0 is
+     * a flags field we leave clear. --blk500 sends the stock words. */
     cmd[n++] = OP_INCR(0x500, 6);
-    cmd[n++] = 0x00000000;            /* flags = 0 */
-    cmd[n++] = 0x00000000;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = 0x00000000;
-    cmd[n++] = (H << 16) | W;        /* 0x505: dims */
+    if (opt_blk500) {
+        static const uint32_t blk500[6] = {
+            0x00000003, 0x00000ca4, 0x14400000,
+            0x0f300000, 0x00000000, 0x00080008
+        };
+        for (int i = 0; i < 6; i++) cmd[n++] = blk500[i];
+        printf("0x500: stock words\n");
+    } else {
+        cmd[n++] = 0x00000000;            /* flags = 0 */
+        cmd[n++] = 0x00000000;
+        cmd[n++] = 0x00000000;
+        cmd[n++] = 0x00000000;
+        cmd[n++] = 0x00000000;
+        cmd[n++] = (H << 16) | W;        /* 0x505 */
+    }
 
     /* Output: dims + format */
     cmd[n++] = OP_INCR(0xE00, 1);

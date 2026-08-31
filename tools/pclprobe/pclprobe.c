@@ -80,6 +80,7 @@ int main(int argc, char **argv)
     const char *sensor = "imx179";
     int bus = 2, addr = 0x10, power = -1;
     int use_sensor_node = 0, mode_w = 1920, mode_h = 1080;
+    int keep_running = 0, power_off_only = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -89,6 +90,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--addr=", 7) == 0)   addr = (int)strtol(a + 7, 0, 0);
         else if (strncmp(a, "--power=", 8) == 0)  power = atoi(a + 8);
         else if (strcmp(a, "--node") == 0)        use_sensor_node = 1;
+        else if (strcmp(a, "--keep") == 0)        keep_running = 1;
+        else if (strcmp(a, "--off") == 0)   { use_sensor_node = 1; power_off_only = 1; }
         else if (strncmp(a, "--mode=", 7) == 0)
             sscanf(a + 7, "%dx%d", &mode_w, &mode_h);
         else { printf("unknown option %s\n", a); return 1; }
@@ -107,6 +110,15 @@ int main(int argc, char **argv)
         printf("open %s: fd=%d%s%s\n", sn, sfd,
                sfd < 0 ? " -- " : "", sfd < 0 ? strerror(errno) : "");
         if (sfd < 0) return 1;
+
+        /* --off: just clean up after an earlier run and leave. */
+        if (power_off_only) {
+            uint32_t off = 0;
+            try_ioctl(sfd, "SET_POWER off", SENSOR_IOCTL_SET_POWER, &off);
+            close(sfd);
+            printf("=== done ===\n");
+            return 0;
+        }
 
         uint8_t st = 0;
         try_ioctl(sfd, "GET_STATUS (before)", SENSOR_IOCTL_GET_STATUS, &st);
@@ -129,7 +141,12 @@ int main(int argc, char **argv)
         printf("  setting mode %dx%d\n", m.xres, m.yres);
         try_ioctl(sfd, "SET_MODE", SENSOR_IOCTL_SET_MODE, &m);
 
-        if (power == 0) {
+        /* Leave the part as we found it unless asked to keep it running:
+         * a probe that exits with the sensor still streaming leaves the
+         * rails up and the MIPI link live for whoever comes next. */
+        if (keep_running) {
+            printf("  leaving the sensor streaming (--keep)\n");
+        } else {
             uint32_t off = 0;
             try_ioctl(sfd, "SET_POWER off", SENSOR_IOCTL_SET_POWER, &off);
         }

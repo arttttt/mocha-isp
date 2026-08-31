@@ -279,6 +279,7 @@ int main(int argc, char **argv)
     uint32_t opt_stat_bytes = 4u << 20;     /* readback scan budget per plane */
     uint32_t opt_param_fill = 0;            /* word written across the 0x100 block */
     int opt_commit = 0;                     /* 1 = 0x00C=0x0F, 2 = with 0x01F/0x05F */
+    int opt_cal_colour = 0;                 /* real coefficients in the cal submit */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -299,6 +300,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--isp-enable=", 13) == 0) opt_isp_enable = strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--stat-bytes=", 13) == 0) opt_stat_bytes = strtoul(a + 13, 0, 0);
         else if (strncmp(a, "--param-fill=", 13) == 0) opt_param_fill = strtoul(a + 13, 0, 16);
+        else if (strcmp(a, "--cal-colour") == 0)      opt_cal_colour = 1;
         else if (strcmp(a, "--commit") == 0)          opt_commit = 1;
         else if (strcmp(a, "--commit-full") == 0)     opt_commit = 2;
         else if (strcmp(a, "--in-swaprb") == 0)       opt_swaprb = 1;
@@ -657,27 +659,63 @@ int main(int argc, char **argv)
         cal[cn++] = OP_INCR(0xD20, 6);
         for (int i=0;i<6;i++) cal[cn++]=0;
 
-        /* 0x506-0x50E: demosaic (zeros) */
+        /* Colour blocks. This gather is the one that ends in the 0x0F
+         * apply, so whatever it writes is what the hardware actually runs
+         * on; the same registers written later in the frame gather are
+         * never committed. --cal-colour puts the real coefficients here
+         * instead of the zeros the tool has always sent. */
+        static const uint32_t demosaic[9] = {
+            0x3f3fcff3, 0x00000000, 0x04c1304c, 0x08220882, 0x00000000,
+            0x03d0f43d, 0x08621886, 0x01204812, 0x06e1b86e
+        };
+
+        /* 0x506-0x50E: demosaic */
         cal[cn++] = OP_INCR(0x506, 9);
-        for (int i=0;i<9;i++) cal[cn++]=0;
+        for (int i=0;i<9;i++) cal[cn++] = opt_cal_colour ? demosaic[i] : 0;
 
-        /* 0x600-0x60F: GPP (zeros) */
+        /* 0x600-0x60F: GPP */
         cal[cn++] = OP_INCR(0x600, 16);
-        for (int i=0;i<16;i++) cal[cn++]=0;
-        cal[cn++] = OP_INCR(0x650, 1); cal[cn++]=0;
+        for (int i=0;i<16;i++) {
+            uint32_t v = 0;
+            if (opt_cal_colour) {
+                if (i == 0) v = 0x00000005;
+                else if (i >= 12 && i <= 14) v = opt_gpp_gain;
+                else if (i == 15) v = work_iova + 0x31000;
+            }
+            cal[cn++] = v;
+        }
+        cal[cn++] = OP_INCR(0x650, 1);
+        cal[cn++] = opt_cal_colour ? 0x00000003 : 0;
 
-        /* Tone curves: identity */
+        /* Tone curves */
         for (int ch=0; ch<4; ch++) {
             cal[cn++] = OP_INCR(0x651+ch*2, 1); cal[cn++]=0;
             cal[cn++] = OP_NONINCR(0x652+ch*2, 257);
-            for (int i=0;i<257;i++) cal[cn++]=0;
+            for (int i=0;i<257;i++) {
+                uint32_t v = 0;
+                if (opt_cal_colour) {
+                    v = 0x1000;
+                    if (opt_scurve) {
+                        if (i < 64)       v = 0x1000;
+                        else if (i < 192) v = 0x1000 + (i - 64) * 0x2000 / 128;
+                        else              v = 0x3000;
+                    }
+                }
+                cal[cn++] = v;
+            }
         }
 
-        /* 0x300-0x307: CCM (zeros) */
+        /* 0x300-0x307: CCM */
         cal[cn++] = OP_INCR(0x300, 4);
-        cal[cn++]=0; cal[cn++]=0; cal[cn++]=0; cal[cn++]=0;
+        for (int i=0;i<4;i++) cal[cn++] = (opt_cal_colour && have_ccm) ? ccm[i] : 0;
         cal[cn++] = OP_INCR(0x304, 4);
-        cal[cn++]=0; cal[cn++]=0; cal[cn++]=0; cal[cn++]=0;
+        for (int i=4;i<8;i++) cal[cn++] = (opt_cal_colour && have_ccm) ? ccm[i] : 0;
+
+        if (opt_cal_colour)
+            printf("Cal: colour blocks carry real coefficients "
+                   "(demosaic, gpp 0x%08x, curve=%s, ccm=%s)\n",
+                   opt_gpp_gain, opt_scurve ? "scurve" : "identity",
+                   have_ccm ? "set" : "zero");
 
         /* 0x053: work buffer */
         cal[cn++] = OP_INCR(0x053, 2); cal[cn++]=0; cal[cn++]=0;

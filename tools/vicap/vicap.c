@@ -1201,8 +1201,13 @@ int main(int argc, char **argv)
                 uint32_t fs0 = syncpt_read(sp_id);
                 attempt++;
 
-                /* Wipe on the last attempt only, so what survives is one
-                 * frame's work and nothing else. */
+                /* Wiping is a diagnostic, not part of a capture: it is ten
+                 * megabytes through a hundred and fifty ioctls, it runs
+                 * while the hardware is writing, and the holes it leaves in
+                 * the picture are its own. Off by default for that reason --
+                 * and the row-to-row jumps that looked like tearing were
+                 * those holes, since the fill pattern reads as 42405 against
+                 * a picture whose values sit near 25. */
                 if (refill && attempt == 2) {
                     uint32_t chunk = 64 * 1024;
                     void *p = malloc(chunk);
@@ -1242,21 +1247,25 @@ int main(int argc, char **argv)
                 }
                 started = syncpt_read(sp_id) != fs0;
 
-                /* Reading the buffer back to detect completion does not work:
-                 * the same read that showed a whole frame afterwards showed
-                 * nothing during the capture, and once showed a full line
-                 * within a millisecond of wiping it. The reads come back
-                 * stale, so there is no honest signal there.
+                /* Frames keep coming after the trigger -- the counter armed
+                 * for one increment gained ten over a two-attempt run -- so
+                 * the buffer is written over and over. That is what makes a
+                 * whole picture: let a couple of frames land, and every row
+                 * has been written by one of them.
                  *
-                 * So no polling. One frame at this geometry takes about
-                 * fifty milliseconds; give it four times that and move on.
-                 * The first trigger lands mid-frame and captures the
-                 * remainder, the second is on the boundary and captures the
-                 * whole thing, which is why the wipe happens before the last
-                 * attempt and not before the first. */
-                mwaited = settle;
-                usleep(mwaited * 1000);
-                done = (attempt >= 2);
+                 * Then stop on a boundary. Waiting for the next frame start
+                 * and cutting there leaves the buffer holding the frame that
+                 * just finished, with only the millisecond of polling
+                 * latency -- a few dozen rows at the top -- belonging to the
+                 * one after it. */
+                usleep(settle * 1000);
+                uint32_t at = syncpt_read(sp_id);
+                mwaited = 0;
+                while (syncpt_read(sp_id) == at && mwaited < 200) {
+                    usleep(1000);
+                    mwaited++;
+                }
+                done = 1;
             }
             printf("  frame %d: %s after %d attempt%s"
                    " (start %dms, bottom %dms), parser %08x\n",

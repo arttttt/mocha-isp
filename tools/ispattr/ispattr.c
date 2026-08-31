@@ -64,7 +64,7 @@ static void report_blocks(const uint8_t *before, const uint8_t *after,
             if (count == 0 || count > 512) continue;
             if (h + 12 + 4u * count > len) continue;
             if (off < h + 12 || off >= h + 12 + 4u * count) continue;
-            if (!dirty) continue;
+            if (dirty != 1 || after[h + 7] > 8) continue;
             printf("\nblock at +%04zx: method=0x%03x count=%u dirty=%u"
                    " mode=%u  (addr %08lx)\n", h, method, count, dirty,
                    after[h + 7], (unsigned long)(base + h));
@@ -237,9 +237,11 @@ int main(int argc, char **argv)
             memset(m[q], 0, sizeof m[q]);
             memset(k[q], 0, sizeof k[q]);
             memset(k2[q], 0, sizeof k2[q]);
-            m[q][4] = 1.0f;                  /* centre of the 3x3 */
-            k[q][5] = 1.0f;
-            k2[q][5] = 1.0f;
+            /* Distinct per phase, so the converted words are recognisable
+             * on the other side rather than four identical runs. */
+            m[q][4]  = 1.0f / (float)(1 << q);
+            k[q][5]  = 1.0f / (float)(1 << q);
+            k2[q][5] = 1.0f / (float)(1 << q);
         }
 
         uint8_t st[0x40];
@@ -284,20 +286,23 @@ int main(int argc, char **argv)
             if (snap > (8u << 20)) snap = 8u << 20;
             before = malloc(snap);
             after = malloc(snap);
-            if (before && after) memcpy(before, watch, snap);
             printf("watching %zu bytes of %08lx..%08lx (handle at %p)\n",
                    snap, (unsigned long)ms, (unsigned long)me, hSet);
         }
 
+        /* Nothing between the two photographs but the call itself -- our own
+         * printing runs through a buffer on this very heap, and it was that
+         * churn, not the library, filling the last report. */
         uint32_t size = 0x40;
+        fflush(stdout);
+        if (before && after) memcpy(before, watch, snap);
         int src = HwSettingsSetAttribute(hSet, 8, 0, (uint32_t)(uintptr_t)st,
                                          (uint32_t)(uintptr_t)&size);
-        printf("demosaic attribute: rc=%d, size now %u\n", src, size);
+        if (before && after) memcpy(after, watch, snap);
 
-        if (before && after) {
-            memcpy(after, watch, snap);
+        printf("demosaic attribute: rc=%d, size now %u\n", src, size);
+        if (before && after)
             report_blocks(before, after, (uintptr_t)watch, snap);
-        }
 
         /* The attribute is accepted. Applying is a separate question: the
          * name that looks right, NvIspHwSettingsApply, shares an address

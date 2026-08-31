@@ -621,7 +621,7 @@ int main(int argc, char **argv)
      * result there impossible to attribute. */
     /* The front sensor's stock session runs at its full 2592x1944, and the
      * image definition it uses on this channel was read off that session. */
-    unsigned W = 2592, H = 1944, port = 1;
+    unsigned W = 2592, H = 1944, port = 1, vi_height = 0;
     const char *sensor = "ov5693";
     int use_sensor = 1, dump = 0, front = 1;
     /* Destination is in the low bits: 1 memory, 2 ISP-A, 4 ISP-B. Stock
@@ -666,6 +666,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--shots=", 8) == 0)  shots = atoi(a + 8);
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
+        else if (strncmp(a, "--vi-height=", 12) == 0)
+            vi_height = (unsigned)strtoul(a + 12, 0, 0);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1030,7 +1032,11 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_IMAGE_DEF, image_def);
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
-    vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);
+    /* The sensor keeps its own mode; this is only how many of its lines VI
+     * is told to take. Asking for fewer than arrive is how we find out
+     * whether a truncated capture is the link running out or the write. */
+    vi_wr(base + VI_CSI_IMAGE_SIZE,
+          ((vi_height ? vi_height : H) << IMAGE_SIZE_HEIGHT_OFFSET) | W);
     /* The address goes in here as well as through the submit. The
      * relocation's pin lasts only as long as the job, and the write
      * happens afterwards, when the frame completes -- by which time that

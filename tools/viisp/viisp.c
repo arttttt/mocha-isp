@@ -647,8 +647,11 @@ static int arm_stats;
  * the frame completing, so it stays behind a flag until the sizes each
  * stage wants are known rather than guessed. */
 static int own_scratch;
-/* Buffer sizes, in kilobytes. These are the ones a frame completes with. */
-static unsigned stats_kb = 64, work_kb = 512;
+/* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
+ * because that is what the stock camera gives it -- its eight sit exactly
+ * that far apart in the capture. Sixty-four kilobytes only ever looked
+ * sufficient because the statistics stage was never asked to finish. */
+static unsigned stats_kb = 512, work_kb = 512;
 
 /* Put the stock camera's own configuration into the gather.
  *

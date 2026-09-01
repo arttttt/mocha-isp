@@ -20,6 +20,7 @@ int do_warmup;
 int enable_late;
 int per_frame_cal = 1;
 int geo_blocks;
+int stream_xfer;
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;
 uint32_t rgb2y = 0x001c984c;

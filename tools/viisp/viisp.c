@@ -359,12 +359,17 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
              * on the first pass, the streaming set on the second. */
             g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
             g[n++] = OP_INCR(0x018, 5);
-            if (pass) {
+            if (pass && stream_xfer) {
                 /* The second pass carries a different block altogether, not
                  * the first one with its last word flipped: both captures
                  * (2592 and 720) send exactly this, and the live camera's
                  * registers 0x018..0x01C read back exactly this. The
-                 * reconstruction had collapsed the two sets into one. */
+                 * reconstruction had collapsed the two sets into one.
+                 *
+                 * Behind --stream-xfer: with it the pipeline really streams
+                 * (Y carries the picture) and the hardware drives syncpoint
+                 * 38 itself, which is what took the channel down twice.
+                 * Without it the block runs as before, in bypass. */
                 g[n++] = 0x0a00500a; g[n++] = 0x00008089;
                 g[n++] = 0x013645cb; g[n++] = 0x000001e7;
                 g[n++] = 0x00000001;
@@ -740,12 +745,17 @@ int isp_init_a(int fd, uint32_t sp)
             g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
             g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
             g[n++] = OP_INCR(0x018, 5);
-            if (pass) {
+            if (pass && stream_xfer) {
                 /* The second pass carries a different block altogether, not
                  * the first one with its last word flipped: both captures
                  * (2592 and 720) send exactly this, and the live camera's
                  * registers 0x018..0x01C read back exactly this. The
-                 * reconstruction had collapsed the two sets into one. */
+                 * reconstruction had collapsed the two sets into one.
+                 *
+                 * Behind --stream-xfer: with it the pipeline really streams
+                 * (Y carries the picture) and the hardware drives syncpoint
+                 * 38 itself, which is what took the channel down twice.
+                 * Without it the block runs as before, in bypass. */
                 g[n++] = 0x0a00500a; g[n++] = 0x00008089;
                 g[n++] = 0x013645cb; g[n++] = 0x000001e7;
                 g[n++] = 0x00000001;
@@ -1692,6 +1702,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
         else if (strcmp(a, "--ccm") == 0)         ccm = 3;
         else if (strcmp(a, "--geo-blocks") == 0)  geo_blocks = 1;
+        else if (strcmp(a, "--stream-xfer") == 0) stream_xfer = 1;
         else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
         else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
                                                     enable_late = 1; }
@@ -1932,16 +1943,21 @@ int main(int argc, char **argv)
         printf("channel syncpoints: %u %u %u %u\n",
                sps[0], sps[1], sps[2], sps[3]);
         sp_mem = sps[0];
-        /* Our own sequencing rides on the memory syncpoint, and on nothing
-         * else. 37 the hardware raises for the statistics stage; 38, which
-         * we had moved to, it raises itself once the pipeline is actually
-         * streaming -- which it never was while the block ran in bypass,
-         * so 38 looked free. The first streaming run with the pipeline on
-         * died on 38 with the hardware one ahead of the kernel (thresh 3220,
-         * done 3221). 36 moves only when a job of ours arms it, and every
-         * such job declares the increment, so the kernel's count and the
-         * hardware's stay together. */
-        isp_sp = sp_mem;
+        isp_sp = 0;
+        for (unsigned p = 1; p < 4; p++)
+            if (sps[p] && sps[p] != sp_mem && sps[p] != sp_mem + 1) {
+                isp_sp = sps[p];
+                break;
+            }
+        if (!isp_sp) isp_sp = sp_mem;
+        /* With the pipeline really streaming, the hardware raises 38
+         * (ispb_stream) by itself -- the counter picked above because it
+         * looked untouched while the block ran in bypass. The first
+         * streaming run with the pipeline on died on it, the hardware one
+         * ahead of the kernel (thresh 3220, done 3221). 36 moves only when
+         * a job of ours arms it, and every such job declares the increment,
+         * so in that mode everything of ours rides on 36. */
+        if (stream_xfer) isp_sp = sp_mem;
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627

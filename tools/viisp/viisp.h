@@ -324,7 +324,7 @@ extern int nvmap_fd, vi_fd;
 extern uint32_t alloc_heap;
 extern int plane_rev, dm_sent, dm_after, real_sent, use_real_pass;
 extern int arm_stats, own_scratch, do_warmup, enable_late;
-extern int per_frame_cal, geo_blocks, ccm;
+extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
 extern unsigned stats_kb, work_kb;
 extern uint32_t rgb2y;
 

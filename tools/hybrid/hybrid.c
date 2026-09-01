@@ -28,7 +28,8 @@
  * Build: tools/hybrid/build-hybrid.sh (on the build server)
  * Usage: ./hybrid <raw_bayer> [--width=N] [--height=N] [--w0=N] [--yuv-cfg]
  *                 [--no-lib] [--hw-apply] [--isp=1|2] [--dm] [--dm-all]
- *                 [--ccm] [--commit] [--out-fmt=0xN] [--in-fmt=0xN]
+ *                 [--ccm] [--commit] [--pipe] [--two-pass] [--enable=HEX]
+ *                 [--out-fmt=0xN] [--in-fmt=0xN]
  */
 
 #include <stdio.h>
@@ -321,7 +322,8 @@ int main(int argc, char **argv)
     }
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
-    int dm = 0, dm_all = 0, ccm = 0, commit = 0;
+    int dm = 0, dm_all = 0, ccm = 0, commit = 0, pipe = 0, two_pass = 0;
+    uint32_t enable = 0x00000007;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
@@ -336,6 +338,9 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dm-all") == 0)      dm = dm_all = 1;
         else if (strcmp(a, "--ccm") == 0)         ccm = 1;
         else if (strcmp(a, "--commit") == 0)      commit = 1;
+        else if (strcmp(a, "--pipe") == 0)        pipe = 1;
+        else if (strcmp(a, "--two-pass") == 0)    two_pass = 1;
+        else if (strncmp(a, "--enable=", 9) == 0) enable = strtoul(a + 9, 0, 16);
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -346,10 +351,12 @@ int main(int argc, char **argv)
     printf("=== hybrid: %s bring-up%s, our frame only ===\n",
            use_lib ? "library" : "no", hw_apply ? " + HwSettingsApply" : "");
     printf("ISP-%c class 0x%02x, geometry %ux%u, in 0x%08x, out 0x%08x, "
-           "demosaic %s, matrix %s\n",
+           "demosaic %s, matrix %s, pipeline blocks %s, enable 0x%08x, "
+           "trigger %s%s\n",
            inst == 2 ? 'B' : 'A', isp_class, W, H, in_fmt, out_fmt,
            dm_all ? "all blocks" : dm ? "coefficients" : "off",
-           ccm ? "on" : "off");
+           ccm ? "on" : "off", pipe ? "stock" : "off", enable,
+           two_pass ? "0x09 then 0x0B" : "0x0B", commit ? ", 0x0F apply first" : "");
 
     if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply)) {
         printf("library bring-up failed -- stopping\n");
@@ -437,6 +444,21 @@ int main(int argc, char **argv)
                                       cmd[n++] = 0x00000002;
     }
 
+    /* The pipeline blocks, as the stock camera has them at 2592x1944 and as
+     * the library leaves them when it has no profile: all zero. April found
+     * 0x200=1 with the plain 0x0B trigger never completing; this is the
+     * first time it goes together with the rest of the stock configuration
+     * and the two-pass trigger of the stock memory path. */
+    if (pipe) {
+        cmd[n++] = OP_INCR(0x202, 3);
+        cmd[n++] = 0x00000001; cmd[n++] = 0x00780078; cmd[n++] = 0x00780078;
+        cmd[n++] = OP_INCR(0x200, 2);
+        cmd[n++] = 0x00000001; cmd[n++] = 0x00000000;
+        cmd[n++] = OP_INCR(0x205, 4);
+        cmd[n++] = 0x00000000; cmd[n++] = 0x000600c8;
+        cmd[n++] = 0x000f000f; cmd[n++] = 0x00000000;
+    }
+
     /* The demosaic: enable, then the two coefficient sets with their shift
      * words. The two-part blocks are the stock's mode-1 shape -- one INCR
      * for the head word, one NONINCR for the table behind it. */
@@ -503,7 +525,9 @@ int main(int argc, char **argv)
     cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = W * 2;
     cmd[n++] = OP_INCR(0xE32, 1); cmd[n++] = W & 0x3FFF;
     cmd[n++] = OP_INCR(0xE30, 1); cmd[n++] = 1;
-    cmd[n++] = OP_INCR(0x015, 1); cmd[n++] = 0x00000007;
+    /* ISP_ENABLE. Ours has always been 7; the stock camera writes
+     * 0x04040007, two more bits high up, and --enable lets us send that. */
+    cmd[n++] = OP_INCR(0x015, 1); cmd[n++] = enable;
     cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
     /* One conditional increment, on the memory syncpoint, and it is the one
      * the submit declares. The other two the ISP-B channel hands out --
@@ -513,6 +537,9 @@ int main(int argc, char **argv)
      * (min 29, max 28 in the dump of 2026-09-02), and the library's next
      * bring-up waited on it forever and took the channel down. */
     cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (4 << 8) | sp_memory;
+    /* The stock memory path (NvIspProcessFrame, mode 1) fires 0x09 and then
+     * 0x0B; ours has only ever fired 0x0B. */
+    if (two_pass) { cmd[n++] = OP_NONINCR(0x00C, 1); cmd[n++] = 0x09; }
     cmd[n++] = OP_NONINCR(0x00C, 1); cmd[n++] = 0x0B;
     printf("gather: %d words\n", n);
     nvmap_write(cmd_h, 0, cmd, n * 4);

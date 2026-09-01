@@ -166,10 +166,25 @@ int main(int argc, char **argv)
             if (buf[i] == (uint32_t)anchor) hits++;
             chain[i] = 1 + ((i + sz < words) ? chain[i + sz] : 0);
         }
+        /* Text passes the header test often enough to win on length alone
+         * -- a run of English reads as method 0x143, count 0x6e and so on.
+         * So a chain only counts if it carries one of the big tables no
+         * sentence is going to imitate: the shading grid or a tone curve,
+         * hundreds of words to a single method. */
         size_t head = 0;
         int n = 0;
-        for (size_t i = 0; i < words; i++)
-            if (chain[i] > n) { n = chain[i]; head = i; }
+        for (size_t i = 0; i < words; i++) {
+            if (chain[i] <= n) continue;
+            int genuine = 0;
+            for (size_t j = i; j < words; ) {
+                size_t sz = desc_size(buf + j, words - j);
+                if (!sz) break;
+                unsigned cnt = buf[j + 1] & 0xFFFF;
+                if (cnt >= 200) { genuine = 1; break; }
+                j += sz;
+            }
+            if (genuine) { n = chain[i]; head = i; }
+        }
         free(chain);
 
         if (n > best_n) {

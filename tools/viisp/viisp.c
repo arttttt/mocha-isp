@@ -380,6 +380,13 @@ struct nvhost32_submit_args {
 #define VI_CSI_SW_RESET             0x000
 #define VI_CSI_SINGLE_SHOT          0x004
 #define VI_CSI_IMAGE_DEF            0x00c
+/* The two between IMAGE_DEF and IMAGE_SIZE, which we had never written.
+ * The stock camera sets them in one run of six with the rest of the group,
+ * and its RGB2Y control is not zero -- while our IMAGE_DEF leaves the pixel
+ * transform switched on, so the transform has been running all along with
+ * whatever those registers happened to hold. */
+#define VI_CSI_RGB2Y_CTRL           0x010
+#define VI_CSI_MEM_TILING           0x014
 #define VI_CSI_IMAGE_SIZE           0x018
 #define VI_CSI_IMAGE_SIZE_WC        0x01c
 #define VI_CSI_IMAGE_DT             0x020
@@ -647,6 +654,10 @@ static int arm_stats;
  * the frame completing, so it stays behind a flag until the sizes each
  * stage wants are known rather than guessed. */
 static int own_scratch;
+/* The pixel transform's control word, which the stock camera sets and we
+ * never did -- while leaving the transform itself switched on. */
+static uint32_t rgb2y = 0x001c984c;
+
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
  * because that is what the stock camera gives it -- its eight sit exactly
  * that far apart in the capture. Sixty-four kilobytes only ever looked
@@ -1937,6 +1948,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
+        else if (strncmp(a, "--rgb2y=", 8) == 0)
+            rgb2y = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--stats-kb=", 11) == 0)
             stats_kb = (unsigned)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--work-kb=", 10) == 0)
@@ -2633,6 +2646,10 @@ int main(int argc, char **argv)
     /* The interface between the channel and the ISP. Nothing reaches the
      * ISP with this at zero, whatever the destination bits say. */
     vi_wr(base + VI_CSI_ISPINTF_CONFIG, ispintf);
+    /* What the capture has for this group, and what we were leaving to
+     * chance. */
+    vi_wr(base + VI_CSI_RGB2Y_CTRL, rgb2y);
+    vi_wr(base + VI_CSI_MEM_TILING, 0);
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
     /* The sensor keeps its own mode; this is only how many of its lines VI

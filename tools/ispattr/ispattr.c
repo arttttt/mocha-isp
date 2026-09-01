@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#include <unistd.h>
 
 /* The mapping that holds an address, so a snapshot can be taken without
  * running off the end of it. */
@@ -113,7 +114,7 @@ int main(int argc, char **argv)
     unsigned maxattr = 256;
     int do_set = 0, do_apply = 0;
     long dump_off = 0, dump_len = 0;
-    int ramp = 0;
+    int ramp = 0, hold = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -122,6 +123,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--set") == 0)       do_set = 1;
         else if (strcmp(a, "--apply") == 0)     { do_set = 1; do_apply = 1; }
         else if (strcmp(a, "--ramp") == 0)      { do_set = 1; ramp = 1; }
+        else if (strncmp(a, "--hold=", 7) == 0) hold = atoi(a + 7);
         else if (strncmp(a, "--dump=", 7) == 0) {
             do_set = 1;
             dump_off = strtol(a + 7, (char **)&a, 0);
@@ -379,6 +381,14 @@ int main(int argc, char **argv)
         }
     }
     (void)HwSettingsGetAttribute;
+
+    /* Stay alive on request, so the shadow reader can be tried against a
+     * process we own before it is pointed at anything that matters. */
+    if (hold) {
+        printf("holding %d seconds (pid %d)\n", hold, (int)getpid());
+        fflush(stdout);
+        sleep((unsigned)hold);
+    }
 
     if (HwSettingsDestroy) HwSettingsDestroy(hSet);
     if (NvIspClose) NvIspClose(hIsp);

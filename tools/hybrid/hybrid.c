@@ -389,8 +389,9 @@ int main(int argc, char **argv)
     g.param = 1; ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &g);
     uint32_t sp_stats = g.value;
     g.param = 2; ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &g);
-    uint32_t sp_loadv = g.value;
-    printf("syncpts: memory=%u stats=%u loadv=%u\n", sp_memory, sp_stats, sp_loadv);
+    uint32_t sp_stream = g.value;
+    printf("syncpts: memory=%u (ours), %u and %u belong to the hardware and the library\n",
+           sp_memory, sp_stats, sp_stream);
 
     uint32_t in_size = W * H * 2, out_size = W * 4 * H;
     uint32_t in_h = nvmap_create(in_size), out_h = nvmap_create(out_size);
@@ -504,9 +505,14 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE30, 1); cmd[n++] = 1;
     cmd[n++] = OP_INCR(0x015, 1); cmd[n++] = 0x00000007;
     cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
+    /* One conditional increment, on the memory syncpoint, and it is the one
+     * the submit declares. The other two the ISP-B channel hands out --
+     * 37 (ispb_stats) and 38 (ispb_stream) -- are raised by the hardware on
+     * its own events and are the library's own sequencing. Arming them here
+     * as well, undeclared, left 38 one ahead of what the kernel believed
+     * (min 29, max 28 in the dump of 2026-09-02), and the library's next
+     * bring-up waited on it forever and took the channel down. */
     cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (4 << 8) | sp_memory;
-    cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (5 << 8) | sp_stats;
-    cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (6 << 8) | sp_loadv;
     cmd[n++] = OP_NONINCR(0x00C, 1); cmd[n++] = 0x0B;
     printf("gather: %d words\n", n);
     nvmap_write(cmd_h, 0, cmd, n * 4);

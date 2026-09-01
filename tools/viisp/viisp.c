@@ -1009,13 +1009,20 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     }
 
     if (!(skip & 0x02)) {
+    /* The colour conversion, and we had been sending it empty.
+     *
+     * Every coefficient here was zero, which is why the luma plane came
+     * back as a full frame of black while one chroma plane carried the
+     * whole picture: with a zero matrix there is nothing to build a
+     * luminance out of. These are the stock camera's own, read out of its
+     * running configuration. */
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0xf9500800;
+    g[n++] = 0x0000fec0; g[n++] = 0x096004c0;
+    g[n++] = 0x000001d0; g[n++] = 0xfac0fd50;
+    g[n++] = 0x00000800; g[n++] = 0x00000000;
     /* Three per-channel words. The reprocess tool carries the same
      * 0x3fff0000 here and comes out monochrome too, which makes this the
      * one value both paths share and both paths fail on. The output is also

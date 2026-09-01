@@ -29,6 +29,8 @@
  *        ./ispshadow --pid=1234 --c-array
  */
 
+#define _LARGEFILE64_SOURCE 1
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,27 +77,9 @@ static size_t desc_size(const uint32_t *w, size_t avail)
     if (count == 0 || count > MAX_WORDS_PER_BLOCK) return 0;
     if (mode > 1) return 0;
     if ((cw >> 16) & 0xFF) return 0;          /* nothing lives here */
+    if (w[2] & 0xFF) return 0;                /* a real entry, not the end */
     if (3 + count > avail) return 0;
     return 3 + count;
-}
-
-/* How many descriptors chain from here, following each one's length. */
-static int chain_len(const uint32_t *w, size_t avail, uint32_t *last_method)
-{
-    size_t i = 0;
-    int n = 0;
-    uint32_t prev = 0;
-    while (i < avail) {
-        size_t s = desc_size(w + i, avail - i);
-        if (!s) break;
-        if (w[i] <= prev) break;              /* methods only ever ascend */
-        prev = w[i];
-        i += s;
-        n++;
-        if (n > 512) break;
-    }
-    if (last_method) *last_method = prev;
-    return n;
 }
 
 int main(int argc, char **argv)
@@ -169,36 +153,33 @@ int main(int argc, char **argv)
         size_t words = (size_t)got / 4;
         scanned += words;
 
-        for (size_t i = 0; i + 4 < words; i++) {
-            if (buf[i] != (uint32_t)anchor) continue;
-            hits++;
-            /* Walk back to whichever earlier position chains exactly onto
-             * this one -- that is the head of the list. */
-            size_t head = i;
-            for (size_t back = (i > 4096 ? i - 4096 : 0); back < i; back++) {
-                size_t j = back;
-                int ok = 0;
-                uint32_t prev = 0;
-                while (j < i) {
-                    size_t sz = desc_size(buf + j, words - j);
-                    if (!sz || buf[j] <= prev) { ok = 0; break; }
-                    prev = buf[j];
-                    j += sz;
-                    ok = 1;
-                }
-                if (ok && j == i) { head = back; break; }
-            }
-            int n = chain_len(buf + head, words - head, 0);
-            if (n > best_n) {
-                best_n = n;
-                best_addr = s + head * 4;
-                free(best_buf);
-                best_buf = buf;
-                best_words = words;
-                best_at = head;
-                buf = 0;
-            }
-            break;
+        /* The longest chain in the region, found in one pass: how many
+         * descriptors follow a position depends only on the position after
+         * it, so work backwards and each answer is already known. Hunting
+         * for one anchoring method and guessing at the head was finding
+         * whichever fragment happened to come first. */
+        int32_t *len = calloc(words + 1, sizeof *len);
+        if (!len) { free(buf); continue; }
+        for (size_t i = words; i-- > 0; ) {
+            size_t sz = desc_size(buf + i, words - i);
+            if (!sz) continue;
+            if (buf[i] == (uint32_t)anchor) hits++;
+            len[i] = 1 + ((i + sz < words) ? len[i + sz] : 0);
+        }
+        size_t head = 0;
+        int n = 0;
+        for (size_t i = 0; i < words; i++)
+            if (len[i] > n) { n = len[i]; head = i; }
+        free(len);
+
+        if (n > best_n) {
+            best_n = n;
+            best_addr = s + head * 4;
+            free(best_buf);
+            best_buf = buf;
+            best_words = words;
+            best_at = head;
+            buf = 0;
         }
         free(buf);
     }

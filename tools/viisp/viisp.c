@@ -1318,7 +1318,8 @@ static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
  * word.
  */
 static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
-                        uint32_t stats_h, uint32_t u_off, uint32_t v_off)
+                        uint32_t stats_h, uint32_t u_off, uint32_t v_off,
+                        uint32_t work_iova)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -1354,9 +1355,11 @@ static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
     for (int i = 0; i < 36; i++) g[n++] = isp_dm_907[i];
     g[n++] = OP_INCR(0x908, 1);
     g[n++] = isp_dm_908[0];
-    /* Stock hands it a null work buffer at this point, and that is not an
-     * oversight of ours to correct: it is what the capture shows. */
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = 0;
+    /* The capture has a null work buffer here, but stock's scratch is set
+     * up elsewhere in its session and ours is not: handing the block a null
+     * pointer while it is live is the one place where copying the trace
+     * literally puts it in a position it was never in. Ours goes here. */
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -2805,7 +2808,7 @@ int main(int argc, char **argv)
                  * capture shows the stock stack doing it. */
                 if (isp_fd >= 0 && out_iova && shot > 0 && !dm_sent) {
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
-                                 u_off, v_off);
+                                 u_off, v_off, work_iova);
                     dm_sent = 1;
                 }
 

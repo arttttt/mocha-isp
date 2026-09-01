@@ -526,6 +526,12 @@ struct nvhost32_submit_args {
 
 static int nvmap_fd = -1, vi_fd = -1;
 
+/* Whether the three output surfaces are handed over in the order we assume
+ * or the other way round. Set once from the command line and read where the
+ * frame is built, rather than threaded through a parameter list that is
+ * already long enough to hide things in. */
+static int plane_rev = 0;
+
 static int vi_reg(uint32_t off, uint32_t *val, int write)
 {
     uint32_t offsets[1] = { off }, values[1] = { *val };
@@ -1404,12 +1410,29 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0xE02, 1); g[n++] = fmt;
     g[n++] = OP_INCR(0xE03, 1); g[n++] = e03;
 
-    g[n++] = OP_INCR(0xE04, 3);
-    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
-    g[n++] = OP_INCR(0xE07, 3);
-    u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
-    g[n++] = OP_INCR(0xE0A, 3);
-    v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+    /* With one component the block writes to the first of these, at the
+     * start of the buffer, and gets it right. Ask for three and it writes
+     * only to the last -- where we put a chroma-width stride -- and what
+     * lands there is a full-width picture folded into half the row, which
+     * is exactly the striping we see. That is what a reversed plane order
+     * would look like, so it can be tried: give the last triplet the
+     * luma stride and the start of the buffer, and see whether the picture
+     * straightens out. */
+    if (plane_rev) {
+        g[n++] = OP_INCR(0xE04, 3);
+        v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+        g[n++] = OP_INCR(0xE07, 3);
+        u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+        g[n++] = OP_INCR(0xE0A, 3);
+        y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
+    } else {
+        g[n++] = OP_INCR(0xE04, 3);
+        y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
+        g[n++] = OP_INCR(0xE07, 3);
+        u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+        g[n++] = OP_INCR(0xE0A, 3);
+        v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
+    }
 
     /* The first word of this block is the only flags field the streaming
      * path has. The April notes call a non-zero value there fatal, but that
@@ -1705,8 +1728,7 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
-        else if (strncmp(a, "--gain=", 7) == 0)
-            gain = (uint32_t)strtoul(a + 7, 0, 0);
+        else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)

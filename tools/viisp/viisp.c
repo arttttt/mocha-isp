@@ -376,7 +376,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
             } else {
                 g[n++] = 0x00000000; g[n++] = 0x00000400;
                 g[n++] = 0x00000000; g[n++] = 0x00000200;
-                g[n++] = 0x00000002;
+                g[n++] = pass ? 0x00000001 : 0x00000002;
             }
             if (!pass) {
                 g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
@@ -762,7 +762,7 @@ int isp_init_a(int fd, uint32_t sp)
             } else {
                 g[n++] = 0x00000000; g[n++] = 0x00000400;
                 g[n++] = 0x00000000; g[n++] = 0x00000200;
-                g[n++] = 0x00000002;
+                g[n++] = pass ? 0x00000001 : 0x00000002;
             }
             if (!pass) {
                 g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
@@ -1954,10 +1954,15 @@ int main(int argc, char **argv)
          * (ispb_stream) by itself -- the counter picked above because it
          * looked untouched while the block ran in bypass. The first
          * streaming run with the pipeline on died on it, the hardware one
-         * ahead of the kernel (thresh 3220, done 3221). 36 moves only when
-         * a job of ours arms it, and every such job declares the increment,
-         * so in that mode everything of ours rides on 36. */
-        if (stream_xfer) isp_sp = sp_mem;
+         * ahead of the kernel (thresh 3220, done 3221).
+         *
+         * Not 36 either: the frame job parks itself on 36 reaching N+1,
+         * and an immediate increment of ours on 36 releases that park
+         * before the block has finished writing -- which is what took the
+         * device down on the next two runs. So in this mode our sequencing
+         * rides on the fourth counter, 39 (ispb_loadv), which the hardware
+         * raises only when condition six is armed, and below it is not. */
+        if (stream_xfer && sps[3]) isp_sp = sps[3];
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627
@@ -1969,7 +1974,9 @@ int main(int argc, char **argv)
          * statistics stage is never asked to finish is a fair suspect for
          * one that never finishes the write either. */
         sp_stats = arm_stats ? sps[1] : 0;
-        sp_loadv = arm_stats ? sps[3] : 0;
+        /* Condition six stays unarmed in the streaming mode: 39 is our
+         * sequencing counter there, and the hardware must not touch it. */
+        sp_loadv = (arm_stats && !stream_xfer) ? sps[3] : 0;
 
         /* The ISP's own clocks, at the rates the reprocess tool uses. */
         struct nvhost_clk_rate_args ic;

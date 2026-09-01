@@ -1837,12 +1837,35 @@ int main(int argc, char **argv)
          * submits. The stats and read conditions have no counter of their
          * own here; they are left unarmed rather than aimed at someone
          * else's. */
-        struct nvhost_get_param_arg ip = { .param = 0, .value = 0 };
-        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            sp_mem = ip.value;
-        ip.param = 1; ip.value = 0;
-        if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
-            isp_sp = ip.value;
+        /* And the second one is not the one that comment assumed. The
+         * kernel's own dump settles it: 36 is ispb_memory, 37 is ispb_stats
+         * and 38 is ispb_stream, and after a wedged run 37 stood at 3754
+         * against 4010 asked for -- two hundred and fifty six increments
+         * owed -- while 38 had moved ten times in the whole session. So
+         * asking for parameter one was handing our sequencing to the
+         * statistics counter, which the hardware raises on its own
+         * schedule and, when the statistics stage is not producing, never
+         * raises at all. The job waits, host1x times it out, and the
+         * channel goes with it.
+         *
+         * So take them by what they are: the first for the output
+         * condition, and for sequencing the first one after it that is
+         * neither the output nor the statistics counter. */
+        uint32_t sps[4] = { 0, 0, 0, 0 };
+        for (unsigned p = 0; p < 4; p++) {
+            struct nvhost_get_param_arg ip = { .param = p, .value = 0 };
+            if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ip) == 0)
+                sps[p] = ip.value;
+        }
+        printf("channel syncpoints: %u %u %u %u\n",
+               sps[0], sps[1], sps[2], sps[3]);
+        sp_mem = sps[0];
+        isp_sp = 0;
+        for (unsigned p = 1; p < 4; p++)
+            if (sps[p] && sps[p] != sp_mem && sps[p] != sp_mem + 1) {
+                isp_sp = sps[p];
+                break;
+            }
         if (!isp_sp) isp_sp = sp_mem;
         sp_stats = 0;
         sp_loadv = 0;

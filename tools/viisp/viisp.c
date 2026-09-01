@@ -1988,32 +1988,18 @@ int main(int argc, char **argv)
                 break;
             }
         if (!isp_sp) isp_sp = sp_mem;
-        /* With the pipeline really streaming, the hardware raises 38
-         * (ispb_stream) by itself -- the counter picked above because it
-         * looked untouched while the block ran in bypass. The first
-         * streaming run with the pipeline on died on it, the hardware one
-         * ahead of the kernel (thresh 3220, done 3221).
-         *
-         * Not 36 either: the frame job parks itself on 36 reaching N+1,
-         * and an immediate increment of ours on 36 releases that park
-         * before the block has finished writing -- which is what took the
-         * device down on the next two runs. Not 39: the first warm-up on
-         * it hung the device outright. All four counters of the ISP-B
-         * channel are spoken for once the pipeline streams.
-         *
-         * The kernel does not require a job's syncpoint to belong to the
-         * channel (bus_client.c checks only that the id exists, and the
-         * ISP has no context handler), and INCR_SYNCPT is a host1x method
-         * taking any id. So the sequencing rides on a counter nothing in
-         * this configuration raises. Not a VI one: 49 (vi1_flash) looked
-         * free and was not -- the sensor sits on CSI-B, the VI1 path, whose
-         * counters the receiver raises on its own, and the stock VI gather
-         * arms condition 0xa on 49 every frame; the run on it died with
-         * the hardware one ahead (thresh 6, done 7). ISP-A does nothing at
-         * all in this configuration, so its memory counter, 32, is the one
-         * nobody touches -- unless --seq-sp says otherwise. */
+        /* 38 is also the stock camera's own sequencing counter: it raises
+         * it immediately after every trigger (0x000 = 0x26) and waits on
+         * it in the next gather. With the pipeline streaming it looked as
+         * if the hardware moved 38 on its own (a run died with 38 one
+         * ahead of the kernel, thresh 3220 against 3221) and the sequencing
+         * wandered to 36, 39, 49 and 32 in turn -- 36 released the frame's
+         * park early, 39 hung the device at the first warm-up, 49 belongs
+         * to the VI1 receiver. The one ahead was ours all along: the
+         * warm-up and frame gathers armed conditions 4, 5 and 6 without
+         * declaring them. Declared, 38 holds. --seq-sp still overrides,
+         * for experiments. */
         if (seq_sp) isp_sp = seq_sp;
-        else if (stream_xfer) isp_sp = 32;
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627

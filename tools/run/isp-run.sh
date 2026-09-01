@@ -67,8 +67,20 @@ FAULTPAT='mc-err|mcerr|SMMU fault'
 wait_ready() {
     adb wait-for-device >/dev/null 2>&1
     for _ in $(seq 1 60); do
-        [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] \
-            && { sleep 8; return 0; }
+        if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; then
+            # boot_completed is not "the camera stack is done": mediaserver
+            # probes the sensors and touches VI and the ISP for a while after
+            # it, and a run of ours in that window hung the device outright
+            # with nothing printed. Every run that worked came minutes after
+            # boot. So: at least 90 s of uptime before touching anything.
+            up=$(adb shell "cut -d. -f1 /proc/uptime" 2>/dev/null | tr -d '\r')
+            up=${up:-0}
+            if [ "$up" -lt 90 ]; then
+                echo "booted ${up}s ago -- waiting until 90 s so the camera stack settles"
+                sleep $((90 - up))
+            fi
+            return 0
+        fi
         sleep 3
     done
     echo "device never finished booting"

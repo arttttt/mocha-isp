@@ -256,7 +256,7 @@ static unsigned stock_group(unsigned method)
     }
 }
 
-static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
+unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
                                unsigned groups)
 {
     unsigned count = sizeof isp_stock_blocks / sizeof isp_stock_blocks[0];
@@ -285,7 +285,7 @@ static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
     return n;
 }
 
-static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
+int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
                     uint32_t gpp_gain, int luma_lo,
@@ -680,7 +680,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
  *
  * Values decoded from a live session on this device. The sensor-specific
  * words are the rear camera's, because that is whose block this is. */
-static int isp_init_a(int fd, uint32_t sp)
+int isp_init_a(int fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(32768);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -876,7 +876,7 @@ static int isp_init_a(int fd, uint32_t sp)
  * So instead: a short job that carries the same relocations and nothing
  * else, submitted again and again. Each one is over in moments and cannot
  * strand anything, and between them the mapping never lapses. */
-static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
+int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
                          uint32_t u_off, uint32_t v_off, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -938,7 +938,7 @@ static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
  * their own carrying nothing else. The values here are that job, word for
  * word.
  */
-static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
+int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
                         uint32_t stats_h, uint32_t u_off, uint32_t v_off,
                         uint32_t work_iova)
 {
@@ -1028,7 +1028,7 @@ static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
  * These carry the stock camera's geometry, so they belong with its
  * resolution and not with a smaller one.
  */
-static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
+int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
 {
     uint32_t cmd_h = nvmap_create(4096 * 2);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -1108,7 +1108,7 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
  * The buffers are tiny -- eight rows of two hundred and fifty six bytes,
  * and two scratch pages the processing block wants pointers to.
  */
-static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
+int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
                       uint32_t stats_h, int write_enable, uint32_t enable,
                       unsigned W, unsigned H)
 {
@@ -1195,7 +1195,7 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
  * buffer. We had been putting it at the front of the opening round, which
  * is the one place the capture never has it.
  */
-static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
+int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
                       unsigned W, unsigned H)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -1215,7 +1215,6 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * stage that walks the picture was reading rows that were not there,
      * and what it computed for the luma was nothing. */
     uint32_t geo_word = ((H - 32) << 16) | (W - 32);
-    const struct geom_cfg *geo = geom_for(W, H);
     /* Measured, not derived. The stock camera has now been captured twice
      * -- at 2592 by 1944, and at 1280 by 720 in its own video mode -- so
      * these are its numbers for the frame in hand rather than a formula
@@ -1317,7 +1316,7 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     return rc;
 }
 
-static void isp_stop(int isp_fd, uint32_t sp)
+void isp_stop(int isp_fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return;
@@ -1373,7 +1372,7 @@ static void isp_stop(int isp_fd, uint32_t sp)
  * stats buffer, three conditional syncpoint increments and the streaming
  * trigger. There are no input registers -- in streaming mode the pixels
  * arrive from VI and there is nothing to describe. */
-static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
+int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,

@@ -1984,10 +1984,15 @@ int main(int argc, char **argv)
          * channel (bus_client.c checks only that the id exists, and the
          * ISP has no context handler), and INCR_SYNCPT is a host1x method
          * taking any id. So the sequencing rides on a counter nothing in
-         * this configuration raises: 49, vi1_flash, unless --seq-sp says
-         * otherwise. */
+         * this configuration raises. Not a VI one: 49 (vi1_flash) looked
+         * free and was not -- the sensor sits on CSI-B, the VI1 path, whose
+         * counters the receiver raises on its own, and the stock VI gather
+         * arms condition 0xa on 49 every frame; the run on it died with
+         * the hardware one ahead (thresh 6, done 7). ISP-A does nothing at
+         * all in this configuration, so its memory counter, 32, is the one
+         * nobody touches -- unless --seq-sp says otherwise. */
         if (seq_sp) isp_sp = seq_sp;
-        else if (stream_xfer) isp_sp = 49;
+        else if (stream_xfer) isp_sp = 32;
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627

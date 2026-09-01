@@ -628,8 +628,12 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 #include "isp_stock.h"
 #include "isp_demosaic.h"
 
-/* Set once the coefficients have gone out, so they go out only the once. */
+/* Set once the coefficients have gone out, so they go out only the once.
+ * dm_after says which frame to send them before: stock sends them after
+ * its first, but whether that timing matters or only the ordering against
+ * the enable and the routing is a question the hardware can answer. */
 static int dm_sent;
+static int dm_after = 1;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -1821,6 +1825,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
+        else if (strncmp(a, "--dm-after=", 11) == 0)
+            dm_after = atoi(a + 11);
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
@@ -2806,7 +2812,7 @@ int main(int argc, char **argv)
                  * because nothing buffers them on the way. */
                 /* After the first frame, in its own job, the way the
                  * capture shows the stock stack doing it. */
-                if (isp_fd >= 0 && out_iova && shot > 0 && !dm_sent) {
+                if (isp_fd >= 0 && out_iova && shot >= dm_after && !dm_sent) {
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                  u_off, v_off, work_iova);
                     dm_sent = 1;

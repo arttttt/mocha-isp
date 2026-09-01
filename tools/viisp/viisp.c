@@ -1932,13 +1932,16 @@ int main(int argc, char **argv)
         printf("channel syncpoints: %u %u %u %u\n",
                sps[0], sps[1], sps[2], sps[3]);
         sp_mem = sps[0];
-        isp_sp = 0;
-        for (unsigned p = 1; p < 4; p++)
-            if (sps[p] && sps[p] != sp_mem && sps[p] != sp_mem + 1) {
-                isp_sp = sps[p];
-                break;
-            }
-        if (!isp_sp) isp_sp = sp_mem;
+        /* Our own sequencing rides on the memory syncpoint, and on nothing
+         * else. 37 the hardware raises for the statistics stage; 38, which
+         * we had moved to, it raises itself once the pipeline is actually
+         * streaming -- which it never was while the block ran in bypass,
+         * so 38 looked free. The first streaming run with the pipeline on
+         * died on 38 with the hardware one ahead of the kernel (thresh 3220,
+         * done 3221). 36 moves only when a job of ours arms it, and every
+         * such job declares the increment, so the kernel's count and the
+         * hardware's stay together. */
+        isp_sp = sp_mem;
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627

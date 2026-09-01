@@ -1572,7 +1572,11 @@ int main(int argc, char **argv)
      * entirely -- so it says nothing about ours. Back to the value that
      * brings E up, which is the one that reads 0x110 back from it. */
     uint32_t phy_cil_cmd = 0x12020000;   /* brick E, one lane */
-    int tpg = 0, shots = 8, piggyback = 0;
+    /* One frame. Every extra one queues another job behind a block that may
+     * already be stuck, and when it is, the channel dies and only a reboot
+     * brings the camera back -- so the cost of asking for more is paid by
+     * hand, every time. Two is the ceiling; anything larger is clamped. */
+    int tpg = 0, shots = 1, piggyback = 0;
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
     int settle = 200;
     /* The memory-side rate the channel asks for. The driver does not set a
@@ -1665,7 +1669,16 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
-        else if (strncmp(a, "--shots=", 8) == 0)  shots = atoi(a + 8);
+        else if (strncmp(a, "--shots=", 8) == 0) {
+            shots = atoi(a + 8);
+            if (shots > 2) {
+                printf("shots: asked for %d, taking 2 -- more than that"
+                       " queues jobs behind a block that may already be"
+                       " stuck, and that costs a reboot\n", shots);
+                shots = 2;
+            }
+            if (shots < 1) shots = 1;
+        }
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strncmp(a, "--vi-height=", 12) == 0)

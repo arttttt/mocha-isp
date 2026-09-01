@@ -1027,14 +1027,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * luminance, the other two the colour differences. Sending only the
      * first tells us whether it is the arithmetic the block objects to or
      * the amount of it. */
-    g[n++] = 0x00000000;
-    g[n++] = ccm >= 1 ? 0xf9500800 : 0;
-    g[n++] = ccm >= 1 ? 0x0000fec0 : 0;
-    g[n++] = ccm >= 2 ? 0x096004c0 : 0;
-    g[n++] = ccm >= 2 ? 0x000001d0 : 0;
-    g[n++] = ccm >= 3 ? 0xfac0fd50 : 0;
-    g[n++] = ccm >= 3 ? 0x00000800 : 0;
-    g[n++] = 0x00000000;
+    /* Zero here, always. The capture has the matrix empty in every opening
+     * round without exception; the real one arrives later, on its own. */
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
     /* Three per-channel words. The reprocess tool carries the same
      * 0x3fff0000 here and comes out monochrome too, which makes this the
      * one value both paths share and both paths fail on. The output is also
@@ -1627,6 +1625,57 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
     printf("warm-up frame (%s the enable): %d words, rc=%d (%s)\n",
            write_enable ? "with" : "without", n, rc,
+           rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
+/* The colour conversion, sent where the stock camera sends it.
+ *
+ * In a whole session it appears with a non-zero matrix exactly once, and
+ * not in the opening configuration: it comes mid-stream, after the warm-up
+ * and after the coefficients, at the end of its pass just before the work
+ * buffer. We had been putting it at the front of the opening round, which
+ * is the one place the capture never has it.
+ */
+static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t g[32];
+    int n = 0;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_INCR(0x600, 16);
+    g[n++] = 0x00000005; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0x00000000;
+    g[n++] = 0x00000000; g[n++] = 0xf9500800;
+    g[n++] = 0x0000fec0; g[n++] = 0x096004c0;
+    g[n++] = 0x000001d0; g[n++] = 0xfac0fd50;
+    g[n++] = 0x00000800; g[n++] = 0x00000000;
+    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
+    g[n++] = 0x3fff0000; g[n++] = 0x10001000;
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("colour conversion: %d words, rc=%d (%s)\n", n, rc,
            rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
@@ -3215,9 +3264,14 @@ int main(int argc, char **argv)
             if (warm_left > 0) {
                 printf("  (that was a warm-up round, output condition %+d)\n",
                        (int)(syncpt_read(sp_mem) - isp_base_mem));
-                if (--warm_left == 0 && use_real_pass && !real_sent) {
-                    isp_real_pass(isp_fd, isp_sp, work_iova);
-                    real_sent = 1;
+                if (--warm_left == 0) {
+                    /* Where the capture puts it: after the warm-up and the
+                     * coefficients, once, and never in the opening round. */
+                    if (ccm) isp_colour(isp_fd, isp_sp, work_iova);
+                    if (use_real_pass && !real_sent) {
+                        isp_real_pass(isp_fd, isp_sp, work_iova);
+                        real_sent = 1;
+                    }
                 }
                 shot--;
             }

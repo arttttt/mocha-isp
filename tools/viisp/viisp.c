@@ -1643,9 +1643,28 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova)
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t g[32];
+    uint32_t g[48];
     int n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* The output stage, with the four words we had been leaving as a stub.
+     * Every fractional field in ours was zero, which builds no luminance at
+     * all -- and that is why the luma plane came back black while the whole
+     * picture collapsed into one chroma plane. The stock camera replaces
+     * exactly this tail when it starts real frames; the leading weights,
+     * 75/147/34, are the same in both and were never the problem.
+     *
+     * This has to be the last thing to touch 0x400 before a frame: the
+     * opening round writes the stub, so anything that re-runs it afterwards
+     * puts the stub back. */
+    g[n++] = OP_INCR(0x400, 12);
+    g[n++] = 0x00000001; g[n++] = 0x004b0000;
+    g[n++] = 0x00930000; g[n++] = 0x00220000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x00280010; g[n++] = 0x0003003f;
+    g[n++] = 0x001d002c; g[n++] = 0x0002003f;
+
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;

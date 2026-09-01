@@ -1042,13 +1042,15 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
         for (unsigned i = 0; i < blk[b].n; i++) g[n++] = blk[b].d[i];
 
         /* White balance. In 0x700 the stock camera moves exactly two words
-         * from frame to frame, 5 and 11, with 7 and 10 fixed: the gains
-         * for red and blue in 4.12 (0x1000 = 1.0), green staying at 1.0.
-         * The capture's pair, 1.58 and 1.71, belongs to the stock's room;
-         * --wb puts this room's in. */
+         * from frame to frame, 5 and 11, with 7 and 10 fixed: per-channel
+         * gains in 4.12 (0x1000 = 1.0), green staying at 1.0. The words
+         * follow the mosaic, BGGR: 5 is blue, 11 is red -- measured, not
+         * assumed: raising word 11 from 1.71 to 2.38 raised red in the
+         * picture by 1.4, not blue. The capture's pair belongs to the
+         * stock's room; --wb=R,B puts this room's in. */
         if (blk[b].m == 0x700) {
-            if (wb_r) g[first + 5] = wb_r;
-            if (wb_b) g[first + 11] = wb_b;
+            if (wb_b) g[first + 5] = wb_b;
+            if (wb_r) g[first + 11] = wb_r;
         }
 
         /* Some of what the capture holds is not configuration but the

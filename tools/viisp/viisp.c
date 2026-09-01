@@ -1589,6 +1589,7 @@ int main(int argc, char **argv)
      * hand, every time. Two is the ceiling; anything larger is clamped. */
     int tpg = 0, shots = 1, piggyback = 0;
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
+    uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
     /* The memory-side rate the channel asks for. The driver does not set a
      * number here at all -- it computes an isochronous bandwidth from the
@@ -1703,6 +1704,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--ccm") == 0)         ccm = 3;
         else if (strcmp(a, "--geo-blocks") == 0)  geo_blocks = 1;
         else if (strcmp(a, "--stream-xfer") == 0) stream_xfer = 1;
+        else if (strncmp(a, "--seq-sp=", 9) == 0)  seq_sp = (uint32_t)atoi(a + 9);
         else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
         else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
                                                     enable_late = 1; }
@@ -1959,10 +1961,18 @@ int main(int argc, char **argv)
          * Not 36 either: the frame job parks itself on 36 reaching N+1,
          * and an immediate increment of ours on 36 releases that park
          * before the block has finished writing -- which is what took the
-         * device down on the next two runs. So in this mode our sequencing
-         * rides on the fourth counter, 39 (ispb_loadv), which the hardware
-         * raises only when condition six is armed, and below it is not. */
-        if (stream_xfer && sps[3]) isp_sp = sps[3];
+         * device down on the next two runs. Not 39: the first warm-up on
+         * it hung the device outright. All four counters of the ISP-B
+         * channel are spoken for once the pipeline streams.
+         *
+         * The kernel does not require a job's syncpoint to belong to the
+         * channel (bus_client.c checks only that the id exists, and the
+         * ISP has no context handler), and INCR_SYNCPT is a host1x method
+         * taking any id. So the sequencing rides on a counter nothing in
+         * this configuration raises: 49, vi1_flash, unless --seq-sp says
+         * otherwise. */
+        if (seq_sp) isp_sp = seq_sp;
+        else if (stream_xfer) isp_sp = 49;
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627
@@ -1974,9 +1984,7 @@ int main(int argc, char **argv)
          * statistics stage is never asked to finish is a fair suspect for
          * one that never finishes the write either. */
         sp_stats = arm_stats ? sps[1] : 0;
-        /* Condition six stays unarmed in the streaming mode: 39 is our
-         * sequencing counter there, and the hardware must not touch it. */
-        sp_loadv = (arm_stats && !stream_xfer) ? sps[3] : 0;
+        sp_loadv = arm_stats ? sps[3] : 0;
 
         /* The ISP's own clocks, at the rates the reprocess tool uses. */
         struct nvhost_clk_rate_args ic;

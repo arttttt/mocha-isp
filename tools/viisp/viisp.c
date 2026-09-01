@@ -657,8 +657,11 @@ static int own_scratch;
 /* The pixel transform's control word, which the stock camera sets and we
  * never did -- while leaving the transform itself switched on. */
 static uint32_t rgb2y = 0x001c984c;
-/* Whether to run stock's warm-up before the first real frame. */
+/* Whether to run stock's warm-up before the first real frame, and whether
+ * the block enable goes where stock puts it -- inside that warm-up's first
+ * frame, once for the session -- instead of at open and in the setup. */
 static int do_warmup;
+static int enable_late;
 
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
  * because that is what the stock camera gives it -- its eight sit exactly
@@ -1053,7 +1056,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * The demosaic coefficients live here and nowhere else we could reach. */
     if (stock_cfg) n = isp_stock_emit(g, n, work_iova, stock_cfg);
 
-    g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
+    /* Unless the enable belongs later: stock writes it exactly once for a
+     * whole session, and not here -- it goes inside the first warm-up
+     * frame, after everything else has been configured. */
+    if (!enable_late) { g[n++] = OP_INCR(0x015, 1); g[n++] = enable; }
 
     /* Commit. Everything above this is written into shadow state and takes
      * effect only when the block is told to apply it -- the April notes
@@ -2035,6 +2041,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
+        else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
+                                                    enable_late = 1; }
         else if (strncmp(a, "--rgb2y=", 8) == 0)
             rgb2y = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--stats-kb=", 11) == 0)
@@ -2279,12 +2287,14 @@ int main(int argc, char **argv)
              * them is 0xFC=0x20 -- 0x54 never appears. We had been writing
              * the pipeline mode there on the strength of a driver comment,
              * so pass --isp-enable=0 to do as stock does and leave it alone. */
+            /* And when the enable is to go where stock puts it -- inside
+             * the first warm-up frame, once -- it does not go here at all. */
             uint32_t off[2] = { 0xFC, 0x54 };
             uint32_t val[2] = { 0x20, isp_enable };
             struct regrdwr_args ra;
             memset(&ra, 0, sizeof ra);
             ra.id = 0;
-            ra.num_offsets = isp_enable ? 2 : 1;
+            ra.num_offsets = (isp_enable && !enable_late) ? 2 : 1;
             ra.block_size = 4;
             ra.offsets = (uint32_t)(uintptr_t)off;
             ra.values = (uint32_t)(uintptr_t)val;

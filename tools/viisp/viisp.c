@@ -662,6 +662,8 @@ static uint32_t rgb2y = 0x001c984c;
  * frame, once for the session -- instead of at open and in the setup. */
 static int do_warmup;
 static int enable_late;
+/* Whether to send the stock camera's colour-conversion coefficients. */
+static int ccm;
 
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
  * because that is what the stock camera gives it -- its eight sit exactly
@@ -1019,10 +1021,13 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0xf9500800;
-    g[n++] = 0x0000fec0; g[n++] = 0x096004c0;
-    g[n++] = 0x000001d0; g[n++] = 0xfac0fd50;
-    g[n++] = 0x00000800; g[n++] = 0x00000000;
+    /* Behind a flag: with stock's own coefficients here the block stops
+     * writing anything at all, so they want something else we have not
+     * found yet. The empty matrix at least produces a frame. */
+    g[n++] = 0x00000000; g[n++] = ccm ? 0xf9500800 : 0;
+    g[n++] = ccm ? 0x0000fec0 : 0; g[n++] = ccm ? 0x096004c0 : 0;
+    g[n++] = ccm ? 0x000001d0 : 0; g[n++] = ccm ? 0xfac0fd50 : 0;
+    g[n++] = ccm ? 0x00000800 : 0; g[n++] = 0x00000000;
     /* Three per-channel words. The reprocess tool carries the same
      * 0x3fff0000 here and comes out monochrome too, which makes this the
      * one value both paths share and both paths fail on. The output is also
@@ -2052,6 +2057,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
+        else if (strcmp(a, "--ccm") == 0)         ccm = 1;
         else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
                                                     enable_late = 1; }
         else if (strncmp(a, "--rgb2y=", 8) == 0)

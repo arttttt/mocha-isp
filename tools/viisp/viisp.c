@@ -639,6 +639,8 @@ static int dm_after = 1;
  * asked for -- it belongs with stock's resolution, not a smaller one. */
 static int real_sent;
 static int use_real_pass;
+/* Whether to arm the statistics and load conditions the way stock does. */
+static int arm_stats;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -1894,6 +1896,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
         else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
+        else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
@@ -2098,8 +2101,18 @@ int main(int argc, char **argv)
                 break;
             }
         if (!isp_sp) isp_sp = sp_mem;
-        sp_stats = 0;
-        sp_loadv = 0;
+
+        /* And arm the other two conditions, which stock arms on every real
+         * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627
+         * is six on 39, and it then waits on both 36 and 37. We had these
+         * off because arming them once wedged the channel -- but that was
+         * while our own submits were also sequenced on 37, which is the
+         * counter the hardware raises for the statistics stage. With the
+         * sequencing moved to 38 the conflict is gone, and a pipeline whose
+         * statistics stage is never asked to finish is a fair suspect for
+         * one that never finishes the write either. */
+        sp_stats = arm_stats ? sps[1] : 0;
+        sp_loadv = arm_stats ? sps[3] : 0;
 
         /* The ISP's own clocks, at the rates the reprocess tool uses. */
         struct nvhost_clk_rate_args ic;

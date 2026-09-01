@@ -1638,7 +1638,8 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
  * buffer. We had been putting it at the front of the opening round, which
  * is the one place the capture never has it.
  */
-static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova)
+static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
+                      unsigned W, unsigned H)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -1646,6 +1647,24 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova)
     uint32_t g[48];
     int n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* Geometry, derived rather than copied.
+     *
+     * The capture has 0x07780a00 here for a 2592 by 1944 frame, and
+     * 1944-32 is 1912 while 2592-32 is 2560 -- the word is the frame less
+     * thirty-two in each direction, packed high and low. The neighbouring
+     * block carries the width outright. Sending stock's numbers unchanged
+     * described a frame nearly twice the size of the one arriving, so the
+     * stage that walks the picture was reading rows that were not there,
+     * and what it computed for the luma was nothing. */
+    uint32_t geo = ((H - 32) << 16) | (W - 32);
+    g[n++] = OP_INCR(0x800, 3);
+    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = OP_INCR(0x820, 3);
+    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = OP_INCR(0xc00, 3);
+    g[n++] = 0x00007901; g[n++] = 0x00000000;
+    g[n++] = (0x0103u << 16) | W;
 
     /* The output stage, with the four words we had been leaving as a stub.
      * Every fractional field in ours was zero, which builds no luminance at
@@ -3286,7 +3305,7 @@ int main(int argc, char **argv)
                 if (--warm_left == 0) {
                     /* Where the capture puts it: after the warm-up and the
                      * coefficients, once, and never in the opening round. */
-                    if (ccm) isp_colour(isp_fd, isp_sp, work_iova);
+                    if (ccm) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
                     if (use_real_pass && !real_sent) {
                         isp_real_pass(isp_fd, isp_sp, work_iova);
                         real_sent = 1;

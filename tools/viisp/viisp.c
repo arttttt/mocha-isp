@@ -626,6 +626,10 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  * 0x054 takes 0, and there is deliberately no trigger at the end. */
 #include "isp_b_cal.h"
 #include "isp_stock.h"
+#include "isp_demosaic.h"
+
+/* Set once the coefficients have gone out, so they go out only the once. */
+static int dm_sent;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -1303,6 +1307,65 @@ static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
  * later frame into a buffer we have already let go -- the memory controller
  * faults on it after the sensor has powered down, which is exactly where
  * the fault lands in the log. */
+/* The demosaic, sent when the stock camera sends it.
+ *
+ * Not during the opening configuration -- which is where we had been
+ * putting it, and it never took. The captured opening sequence is plain
+ * about the order: the block is enabled and the whole configuration
+ * committed, the routing from the receiver is set up, one frame goes
+ * through, and only then does the stack push the coefficients, in a job of
+ * their own carrying nothing else. The values here are that job, word for
+ * word.
+ */
+static int isp_demosaic(int isp_fd, uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t g[160];
+    unsigned n = 0;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    g[n++] = OP_INCR(0x902, 1);
+    g[n++] = isp_dm_902[0];
+    g[n++] = OP_NONINCR(0x903, 64);
+    for (int i = 0; i < 64; i++) g[n++] = isp_dm_903[i];
+    g[n++] = OP_INCR(0x904, 2);
+    g[n++] = isp_dm_904[0]; g[n++] = isp_dm_904[1];
+    g[n++] = OP_INCR(0x906, 1);
+    g[n++] = isp_dm_906[0];
+    g[n++] = OP_NONINCR(0x907, 36);
+    for (int i = 0; i < 36; i++) g[n++] = isp_dm_907[i];
+    g[n++] = OP_INCR(0x908, 1);
+    g[n++] = isp_dm_908[0];
+    /* Stock hands it a null work buffer at this point, and that is not an
+     * oversight of ours to correct: it is what the capture shows. */
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = 0;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("demosaic coefficients: %u words, rc=%d (%s)\n", n, rc,
+           rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 static void isp_stop(int isp_fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -2712,6 +2775,13 @@ int main(int argc, char **argv)
                  * trigger, the way the driver's start-thread does it: the
                  * block has to be armed and waiting when the pixels cross,
                  * because nothing buffers them on the way. */
+                /* After the first frame, in its own job, the way the
+                 * capture shows the stock stack doing it. */
+                if (isp_fd >= 0 && out_iova && shot > 0 && !dm_sent) {
+                    isp_demosaic(isp_fd, isp_sp);
+                    dm_sent = 1;
+                }
+
                 if (isp_fd >= 0 && out_iova && stats_h) {
                     isp_base_mem = syncpt_read(sp_mem);
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,

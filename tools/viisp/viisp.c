@@ -355,14 +355,24 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
             g[n++] = 0x00000200;
             g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
 
-            /* Apply, then the transfer configuration. Its last word is two
-             * on the first pass and one on the second -- the difference the
-             * reconstruction collapsed into a single value. */
+            /* Apply, then the transfer configuration: the memory-path set
+             * on the first pass, the streaming set on the second. */
             g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
             g[n++] = OP_INCR(0x018, 5);
-            g[n++] = 0x00000000; g[n++] = 0x00000400;
-            g[n++] = 0x00000000; g[n++] = 0x00000200;
-            g[n++] = pass ? 0x00000001 : 0x00000002;
+            if (pass) {
+                /* The second pass carries a different block altogether, not
+                 * the first one with its last word flipped: both captures
+                 * (2592 and 720) send exactly this, and the live camera's
+                 * registers 0x018..0x01C read back exactly this. The
+                 * reconstruction had collapsed the two sets into one. */
+                g[n++] = 0x0a00500a; g[n++] = 0x00008089;
+                g[n++] = 0x013645cb; g[n++] = 0x000001e7;
+                g[n++] = 0x00000001;
+            } else {
+                g[n++] = 0x00000000; g[n++] = 0x00000400;
+                g[n++] = 0x00000000; g[n++] = 0x00000200;
+                g[n++] = 0x00000002;
+            }
             if (!pass) {
                 g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
                 g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
@@ -730,9 +740,20 @@ int isp_init_a(int fd, uint32_t sp)
             g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
             g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
             g[n++] = OP_INCR(0x018, 5);
-            g[n++] = 0x00000000; g[n++] = 0x00000400;
-            g[n++] = 0x00000000; g[n++] = 0x00000200;
-            g[n++] = pass ? 0x00000001 : 0x00000002;
+            if (pass) {
+                /* The second pass carries a different block altogether, not
+                 * the first one with its last word flipped: both captures
+                 * (2592 and 720) send exactly this, and the live camera's
+                 * registers 0x018..0x01C read back exactly this. The
+                 * reconstruction had collapsed the two sets into one. */
+                g[n++] = 0x0a00500a; g[n++] = 0x00008089;
+                g[n++] = 0x013645cb; g[n++] = 0x000001e7;
+                g[n++] = 0x00000001;
+            } else {
+                g[n++] = 0x00000000; g[n++] = 0x00000400;
+                g[n++] = 0x00000000; g[n++] = 0x00000200;
+                g[n++] = 0x00000002;
+            }
             if (!pass) {
                 g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
                 g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;

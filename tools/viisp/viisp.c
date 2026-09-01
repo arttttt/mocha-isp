@@ -657,6 +657,8 @@ static int own_scratch;
 /* The pixel transform's control word, which the stock camera sets and we
  * never did -- while leaving the transform itself switched on. */
 static uint32_t rgb2y = 0x001c984c;
+/* Whether to run stock's warm-up before the first real frame. */
+static int do_warmup;
 
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
  * because that is what the stock camera gives it -- its eight sit exactly
@@ -1517,6 +1519,90 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
     return rc;
 }
 
+/* The warm-up the stock camera runs before its first real frame.
+ *
+ * Two frames of eight pixels by eight, one component, with the flags word
+ * of the processing block set to three -- and the block enable written
+ * inside the first of them. It looks like a formality and is not: the tile
+ * engine that builds the luma has to be brought up, and this is what does
+ * it. Going straight from the opening configuration to a real frame leaves
+ * that engine cold, which is why the luma surface came back as zeros while
+ * the third surface, which needs no tile, still received something.
+ *
+ * The buffers are tiny -- eight rows of two hundred and fifty six bytes,
+ * and two scratch pages the processing block wants pointers to.
+ */
+static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
+                      uint32_t stats_h, int write_enable, uint32_t enable)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    uint32_t g[48];
+    int n = 0, y_word, p2_word, p3_word, stats_word;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_INCR(0xE00, 1); g[n++] = 0x00070000;   /* eight across */
+    g[n++] = OP_INCR(0xE01, 1); g[n++] = 0x00070000;   /* eight down */
+    g[n++] = OP_INCR(0xE02, 1); g[n++] = 0x010000C9;   /* one component */
+    g[n++] = OP_INCR(0xE03, 1); g[n++] = 0x00000000;
+    g[n++] = OP_INCR(0xE04, 3);
+    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0x00000100;
+
+    g[n++] = OP_INCR(0x500, 6);
+    g[n++] = 0x00000003;                                /* the flags word */
+    g[n++] = 0x00000ca4;
+    p2_word = n; g[n++] = 0;
+    p3_word = n; g[n++] = 0;
+    g[n++] = 0x00000000;
+    g[n++] = 0x00080008;                                /* eight by eight */
+
+    /* Once per session, and inside this frame rather than out in the
+     * opening configuration, which is where we had been putting it. */
+    if (write_enable) { g[n++] = OP_INCR(0x015, 1); g[n++] = enable; }
+
+    g[n++] = OP_INCR(0x100, 4);
+    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000424;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000525;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000627;
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x00000005;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+
+    struct nvhost_reloc rel[4] = {
+        { cmd_h, (uint32_t)y_word * 4, warm_h, 0 },
+        { cmd_h, (uint32_t)p2_word * 4, warm_h, 0x1000 },
+        { cmd_h, (uint32_t)p3_word * 4, warm_h, 0x2000 },
+        { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
+    };
+    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
+    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.num_relocs = 4;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.relocs = (uint32_t)(uintptr_t)rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("warm-up frame (%s the enable): %d words, rc=%d (%s)\n",
+           write_enable ? "with" : "without", n, rc,
+           rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 static void isp_stop(int isp_fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -1948,6 +2034,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
+        else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
         else if (strncmp(a, "--rgb2y=", 8) == 0)
             rgb2y = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--stats-kb=", 11) == 0)
@@ -2910,6 +2997,38 @@ int main(int argc, char **argv)
         }
         period = period > 0 ? period : 132;      /* half-millisecond ticks */
         printf("  frame period: %d.%d ms\n", period / 2, (period % 2) * 5);
+
+        /* Bring the tile engine up the way stock does, before asking for a
+         * real frame: a warm-up frame with the enable inside it, then the
+         * coefficients, then a second warm-up frame, then the working
+         * configuration. Skipping all of this and going straight to a real
+         * frame is what left the luma path cold. */
+        if (do_warmup && isp_fd >= 0) {
+            uint32_t warm_h = nvmap_create(64 * 1024);
+            if (warm_h && nvmap_alloc(warm_h) == 0) {
+                nvmap_pin(warm_h);
+                uint32_t was = syncpt_read(sp_mem);
+                isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 1, isp_enable);
+                usleep(60000);
+                printf("  after the first warm-up: output %+d, stats %+d\n",
+                       (int)(syncpt_read(sp_mem) - was),
+                       (int)(syncpt_read(sps[1]) - syncpt_read(sps[1])));
+
+                isp_demosaic(isp_fd, isp_sp, out_h, stats_h, u_off, v_off,
+                             work_iova);
+                dm_sent = 1;
+
+                isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 0, isp_enable);
+                usleep(60000);
+
+                if (use_real_pass) {
+                    isp_real_pass(isp_fd, isp_sp, work_iova);
+                    real_sent = 1;
+                }
+                nvmap_unpin(warm_h);
+                ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)warm_h);
+            }
+        }
 
         for (int shot = 0; shot < shots; shot++) {
             int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;

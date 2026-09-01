@@ -101,7 +101,9 @@ int main(int argc, char **argv)
 
     if (pid < 0) pid = pid_of(pname);
     if (pid < 0) { printf("no process matching '%s'\n", pname); return 1; }
-    printf("process %d\n", pid);
+    /* Diagnostics go to the error stream so the generated header can be
+     * redirected straight into a file. */
+    fprintf(stderr, "process %d\n", pid);
 
     char path[64];
     snprintf(path, sizeof path, "/proc/%d/maps", pid);
@@ -209,8 +211,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("chain of %d blocks at %08lx\n\n", best_n,
-           (unsigned long)best_addr);
+    fprintf(stderr, "chain of %d blocks at %08lx\n\n", best_n,
+            (unsigned long)best_addr);
 
     const uint32_t *w = best_buf + best_at;
     size_t avail = best_words - best_at;

@@ -157,7 +157,10 @@ int main(int argc, char **argv)
 
         uint32_t *buf = malloc(len);
         if (!buf) continue;
-        ssize_t got = pread(mem, buf, len, (off_t)s);
+        /* The wide read: on a thirty-two bit build an ordinary offset is
+         * signed and everything above two gigabytes -- which is where the
+         * heap lives -- comes back as an invalid argument. */
+        ssize_t got = pread64(mem, buf, len, (off64_t)s);
         if (verbose)
             printf("  %08lx-%08lx %s %-16s -> %ld%s\n", (unsigned long)s,
                    (unsigned long)e, perms, nm, (long)got,

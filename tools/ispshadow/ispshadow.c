@@ -142,10 +142,14 @@ int main(int argc, char **argv)
                    (unsigned long *)&s, (unsigned long *)&e, perms, rest) < 3)
             continue;
         if (perms[0] != 'r' || perms[1] != 'w') continue;
+        /* An unnamed mapping still comes back with the trailing space of
+         * the line, so trim before deciding whether it has a name at all. */
+        char *nm = rest;
+        while (*nm == ' ' || *nm == '\t') nm++;
         /* Anonymous and heap only: the chain is allocated, not mapped from
          * a file, and skipping the rest keeps this quick and harmless. */
-        if (rest[0] && !strstr(rest, "[heap]") && !strstr(rest, "[anon")
-            && !strstr(rest, "libc_malloc") && !strstr(rest, "[stack"))
+        if (*nm && !strstr(nm, "[heap]") && !strstr(nm, "[anon")
+            && !strstr(nm, "libc_malloc") && !strstr(nm, "[stack"))
             continue;
         size_t len = e - s;
         if (len < 0x1000 || len > (64u << 20)) continue;

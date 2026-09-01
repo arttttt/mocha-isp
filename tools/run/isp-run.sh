@@ -13,30 +13,47 @@
 #     whatever landed in the output buffer.
 #
 # Usage:
-#   tools/run/isp-run.sh [--deploy] [-- <viisp arguments>]
+#   tools/run/isp-run.sh [--deploy] [--bin=NAME] [--extra=FILE]... [--pre=ENV]
+#                        [-- <arguments for the binary>]
 #
-#   --deploy   copy the freshly built binary from the build server first
+#   --deploy      copy the freshly built binary from the build server first
+#   --bin=NAME    which build/out binary to run (default viisp); the same
+#                 checks apply to every tool that touches the ISP
+#   --extra=FILE  another build/out file to deploy alongside (a preload .so)
+#   --pre=ENV     environment to put in front of the command on the device,
+#                 e.g. "LD_PRELOAD=/data/local/tmp/nvrm_shim.so"
 #
 # Examples:
 #   tools/run/isp-run.sh --deploy -- --width=1280 --height=720 --dump
 #   tools/run/isp-run.sh -- --dump --isp-fmt=01FE00E6
+#   tools/run/isp-run.sh --bin=hybrid --extra=nvrm_shim.so --deploy \
+#       --pre="LD_PRELOAD=/data/local/tmp/nvrm_shim.so LD_LIBRARY_PATH=/system/vendor/lib" \
+#       -- synth_rgb_2592.raw --width=2592 --height=1944 --hw-apply
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="$ROOT/build/out/viisp"
 SERVER=kernel-build
-REMOTE=/home/artem/Projects/mocha-isp/build/out/viisp
-DEV=/data/local/tmp/viisp
+REMOTE_DIR=/home/artem/Projects/mocha-isp/build/out
+DEV_DIR=/data/local/tmp
 
+BIN=viisp
 DEPLOY=0
+PRE=""
+EXTRA=()
 ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --deploy) DEPLOY=1; shift ;;
+        --bin=*) BIN="${1#--bin=}"; shift ;;
+        --extra=*) EXTRA+=("${1#--extra=}"); shift ;;
+        --pre=*) PRE="${1#--pre=}"; shift ;;
         --) shift; ARGS=("$@"); break ;;
         *) ARGS=("$@"); break ;;
     esac
 done
+
+OUT="$ROOT/build/out/$BIN"
+DEV="$DEV_DIR/$BIN"
 
 # The errors that mean the camera path is dead and only a reboot returns
 # it: a host1x channel timeout, or the register bus refusing the block.
@@ -94,10 +111,12 @@ else
 fi
 
 if [ "$DEPLOY" = 1 ]; then
-    scp -q "$SERVER:$REMOTE" "$OUT" || exit 1
-    adb push "$OUT" "$DEV" >/dev/null || exit 1
-    adb shell "chmod 755 $DEV"
-    echo "deployed $(stat -f%z "$OUT" 2>/dev/null || stat -c%s "$OUT") bytes"
+    for f in "$BIN" "${EXTRA[@]}"; do
+        scp -q "$SERVER:$REMOTE_DIR/$f" "$ROOT/build/out/$f" || exit 1
+        adb push "$ROOT/build/out/$f" "$DEV_DIR/$f" >/dev/null || exit 1
+        adb shell "chmod 755 $DEV_DIR/$f"
+        echo "deployed $f: $(stat -f%z "$ROOT/build/out/$f" 2>/dev/null || stat -c%s "$ROOT/build/out/$f") bytes"
+    done
 fi
 
 adb shell "rm -f /data/local/tmp/viisp_out.raw /data/local/tmp/vicap.raw"
@@ -105,8 +124,8 @@ adb shell "rm -f /data/local/tmp/viisp_out.raw /data/local/tmp/vicap.raw"
 faults_before=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
 faults_before=${faults_before:-0}
 
-echo "=== run: ${ARGS[*]:-（defaults）} ==="
-adb shell "$DEV ${ARGS[*]:-}" 2>&1 | tr -d '\r'
+echo "=== run: $BIN ${ARGS[*]:-（defaults）} ==="
+adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r'
 
 # The part that matters and that keeps getting skipped.
 echo

@@ -13,9 +13,22 @@
  * That is the question this answers: whether a memory frame demosaics when
  * the block has been brought up the way the camera stack brings it up.
  *
+ * Second arrangement, the April one (tools/camera/isp_reprocess.c in the
+ * 24.1 tree): the library also runs HwSettingsCreate twice and
+ * HwSettingsApply once, which pushes its whole calibration gather. That
+ * gather ends in the streaming trigger, and without a sensor feeding the
+ * block the trigger waits forever -- so it is run under the preloaded
+ * nvrm_shim.so, which NOPs that one word while NVRM_SHIM_STRIP is set.
+ * --hw-apply selects this; it needs LD_PRELOAD=nvrm_shim.so.
+ *
+ * And on top of either: the blocks the stock camera sends that neither the
+ * April tool nor the first hybrid did -- the demosaic (--dm, --dm-all) and
+ * the colour matrix (--ccm), word for word from the captured stock session.
+ *
  * Build: tools/hybrid/build-hybrid.sh (on the build server)
  * Usage: ./hybrid <raw_bayer> [--width=N] [--height=N] [--w0=N] [--yuv-cfg]
- *                 [--no-lib] [--out-fmt=0xN]
+ *                 [--no-lib] [--hw-apply] [--isp=1|2] [--dm] [--dm-all]
+ *                 [--ccm] [--out-fmt=0xN] [--in-fmt=0xN]
  */
 
 #include <stdio.h>
@@ -80,9 +93,48 @@ struct nvhost32_submit_args {
 #define OP_INCR(o,n)       ((1<<28)|((o)<<16)|(n))
 #define OP_NONINCR(o,n)    ((2<<28)|((o)<<16)|(n))
 #define ISP_CLASS_A 0x32
+#define ISP_CLASS_B 0x34
+
+/* The demosaic coefficients, word for word from the stock capture. */
+#include "isp_demosaic.h"
+
+/* The rest of the demosaic family, from the same capture (tools/viisp/
+ * isp_stock.h carries the full set; only these are needed here). */
+static const uint32_t dm_909[7] = {
+    0x00000001, 0xfc000f00, 0xf680f320, 0x0d80fde0, 0x00000030, 0x1400002a,
+    0x3c00002b,
+};
+static const uint32_t dm_910[9] = {
+    0x00000003, 0x00000028, 0x01480029, 0x0003030b, 0x00990030, 0x00000800,
+    0x007b0666, 0x00000036, 0x00001f1f,
+};
+static const uint32_t dm_919[10] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00000200,
+};
+static const uint32_t dm_91b[10] = {
+    0, 0, 0, 0, 0, 0x00000001, 0x00000025, 0, 0x00000026, 0x00000361,
+};
+static const uint32_t dm_91d[10] = {
+    0, 0, 0, 0, 0, 0, 0x00000780, 0, 0x00000780, 0x00000200,
+};
+static const uint32_t dm_91f[1] = { 0x00000032 };
+static const uint32_t dm_920[10] = {
+    0x00000002, 0x10001660, 0x00000000, 0x1000f4a0, 0x0000fa80, 0x10000000,
+    0x00001c50, 0x30001000, 0x30001000, 0x30001000,
+};
+
+/* The colour matrix the stock camera sends at the end of its real pass.
+ * Zeroing its middle pair on the live camera turns the picture black, so
+ * this is the block that builds the luminance. */
+static const uint32_t ccm_600[16] = {
+    0x00000005, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0xf9500800,
+    0x0000fec0, 0x096004c0, 0x000001d0, 0xfac0fd50, 0x00000800, 0x00000000,
+    0x3fff0000, 0x3fff0000, 0x3fff0000, 0x10001000,
+};
 
 static int nvmap_fd = -1;
 static unsigned W = 3264, H = 2448;
+static uint32_t isp_class = ISP_CLASS_A;
 
 static uint32_t nvmap_create(uint32_t size) {
     struct nvmap_create_handle ch = { .size = size };
@@ -125,7 +177,22 @@ static const uint32_t CFG_YUV[16] = {
     1, 0, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0xd
 };
 
-static void *lib_bring_up(uint32_t w0, int yuv_cfg)
+/* Whether the trigger-stripping shim is in this process. Without it,
+ * HwSettingsApply's gather ends in a streaming trigger that waits for
+ * sensor pixels which never come, and the channel times out. */
+static int shim_loaded(void)
+{
+    FILE *m = fopen("/proc/self/maps", "r");
+    char line[512];
+    int found = 0;
+    if (!m) return 0;
+    while (fgets(line, sizeof line, m))
+        if (strstr(line, "nvrm_shim.so")) { found = 1; break; }
+    fclose(m);
+    return found;
+}
+
+static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply)
 {
     void *rm = dlopen("libnvrm.so", RTLD_NOW);
     void *isp = dlopen("libnvisp_v3.so", RTLD_NOW);
@@ -145,8 +212,8 @@ static void *lib_bring_up(uint32_t w0, int yuv_cfg)
     if (!hRm) return 0;
 
     void *hIsp = 0;
-    rc = NvIspOpen(hRm, 1, &hIsp);            /* instance 1 = ISP-A */
-    printf("NvIspOpen: rc=%d handle=%p\n", rc, hIsp);
+    rc = NvIspOpen(hRm, inst, &hIsp);         /* 1 = ISP-A, 2 = ISP-B */
+    printf("NvIspOpen(%d): rc=%d handle=%p\n", inst, rc, hIsp);
     if (!hIsp) return 0;
 
     uint32_t cfg1[16];
@@ -163,6 +230,30 @@ static void *lib_bring_up(uint32_t w0, int yuv_cfg)
         rc = NvIspSetConfiguration(hIsp, 2, &cfg2, &sz);
         printf("SetConfiguration mode=2: rc=%d\n", rc);
     }
+
+    /* The April arrangement: two settings objects, as the stock stack
+     * creates them, and one Apply -- the library's own calibration gather
+     * goes down its own channel here. */
+    if (hw_apply) {
+        int (*HwCreate)(void *, void **) = dlsym(isp, "NvIspHwSettingsCreate");
+        int (*HwApply)(void *) = dlsym(isp, "NvIspHwSettingsApply");
+        if (!HwCreate || !HwApply) { printf("missing HwSettings symbols\n"); return 0; }
+        if (!shim_loaded()) {
+            printf("nvrm_shim.so is not preloaded -- HwSettingsApply would "
+                   "leave a streaming trigger waiting forever; stopping\n");
+            return 0;
+        }
+        void *hw0 = 0, *hw1 = 0;
+        rc = HwCreate(hIsp, &hw0);
+        printf("HwSettingsCreate[0]: rc=%d settings=%p\n", rc, hw0);
+        rc = HwCreate(hIsp, &hw1);
+        printf("HwSettingsCreate[1]: rc=%d settings=%p\n", rc, hw1);
+        if (!hw0) return 0;
+        setenv("NVRM_SHIM_STRIP", "1", 1);
+        rc = HwApply(hw0);
+        unsetenv("NVRM_SHIM_STRIP");
+        printf("HwSettingsApply: rc=%d (streaming trigger stripped by the shim)\n", rc);
+    }
     return hIsp;
 }
 
@@ -175,7 +266,8 @@ int main(int argc, char **argv)
         return 1;
     }
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
-    int yuv_cfg = 0, use_lib = 1, dma_init = 1;
+    int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
+    int dm = 0, dm_all = 0, ccm = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
@@ -184,14 +276,27 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--yuv-cfg") == 0)     yuv_cfg = 1;
         else if (strcmp(a, "--no-lib") == 0)      use_lib = 0;
         else if (strcmp(a, "--no-dma") == 0)      dma_init = 0;
+        else if (strcmp(a, "--hw-apply") == 0)    hw_apply = 1;
+        else if (strncmp(a, "--isp=", 6) == 0)    inst = atoi(a + 6);
+        else if (strcmp(a, "--dm") == 0)          dm = 1;
+        else if (strcmp(a, "--dm-all") == 0)      dm = dm_all = 1;
+        else if (strcmp(a, "--ccm") == 0)         ccm = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
-    printf("=== hybrid: %s bring-up, our frame only ===\n",
-           use_lib ? "library" : "no");
-    printf("geometry %ux%u, in 0x%08x, out 0x%08x\n", W, H, in_fmt, out_fmt);
+    if (inst != 1 && inst != 2) { printf("--isp must be 1 or 2\n"); return 1; }
+    isp_class = inst == 2 ? ISP_CLASS_B : ISP_CLASS_A;
+    const char *isp_node = inst == 2 ? "/dev/nvhost-isp.1" : "/dev/nvhost-isp";
 
-    if (use_lib && !lib_bring_up(w0, yuv_cfg)) {
+    printf("=== hybrid: %s bring-up%s, our frame only ===\n",
+           use_lib ? "library" : "no", hw_apply ? " + HwSettingsApply" : "");
+    printf("ISP-%c class 0x%02x, geometry %ux%u, in 0x%08x, out 0x%08x, "
+           "demosaic %s, matrix %s\n",
+           inst == 2 ? 'B' : 'A', isp_class, W, H, in_fmt, out_fmt,
+           dm_all ? "all blocks" : dm ? "coefficients" : "off",
+           ccm ? "on" : "off");
+
+    if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply)) {
         printf("library bring-up failed -- stopping\n");
         return 1;
     }
@@ -203,7 +308,7 @@ int main(int argc, char **argv)
      * open fails. But it opened it inside THIS process, so the descriptor is
      * in our own table -- find it and submit through that. The library's
      * context and its fence machinery stay live, which is the point. */
-    int isp_fd = open("/dev/nvhost-isp", O_RDWR);
+    int isp_fd = open(isp_node, O_RDWR);
     if (isp_fd < 0) {
         for (int fd = 0; fd < 256 && isp_fd < 0; fd++) {
             char p[64], t[128];
@@ -211,7 +316,7 @@ int main(int argc, char **argv)
             ssize_t k = readlink(p, t, sizeof t - 1);
             if (k <= 0) continue;
             t[k] = 0;
-            if (strcmp(t, "/dev/nvhost-isp") == 0) {
+            if (strcmp(t, isp_node) == 0) {
                 isp_fd = fd;
                 printf("channel is the library's: reusing fd %d\n", fd);
             }
@@ -254,10 +359,11 @@ int main(int argc, char **argv)
         nvmap_write(out_h, o, buf, out_size - o < chunk ? out_size - o : chunk);
     free(buf);
 
-    /* The frame, and nothing else. */
-    uint32_t cmd[64];
+    /* The frame, and nothing else -- plus, on request, the blocks the
+     * stock camera sends before its frames and we never had. */
+    uint32_t cmd[512];
     int n = 0, y_reloc, in_reloc, work_reloc;
-    cmd[n++] = OP_SETCLASS(ISP_CLASS_A, 0, 0);
+    cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
 
     /* The hybrid proper: the library selected the pipeline, but nothing in
      * its bring-up configures the memory output path, so the first attempt
@@ -268,6 +374,43 @@ int main(int argc, char **argv)
         cmd[n++] = OP_INCR(0x019, 1); cmd[n++] = 0x00000400;
         cmd[n++] = OP_INCR(0x01B, 2); cmd[n++] = 0x00000200;
                                       cmd[n++] = 0x00000002;
+    }
+
+    /* The demosaic: enable, then the two coefficient sets with their shift
+     * words. The two-part blocks are the stock's mode-1 shape -- one INCR
+     * for the head word, one NONINCR for the table behind it. */
+    if (dm) {
+        cmd[n++] = OP_INCR(0x900, 2); cmd[n++] = 1; cmd[n++] = 1;
+        cmd[n++] = OP_INCR(0x902, 1); cmd[n++] = isp_dm_902[0];
+        cmd[n++] = OP_NONINCR(0x903, 64);
+        for (int i = 0; i < 64; i++) cmd[n++] = isp_dm_903[i];
+        cmd[n++] = OP_INCR(0x904, 2); cmd[n++] = isp_dm_904[0]; cmd[n++] = isp_dm_904[1];
+        cmd[n++] = OP_INCR(0x906, 1); cmd[n++] = isp_dm_906[0];
+        cmd[n++] = OP_NONINCR(0x907, 36);
+        for (int i = 0; i < 36; i++) cmd[n++] = isp_dm_907[i];
+        cmd[n++] = OP_INCR(0x908, 1); cmd[n++] = isp_dm_908[0];
+    }
+    if (dm_all) {
+        cmd[n++] = OP_INCR(0x909, 7);
+        for (int i = 0; i < 7; i++) cmd[n++] = dm_909[i];
+        cmd[n++] = OP_INCR(0x910, 9);
+        for (int i = 0; i < 9; i++) cmd[n++] = dm_910[i];
+        cmd[n++] = OP_INCR(0x919, 1); cmd[n++] = dm_919[0];
+        cmd[n++] = OP_NONINCR(0x91a, 9);
+        for (int i = 1; i < 10; i++) cmd[n++] = dm_919[i];
+        cmd[n++] = OP_INCR(0x91b, 1); cmd[n++] = dm_91b[0];
+        cmd[n++] = OP_NONINCR(0x91c, 9);
+        for (int i = 1; i < 10; i++) cmd[n++] = dm_91b[i];
+        cmd[n++] = OP_INCR(0x91d, 1); cmd[n++] = dm_91d[0];
+        cmd[n++] = OP_NONINCR(0x91e, 9);
+        for (int i = 1; i < 10; i++) cmd[n++] = dm_91d[i];
+        cmd[n++] = OP_INCR(0x91f, 1); cmd[n++] = dm_91f[0];
+        cmd[n++] = OP_INCR(0x920, 10);
+        for (int i = 0; i < 10; i++) cmd[n++] = dm_920[i];
+    }
+    if (ccm) {
+        cmd[n++] = OP_INCR(0x600, 16);
+        for (int i = 0; i < 16; i++) cmd[n++] = ccm_600[i];
     }
 
     cmd[n++] = OP_INCR(0x053, 2);
@@ -289,7 +432,7 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE32, 1); cmd[n++] = W & 0x3FFF;
     cmd[n++] = OP_INCR(0xE30, 1); cmd[n++] = 1;
     cmd[n++] = OP_INCR(0x015, 1); cmd[n++] = 0x00000007;
-    cmd[n++] = OP_SETCLASS(ISP_CLASS_A, 0, 0);
+    cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
     cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (4 << 8) | sp_memory;
     cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (5 << 8) | sp_stats;
     cmd[n++] = OP_NONINCR(0x000, 1); cmd[n++] = (6 << 8) | sp_loadv;
@@ -309,7 +452,7 @@ int main(int argc, char **argv)
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp_memory, 1 };
-    uint32_t cls = ISP_CLASS_A;
+    uint32_t cls = isp_class;
     struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);

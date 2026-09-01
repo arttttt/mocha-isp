@@ -1585,6 +1585,11 @@ int main(int argc, char **argv)
     uint32_t image_def = (0u << BYPASS_PXL_TRANSFORM_OFFSET) |
                          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
                          IMAGE_DEF_DEST_ISP_B;
+    /* Gain of sixteen is unity on this sensor, and with the tablet lying in
+     * an ordinary room that puts the whole picture in the bottom five per
+     * cent of the range -- far too dark to tell a colour from a cast. Both
+     * are adjustable now, because judging the pipeline on a black frame
+     * tells us nothing about it. */
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
     /* The front sensor is on CIL E. The reference dump that had this word
      * at zero came from a session driving CIL A and B -- the other brick
@@ -1700,6 +1705,10 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
+        else if (strncmp(a, "--gain=", 7) == 0)
+            gain = (uint32_t)strtoul(a + 7, 0, 0);
+        else if (strncmp(a, "--coarse=", 9) == 0)
+            coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
             vi_height = (unsigned)strtoul(a + 12, 0, 0);
         else if (strncmp(a, "--emc=", 6) == 0)

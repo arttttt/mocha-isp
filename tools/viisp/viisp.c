@@ -627,6 +627,7 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 #include "isp_b_cal.h"
 #include "isp_stock.h"
 #include "isp_demosaic.h"
+#include "isp_real.h"
 
 /* Set once the coefficients have gone out, so they go out only the once.
  * dm_after says which frame to send them before: stock sends them after
@@ -634,6 +635,10 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  * the enable and the routing is a question the hardware can answer. */
 static int dm_sent;
 static int dm_after = 1;
+/* Stock's working configuration carries its geometry, so it is off unless
+ * asked for -- it belongs with stock's resolution, not a smaller one. */
+static int real_sent;
+static int use_real_pass;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -1399,6 +1404,67 @@ static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
     return rc;
 }
 
+/* The configuration a real frame actually runs under.
+ *
+ * The opening rounds carry placeholders: the same blocks, stand-in values.
+ * The working numbers arrive later, after the coefficients and after the
+ * warm-up frames -- and they are different. 0x800 is {85001000,00100010,
+ * 07780a00} here against {85001000,0,0} in the opening, 0xc00 is
+ * {00007901,0,01030a20} against {00000101,0,00100000}, and the tail of
+ * 0x400 changes entirely. We had been copying the placeholders.
+ *
+ * These carry the stock camera's geometry, so they belong with its
+ * resolution and not with a smaller one.
+ */
+static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
+{
+    uint32_t cmd_h = nvmap_create(4096 * 2);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+
+    static const struct { uint16_t m; uint16_t n; uint8_t noninc;
+                          const uint32_t *d; } blk[] = {
+        { 0x400, 12, 0, isp_real_400 }, { 0x800, 3, 0, isp_real_800 },
+        { 0x820, 3, 0, isp_real_820 }, { 0xc00, 3, 0, isp_real_c00 },
+        { 0x700, 16, 0, isp_real_700 }, { 0x750, 16, 0, isp_real_750 },
+        { 0xd00, 10, 0, isp_real_d00 }, { 0xd0a, 1, 0, isp_real_d0a },
+        { 0xd0b, 480, 1, isp_real_d0b }, { 0x600, 16, 0, isp_real_600 },
+    };
+
+    uint32_t *g = malloc(4096 * 2);
+    unsigned n = 0;
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    for (unsigned b = 0; b < sizeof blk / sizeof blk[0]; b++) {
+        g[n++] = blk[b].noninc ? OP_NONINCR(blk[b].m, blk[b].n)
+                               : OP_INCR(blk[b].m, blk[b].n);
+        for (unsigned i = 0; i < blk[b].n; i++) g[n++] = blk[b].d[i];
+    }
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
+    g[n++] = OP_IMM(0, sp);
+
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    free(g);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    printf("stock's working configuration: %u words, rc=%d (%s)\n", n, rc,
+           rc == 0 ? "ok" : strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 static void isp_stop(int isp_fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -1827,6 +1893,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
+        else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
@@ -2816,6 +2883,13 @@ int main(int argc, char **argv)
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                  u_off, v_off, work_iova);
                     dm_sent = 1;
+                }
+                /* And the working configuration after the first frame, in
+                 * the place the capture puts it. */
+                if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent
+                    && use_real_pass) {
+                    isp_real_pass(isp_fd, isp_sp, work_iova);
+                    real_sent = 1;
                 }
 
                 if (isp_fd >= 0 && out_iova && stats_h) {

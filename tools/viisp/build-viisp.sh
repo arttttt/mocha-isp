@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SRC="$ROOT/tools/viisp/viisp.c"
+DIR="$ROOT/tools/viisp"
 OUTDIR="$ROOT/build/out"
 NDK=/home/artem/Projects/toolchain/android-ndk-r21e
 CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi19-clang"
@@ -19,7 +19,8 @@ mkdir -p "$OUTDIR"
 # Delete first: a failed build must not leave a stale binary that looks fresh.
 OUT="$OUTDIR/viisp"
 rm -f "$OUT"
-$CC -std=gnu99 -pie -O2 -Wall -o "$OUT" "$SRC" -ldl
+$CC -std=gnu99 -pie -O2 -Wall -o "$OUT" \
+    "$DIR/viisp.c" "$DIR/viisp_platform.c" "$DIR/isp_geom.c" -ldl
 
 echo "=== built: $OUT ($(stat -c%s "$OUT") bytes) ==="
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$OUT" | grep NEEDED

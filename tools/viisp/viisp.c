@@ -19,15 +19,7 @@
  *                [--port=N] [--no-sensor] [--dump]
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <errno.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
+#include "viisp.h"
 
 /* The CSI pads sit in deep power down until something asks the PMC to let
  * them out, and reading the register confirms it: CSIE comes up as
@@ -36,92 +28,6 @@
  * program does not survive to the capture -- it has to happen here, after
  * the sensor is up. Offsets from the stock kernel's pmc.c; CSIE is bit 12
  * of the second request register per the driver's own table. */
-#define PMC_BASE            0x7000E400UL
-#define PMC_IO_DPD2_REQ     0x1C0
-#define PMC_DPD_CODE_OFF    0x40000000u
-#define PMC_DPD_BIT_CSIE    (1u << 12)
-
-/* The receiver's own clocks. Reading the clock controller shows csi (bit
- * 20 of the H group) and cile (bit 18 of W) switched off, while vi_sensor
- * is on -- so the registers accept everything, because nvhost powers VI for
- * the duration of an ioctl, and the lane interface still cannot receive.
- * Enabling them from outside does not hold: the kernel gates them again
- * during the run. So they go on here, in the same window as the shot.
- * Numbers from the stock kernel's clock table; the set registers only set
- * bits, which is why they are used rather than a read-modify-write. */
-#define CAR_BASE            0x60006000UL
-#define CAR_ENB_SET_H       0x328
-#define CAR_ENB_SET_W       0x448
-#define CAR_CSI_BIT_H       (1u << 20)
-#define CAR_CILE_BIT_W      (1u << 18)
-#define CAR_ENB_SET_X       0x284
-#define CAR_MIPICAL_BIT_H   (1u << 24)
-#define CAR_CLK72M_BIT_X    (1u << 17)
-#define CAR_ENB_SET_L       0x320
-#define CAR_RST_CLR_L       0x304
-#define CAR_VI_BIT_L        (1u << 20)
-#define CAR_RST_CLR_H       0x30C
-#define CAR_RST_CLR_W       0x43C
-
-static int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
-{
-    long page = sysconf(_SC_PAGESIZE);
-    unsigned long base = addr & ~(unsigned long)(page - 1);
-    int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) return -1;
-    void *m = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_SHARED,
-                   fd, (off_t)base);
-    if (m == MAP_FAILED) { close(fd); return -1; }
-    volatile uint32_t *r = (volatile uint32_t *)((char *)m + (addr - base));
-    if (before) *before = *r;
-    *r = val;
-    __sync_synchronize();
-    munmap(m, (size_t)page * 2);
-    close(fd);
-    return 0;
-}
-
-static int mem_rd(unsigned long addr, uint32_t *out)
-{
-    long page = sysconf(_SC_PAGESIZE);
-    unsigned long base = addr & ~(unsigned long)(page - 1);
-    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
-    if (fd < 0) return -1;
-    void *m = mmap(0, (size_t)page * 2, PROT_READ, MAP_SHARED, fd, (off_t)base);
-    if (m == MAP_FAILED) { close(fd); return -1; }
-    *out = *(volatile uint32_t *)((char *)m + (addr - base));
-    munmap(m, (size_t)page * 2);
-    close(fd);
-    return 0;
-}
-
-static void car_enable_csi_clocks(void)
-{
-    uint32_t b1 = 0, b2 = 0, b3 = 0;
-    /* csi and cile for the receiver; mipi-cal and clk72mhz for the
-     * calibration block, which cannot finish without them -- it reported
-     * "not done" while both of those were switched off. */
-    /* VI itself, which we had never switched on: its clock reads off in
-     * the L group. Registers answer regardless, because nvhost powers the
-     * module for the length of an ioctl -- but the parser and the write
-     * engine need the clock to actually run. */
-    mem_wr(CAR_BASE + CAR_ENB_SET_L, CAR_VI_BIT_L, 0);
-    mem_wr(CAR_BASE + CAR_RST_CLR_L, CAR_VI_BIT_L, 0);
-
-    mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
-    mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
-    mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);
-
-    /* Enabling a clock is only half of what the kernel's helper does: it
-     * also takes the block out of reset. A module left in reset accepts
-     * register writes and does nothing, without complaining -- which is
-     * what a calibration that starts and never finishes looks like. */
-    mem_wr(CAR_BASE + CAR_RST_CLR_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, 0);
-    mem_wr(CAR_BASE + CAR_RST_CLR_W, CAR_CILE_BIT_W, 0);
-
-    printf("  receiver clocks on and out of reset: H 0x%08x, W 0x%08x, X 0x%08x\n",
-           b1, b2, b3);
-}
 
 /* The physical layer has never been calibrated for this lane: CILE's entry
  * in the calibration block reads zero, meaning it was never even selected.
@@ -136,244 +42,10 @@ static void car_enable_csi_clocks(void)
  * What follows is the driver's sequence in full, in its order: override the
  * clock gate, clear status, drop DSI, raise the bias, deselect every lane,
  * then select ours and trigger. The steps are numbered as they are there. */
-#define MIPI_CAL_BASE       0x700E3000UL
-#define MIPI_CAL_CTRL       0x00
-#define MIPI_CAL_STATUS     0x08
-#define MIPI_CAL_CILA_CFG   0x14
-#define MIPI_CAL_CILB_CFG   0x18
-#define MIPI_CAL_CILC_CFG   0x1c
-#define MIPI_CAL_CILD_CFG   0x20
-#define MIPI_CAL_CILE_CFG   0x24
-#define MIPI_CAL_DSIA_CFG   0x38
-#define MIPI_CAL_DSIB_CFG   0x3c
-#define MIPI_BIAS_PAD_CFG0  0x58
-#define MIPI_BIAS_PAD_CFG2  0x60
-#define MIPI_CAL_DSIA_CFG2  0x64
-#define MIPI_CAL_DSIB_CFG2  0x68
-#define MIPI_CAL_CILC_CFG2  0x6c
-#define MIPI_CAL_CILD_CFG2  0x70
-#define MIPI_CAL_CSIE_CFG2  0x74
-#define MIPI_CAL_CIL_SEL    (1u << 21)
-#define MIPI_CAL_CLKSEL     (1u << 21)
-#define MIPI_CAL_DSI_SEL    (1u << 21)
-#define BIAS_E_VCLAMP_REF   (1u << 0)
-#define BIAS_PDVREG         (1u << 1)
-#define MIPI_CAL_DONE       (1u << 16)
-#define MIPI_CAL_ACTIVE     (1u << 0)
-#define MIPI_CAL_CLKEN_OVR  (1u << 4)
-#define MIPI_CAL_START      (0xau << 26 | 0x2u << 24 | 1u << 4 | 1u << 0)
-
-/* Read-modify-write, because most of the sequence touches one bit of a
- * register whose other fields carry production trim we must not lose. */
-static void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
-{
-    uint32_t cur = 0;
-    if (mem_rd(MIPI_CAL_BASE + off, &cur) < 0) return;
-    mem_wr(MIPI_CAL_BASE + off, (cur & ~mask) | (val & mask), 0);
-}
-
-static void mipi_calibrate_csie(void)
-{
-    uint32_t st = 0;
-
-    /* 1. Override the block's own clock gating. */
-    mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
-
-    /* 2. Clear the status bits. */
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0xF1F10000, 0);
-
-    /* 3. The display lanes are not ours; drop them. */
-    mipi_upd(MIPI_CAL_DSIA_CFG, MIPI_CAL_DSI_SEL, 0);
-    mipi_upd(MIPI_CAL_DSIB_CFG, MIPI_CAL_DSI_SEL, 0);
-
-    /* 4. The bias the pads calibrate against -- the step we had missing. */
-    mipi_upd(MIPI_BIAS_PAD_CFG0, BIAS_E_VCLAMP_REF, BIAS_E_VCLAMP_REF);
-    mipi_upd(MIPI_BIAS_PAD_CFG2, BIAS_PDVREG, 0);
-
-    /* 5. Deselect every lane and every clock, so only ours is left in. */
-    mipi_upd(MIPI_CAL_CILA_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_DSIA_CFG2, MIPI_CAL_CLKSEL, 0);
-    mipi_upd(MIPI_CAL_CILB_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_DSIB_CFG2, MIPI_CAL_CLKSEL, 0);
-    mipi_upd(MIPI_CAL_CILC_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_CILC_CFG2, MIPI_CAL_CLKSEL, 0);
-    mipi_upd(MIPI_CAL_CILD_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_CILD_CFG2, MIPI_CAL_CLKSEL, 0);
-    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
-
-    /* 6. Ours: lane E with its clock. */
-    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, MIPI_CAL_CIL_SEL);
-    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
-
-    /* 7. Trim and trigger in one word. */
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CTRL, MIPI_CAL_START, 0);
-
-    /* 8. The driver polls up to five hundred times at a couple of hundred
-     * microseconds; a single short sleep was not giving it time. */
-    int tries = 500;
-    while (tries--) {
-        if (mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &st) < 0) break;
-        if (st & MIPI_CAL_DONE) break;
-        usleep(300);
-    }
-    printf("  MIPI calibration: status 0x%08x after %d polls (%s%s)\n",
-           st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done",
-           (st & MIPI_CAL_ACTIVE) ? ", still active" : "");
-    {
-        /* Read back what the block actually holds. A calibration that stays
-         * active tells us nothing about which of the writes landed. */
-        uint32_t ctrl = 0, b0 = 0, b2 = 0, ce = 0, c2 = 0;
-        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CTRL, &ctrl);
-        mem_rd(MIPI_CAL_BASE + MIPI_BIAS_PAD_CFG0, &b0);
-        mem_rd(MIPI_CAL_BASE + MIPI_BIAS_PAD_CFG2, &b2);
-        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CILE_CFG, &ce);
-        mem_rd(MIPI_CAL_BASE + MIPI_CAL_CSIE_CFG2, &c2);
-        printf("    ctrl=%08x bias0=%08x bias2=%08x cile=%08x csie2=%08x\n",
-               ctrl, b0, b2, ce, c2);
-    }
-
-    /* 9. Leave the selection as the driver leaves it. */
-    mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
-    mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
-}
-
-static int pmc_dpd_release(uint32_t bit)
-{
-    long page = sysconf(_SC_PAGESIZE);
-    unsigned long addr = PMC_BASE + PMC_IO_DPD2_REQ;
-    unsigned long base = addr & ~(unsigned long)(page - 1);
-    int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) { printf("dpd: /dev/mem %s\n", strerror(errno)); return -1; }
-    void *m = mmap(0, (size_t)page * 2, PROT_READ | PROT_WRITE, MAP_SHARED,
-                   fd, (off_t)base);
-    if (m == MAP_FAILED) {
-        printf("dpd: mmap %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-    volatile uint32_t *r = (volatile uint32_t *)((char *)m + (addr - base));
-    uint32_t before = *r;
-    *r = PMC_DPD_CODE_OFF | bit;
-    __sync_synchronize();
-    uint32_t after = *r;
-    printf("  CSI pads out of deep power down: 0x%08x -> 0x%08x\n",
-           before, after);
-    munmap(m, (size_t)page * 2);
-    close(fd);
-    return 0;
-}
-
-/* ---- sensor node (stock kernel include/media/imx179.h) ---- */
-struct sensor_mode {
-    int xres, yres;
-    uint32_t frame_length, coarse_time;
-    uint16_t gain;
-};
-#define SENSOR_IOCTL_SET_MODE   _IOW('o', 1, struct sensor_mode)
-#define SENSOR_IOCTL_SET_POWER  _IOW('o', 20, uint32_t)
 
 /* The front sensor has its own shape entirely: a wider mode struct, and no
  * power call at all -- opening the node powers it up and closing it powers
  * it down. Modes: 2592x1944, 1920x1080, 1296x972, 1280x720. */
-struct ov5693_mode {
-    int res_x, res_y, fps;
-    uint32_t frame_length, coarse_time, coarse_time_short;
-    uint16_t gain;
-    uint8_t hdr_en;
-};
-#define OV5693_IOCTL_SET_MODE   _IOW('o', 1, struct ov5693_mode)
-
-/* ---- nvmap ---- */
-#define NVMAP_IOC_MAGIC 'N'
-struct nvmap_create_handle {
-    union { uint32_t id; uint32_t size; int32_t fd; };
-    uint32_t handle;
-};
-struct nvmap_alloc_handle { uint32_t handle, heap_mask, flags, align; };
-struct nvmap_rw_handle {
-    unsigned long addr; uint32_t handle, offset, elem_size,
-                  hmem_stride, user_stride, count;
-};
-struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; };
-#define NVMAP_IOC_CREATE     _IOWR(NVMAP_IOC_MAGIC, 0, struct nvmap_create_handle)
-#define NVMAP_IOC_ALLOC      _IOW(NVMAP_IOC_MAGIC, 3, struct nvmap_alloc_handle)
-/* Allocation that names the memory's kind. Stock's output format is the
- * block-linear one and it will not complete against an ordinary buffer --
- * the ISP simply never writes. This is how a block-linear surface is asked
- * for; the kind byte is what the format's top byte refers to. */
-struct nvmap_alloc_kind_handle {
-    uint32_t handle, heap_mask, flags, align;
-    uint8_t kind, comp_tags;
-};
-#define NVMAP_IOC_ALLOC_KIND \
-    _IOW(NVMAP_IOC_MAGIC, 100, struct nvmap_alloc_kind_handle)
-#define NVMAP_IOC_FREE       _IO(NVMAP_IOC_MAGIC, 4)
-#define NVMAP_IOC_WRITE      _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
-#define NVMAP_IOC_READ       _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
-#define NVMAP_IOC_PIN_MULT   _IOWR(NVMAP_IOC_MAGIC, 10, struct nvmap_pin_handle)
-#define NVMAP_IOC_UNPIN_MULT _IOW(NVMAP_IOC_MAGIC, 11, struct nvmap_pin_handle)
-#define NVMAP_HEAP_IOVMM     (1 << 30)
-#define NVMAP_HEAP_CARVEOUT_GENERIC (1 << 0)
-#define NVMAP_HANDLE_WRITE_COMBINE 2
-
-/* ---- nvhost register access ---- */
-#define NVHOST_IOCTL_MAGIC 'H'
-struct regrdwr_args {
-    uint32_t id, num_offsets, block_size, offsets, values, write;
-};
-struct nvhost_get_param_arg { uint32_t param, value; };
-struct nvhost_set_nvmap_fd_args { uint32_t fd; };
-struct nvhost_ctrl_syncpt_read_args { uint32_t id, value; };
-struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
-#define NVHOST_IOCTL_CHANNEL_SET_CLK_RATE \
-    _IOW(NVHOST_IOCTL_MAGIC, 10, struct nvhost_clk_rate_args)
-#define NVHOST_IOCTL_CTRL_SYNCPT_READ \
-    _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
-struct nvhost_ctrl_syncpt_incr_args { uint32_t id; };
-#define NVHOST_IOCTL_CTRL_SYNCPT_INCR \
-    _IOW(NVHOST_IOCTL_MAGIC, 2, struct nvhost_ctrl_syncpt_incr_args)
-
-/* host1x's own class, and the method that parks a channel until a syncpoint
- * reaches a threshold. A parked job holds everything it pinned, which is how
- * the buffer stays mapped for longer than the submit itself. */
-#define HOST1X_CLASS_ID             0x01
-#define HOST1X_WAIT_SYNCPT          0x08
-struct nvhost_syncpt_incr { uint32_t syncpt_id, syncpt_incrs; };
-struct nvhost_cmdbuf { uint32_t mem, offset, words; };
-struct nvhost_reloc { uint32_t cmdbuf_mem, cmdbuf_offset, target, target_offset; };
-struct nvhost_reloc_shift { uint32_t shift; };
-struct nvhost_fence { uint32_t syncpt_id, value; };
-struct nvhost32_submit_args {
-    uint32_t submit_version, num_syncpt_incrs, num_cmdbufs, num_relocs,
-             num_waitchks, timeout, syncpt_incrs, cmdbufs, relocs,
-             reloc_shifts, waitchks, waitbases, class_ids, pad[2],
-             fences, fence;
-} __attribute__((packed));
-#define NVHOST32_IOCTL_CHANNEL_SUBMIT \
-    _IOWR(NVHOST_IOCTL_MAGIC, 15, struct nvhost32_submit_args)
-
-/* Host1x opcodes and the VI class. The surface address cannot be written
- * by hand: it is an address in VI's own translation context, and the only
- * way to get one is to let the kernel relocate a handle for us -- which
- * means a real submit rather than a register poke.
- *
- * Method numbers are not the register offsets. Two known pairs from the
- * kernel's own VI gather fix them: the image definition is offset 0x10C on
- * channel 0 and method 0x242, and 0x20C on channel 1 and method 0x282. So
- * method = offset/4 + 0x1FF, and both pairs agree. */
-#define OP_SETCLASS(c)     ((0u << 28) | ((c) << 6))
-#define OP_INCR(m, n)      ((1u << 28) | ((m) << 16) | (n))
-#define OP_NONINCR(m, n)   ((2u << 28) | ((m) << 16) | (n))
-#define OP_IMM(m, v)       ((4u << 28) | ((m) << 16) | ((v) & 0xffff))
-#define VI_CLASS_ID        0x30
-#define VI_METHOD(off)     (((off) >> 2) + 0x1FF)
-#define NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD \
-    _IOW(NVHOST_IOCTL_MAGIC, 5, struct nvhost_set_nvmap_fd_args)
-#define NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT \
-    _IOWR(NVHOST_IOCTL_MAGIC, 16, struct nvhost_get_param_arg)
-#define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR \
-    _IOWR(NVHOST_IOCTL_MAGIC, 14, struct regrdwr_args)
 
 /* ---- VI / CSI registers (24.1 registers.h, t124_registers.h) ---- */
 #define VI_CSI_BASE(n)              (0x100 + (n) * 0x100)
@@ -531,98 +203,6 @@ struct nvhost32_submit_args {
 #define CSI_PP_TOP_FIELD_FRAME_OFFSET   0
 #define CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET 4
 
-static int nvmap_fd = -1, vi_fd = -1;
-
-/* Whether the three output surfaces are handed over in the order we assume
- * or the other way round. Set once from the command line and read where the
- * frame is built, rather than threaded through a parameter list that is
- * already long enough to hide things in. */
-static int plane_rev = 0;
-
-static int vi_reg(uint32_t off, uint32_t *val, int write)
-{
-    uint32_t offsets[1] = { off }, values[1] = { *val };
-    struct regrdwr_args a;
-    memset(&a, 0, sizeof a);
-    a.id = 0;
-    a.num_offsets = 1;
-    a.block_size = 4;
-    a.offsets = (uint32_t)(uintptr_t)offsets;
-    a.values = (uint32_t)(uintptr_t)values;
-    a.write = (uint32_t)write;
-    int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a);
-    if (rc == 0 && !write) *val = values[0];
-    return rc;
-}
-/* Writes go into a batch and leave together. nvhost powers the module for
- * the duration of one ioctl and lets it go again afterwards, so a setup
- * spread over forty separate calls is forty separate power-ups: the
- * receiver never stays on long enough to lock, which is what a correct
- * configuration that captures nothing looks like. One call keeps the whole
- * sequence inside a single powered window. */
-#define VI_BATCH_MAX 64
-static uint32_t batch_off[VI_BATCH_MAX], batch_val[VI_BATCH_MAX];
-static int batch_n;
-
-static void vi_wr(uint32_t off, uint32_t val)
-{
-    if (batch_n >= VI_BATCH_MAX) { printf("  batch full, dropping 0x%03x\n", off); return; }
-    batch_off[batch_n] = off;
-    batch_val[batch_n] = val;
-    batch_n++;
-}
-
-/* The syncpoint counters live behind the control node, not the channel. */
-static uint32_t syncpt_read(uint32_t id)
-{
-    struct nvhost_ctrl_syncpt_read_args r = { id, 0 };
-    int fd = open("/dev/nvhost-ctrl", O_RDWR);
-    if (fd < 0) return 0;
-    ioctl(fd, NVHOST_IOCTL_CTRL_SYNCPT_READ, &r);
-    close(fd);
-    return r.value;
-}
-
-static int vi_flush(const char *what)
-{
-    if (!batch_n) return 0;
-    struct regrdwr_args a;
-    memset(&a, 0, sizeof a);
-    a.id = 0;
-    a.num_offsets = (uint32_t)batch_n;
-    a.block_size = 4;
-    a.offsets = (uint32_t)(uintptr_t)batch_off;
-    a.values = (uint32_t)(uintptr_t)batch_val;
-    a.write = 1;
-    errno = 0;
-    int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &a);
-    /* A null label means the caller reports for itself -- the per-shot loop
-     * runs this often enough that a line each would bury the result. */
-    if (what)
-        printf("  %s: %d registers in one call, rc=%d (%s)\n",
-               what, batch_n, rc, rc == 0 ? "ok" : strerror(errno));
-    batch_n = 0;
-    return rc;
-}
-static uint32_t vi_rd(uint32_t off)
-{
-    uint32_t v = 0;
-    if (vi_reg(off, &v, 0)) return 0xdeadbeef;
-    return v;
-}
-
-static uint32_t nvmap_create(uint32_t size);
-static int nvmap_alloc(uint32_t h);
-static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
-
-/* Put the ISP in the state where it takes a frame off the VI interface and
- * writes the result to our buffer. The geometry, format and plane addresses
- * are the same registers the reprocess tool drives; what changes is that no
- * input descriptor is armed -- there is no source buffer to describe -- and
- * the trigger says sensor rather than memory.
- *
- * Submitted once, before the shot. Whether the ISP then needs re-arming per
- * frame is one of the things this is meant to find out. */
 /* The calibration gather, taken verbatim from the 24.1 ISP driver, which in
  * turn captured it off the stock camera on this device. Fifteen hundred
  * words of it, and there is no reconstructing that from a register list --
@@ -635,47 +215,6 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 #include "isp_stock.h"
 #include "isp_demosaic.h"
 #include "isp_real.h"
-
-/* Set once the coefficients have gone out, so they go out only the once.
- * dm_after says which frame to send them before: stock sends them after
- * its first, but whether that timing matters or only the ordering against
- * the enable and the routing is a question the hardware can answer. */
-static int dm_sent;
-static int dm_after = 1;
-/* Stock's working configuration carries its geometry, so it is off unless
- * asked for -- it belongs with stock's resolution, not a smaller one. */
-static int real_sent;
-static int use_real_pass;
-/* Whether to arm the statistics and load conditions the way stock does. */
-static int arm_stats;
-/* Whether to point the working-memory registers at our own scratch instead
- * of leaving the captured values. It is the right thing in principle --
- * those are the stock process's addresses -- but done this way it stops
- * the frame completing, so it stays behind a flag until the sizes each
- * stage wants are known rather than guessed. */
-static int own_scratch;
-/* The pixel transform's control word, which the stock camera sets and we
- * never did -- while leaving the transform itself switched on. */
-static uint32_t rgb2y = 0x001c984c;
-/* Whether to run stock's warm-up before the first real frame, and whether
- * the block enable goes where stock puts it -- inside that warm-up's first
- * frame, once for the session -- instead of at open and in the setup. */
-static int do_warmup;
-static int enable_late;
-/* Whether to send the stock camera's colour-conversion coefficients, and
- * whether to send the three geometry-bearing blocks beside them -- those
- * take the channel down whatever they carry, so they are off. */
-/* On, because an empty matrix means a black picture -- proved by putting
- * ours into the stock camera, which went black on the spot. Everything we
- * have captured until today was taken with it empty. */
-static int ccm = 3;
-static int geo_blocks;
-
-/* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
- * because that is what the stock camera gives it -- its eight sit exactly
- * that far apart in the capture. Sixty-four kilobytes only ever looked
- * sufficient because the statistics stage was never asked to finish. */
-static unsigned stats_kb = 512, work_kb = 512;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -752,7 +291,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t gpp_gain, int luma_lo,
                     uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
                     int zero_init, int apply, uint32_t stats_ctrl,
-                    int stock_cfg)
+                    int stock_cfg, const struct geom_cfg *geo)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
@@ -926,10 +465,10 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x700, 16);
     g[n++] = 0x00000001; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00000000; g[n++] = 0x00001a40;
+    g[n++] = 0x00000000; g[n++] = geo->x700_w5;
     g[n++] = 0x00000000; g[n++] = 0x10000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    g[n++] = 0x00001000; g[n++] = 0x00001a00;
+    g[n++] = 0x00001000; g[n++] = geo->x700_w11;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
@@ -944,9 +483,9 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
     g[n++] = OP_INCR(0xD20, 6);
-    g[n++] = 0x00001101; g[n++] = 0x00000000;
-    g[n++] = 0x00210000; g[n++] = 0x00210000;
-    g[n++] = 0x00210000; g[n++] = 0x00210000;
+    g[n++] = geo->d20_mode; g[n++] = 0x00000000;
+    g[n++] = geo->d20_step; g[n++] = geo->d20_step;
+    g[n++] = geo->d20_step; g[n++] = geo->d20_step;
 
     g[n++] = OP_INCR(0x900, 2);
     g[n++] = 0x00000001; g[n++] = 0x00000001;
@@ -982,20 +521,20 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x909, 7);
     g[n++] = 0x00000001; g[n++] = 0xfc000f00;
     g[n++] = 0xf680f320; g[n++] = 0x0d80fde0;
-    g[n++] = 0x00000030; g[n++] = 0x1400002a;
+    g[n++] = geo->s909_w4; g[n++] = 0x1400002a;
     g[n++] = 0x3c00002b;
 
     g[n++] = OP_INCR(0x910, 9);
     g[n++] = 0x00000003; g[n++] = 0x00000028;
-    g[n++] = 0x01480029; g[n++] = 0x0003030b;
+    g[n++] = 0x01480029; g[n++] = geo->s910_w3;
     g[n++] = 0x00990030; g[n++] = 0x00000800;
-    g[n++] = 0x007b0666; g[n++] = 0x00000036;
-    g[n++] = 0x00001f1f;
+    g[n++] = 0x007b0666; g[n++] = geo->s910_w7;
+    g[n++] = geo->s910_w8;
 
     g[n++] = OP_INCR(0x91B, 1); g[n++] = 0x00000000;
     g[n++] = OP_NONINCR(0x91C, 9);
     g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = 0x00000001; g[n++] = 0x00000025;
+    g[n++] = 0x00000001; g[n++] = geo->s91c_w5;
     g[n++] = 0x00000000; g[n++] = 0x00000026; g[n++] = 0x00000361;
     g[n++] = OP_INCR(0x91D, 1); g[n++] = 0x00000000;
     g[n++] = OP_NONINCR(0x91E, 9);
@@ -1675,7 +1214,8 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * described a frame nearly twice the size of the one arriving, so the
      * stage that walks the picture was reading rows that were not there,
      * and what it computed for the luma was nothing. */
-    uint32_t geo = ((H - 32) << 16) | (W - 32);
+    uint32_t geo_word = ((H - 32) << 16) | (W - 32);
+    const struct geom_cfg *geo = geom_for(W, H);
     /* Measured, not derived. The stock camera has now been captured twice
      * -- at 2592 by 1944, and at 1280 by 720 in its own video mode -- so
      * these are its numbers for the frame in hand rather than a formula
@@ -1687,30 +1227,30 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * The geometry word is the frame less thirty-two each way, and both
      * captures agree on that. The others do not follow from any rule two
      * points can settle, so they are taken as they came. */
-    int full = (W >= 2592);
+    const struct geom_cfg *geo = geom_for(W, H);
     if (geo_blocks) {
     g[n++] = OP_INCR(0x800, 3);
-    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo_word;
     g[n++] = OP_INCR(0x820, 3);
-    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo_word;
     g[n++] = OP_INCR(0xc00, 3);
-    g[n++] = full ? 0x00007901 : 0x00005a01;
+    g[n++] = geo->c00_w0;
     g[n++] = 0x00000000;
-    g[n++] = full ? 0x01030a20 : ((0x0082u << 16) | W);
+    g[n++] = (geo->c00_w2_hi << 16) | W;
 
     /* And this one changes with the frame as well, which the diff between
      * the two captures turned up and I had not known: every word but the
      * first and the last is different at the smaller size. */
     g[n++] = OP_INCR(0xd00, 10);
     g[n++] = 0x00000001;
-    g[n++] = full ? 0x00ca4580 : 0x01999990;
-    g[n++] = full ? 0x006522c0 : 0x00ccccc0;
-    g[n++] = full ? 0x00ca4580 : 0x01999990;
-    g[n++] = full ? 0x010db200 : 0x02222220;
-    g[n++] = full ? 0x0086d900 : 0x01111110;
-    g[n++] = full ? 0x010db200 : 0x02222220;
-    g[n++] = full ? 0x05100288 : 0x02800140;
-    g[n++] = full ? 0x03cc01e6 : 0x01de00ee;
+    g[n++] = geo->d00[0];
+    g[n++] = geo->d00[1];
+    g[n++] = geo->d00[2];
+    g[n++] = geo->d00[3];
+    g[n++] = geo->d00[4];
+    g[n++] = geo->d00[5];
+    g[n++] = geo->d00[6];
+    g[n++] = geo->d00[7];
     g[n++] = 0x00000021;
     }
     /* Still behind the flag. With the large frame's numbers this group took
@@ -1737,10 +1277,10 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     /* And this tail is per-resolution too: the small capture has different
      * numbers here, and sending the large frame's was another way of
      * describing the wrong picture. */
-    g[n++] = full ? 0x00280010 : 0x00130020;
-    g[n++] = full ? 0x0003003f : 0x0002003f;
-    g[n++] = full ? 0x001d002c : 0x000a0028;
-    g[n++] = full ? 0x0002003f : 0x0001003f;
+    g[n++] = geo->p400_w8;
+    g[n++] = geo->p400_w9;
+    g[n++] = geo->p400_w10;
+    g[n++] = geo->p400_w11;
 
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
@@ -1988,77 +1528,6 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     return rc;
 }
 
-static uint32_t nvmap_create(uint32_t size) {
-    struct nvmap_create_handle ch = { .size = size };
-    if (ioctl(nvmap_fd, NVMAP_IOC_CREATE, &ch) < 0) { perror("nvmap create"); return 0; }
-    return ch.handle;
-}
-/* VI reaches memory through its own translation context, and an address
- * that nvmap hands us for the virtual heap need not mean anything there --
- * a write would go nowhere, silently, however right the rest is. Carveout
- * is physically contiguous, so the address is the address. */
-/* Contiguous by default. Out of the scattered heap the address nvmap hands
- * back is not one VI can reach: the memory controller logs a translation
- * fault on the buffer's own base the moment the capture runs long enough to
- * outlive the host1x job that mapped it, and the picture stops at whatever
- * row that happened on. Out of the carveout heap those faults do not occur
- * at all. --iovmm asks for the old behaviour. */
-static uint32_t alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
-
-static int nvmap_alloc(uint32_t h) {
-    struct nvmap_alloc_handle ah = { h, alloc_heap,
-                                     NVMAP_HANDLE_WRITE_COMBINE, 4096 };
-    if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC, &ah) < 0) { perror("nvmap alloc"); return -1; }
-    return 0;
-}
-
-/* The same, but naming the memory's kind. Stock's output format is
- * block-linear and the ISP never writes a byte against a surface that is
- * not, which is why that format has always come back untouched here. */
-static int nvmap_alloc_kind(uint32_t h, unsigned kind) {
-    struct nvmap_alloc_kind_handle ak;
-    memset(&ak, 0, sizeof ak);
-    ak.handle = h;
-    ak.heap_mask = alloc_heap;
-    ak.flags = NVMAP_HANDLE_WRITE_COMBINE;
-    ak.align = 4096;
-    ak.kind = (uint8_t)kind;
-    if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC_KIND, &ak) < 0) {
-        printf("nvmap alloc kind 0x%02x: %s\n", kind, strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-static uint32_t nvmap_pin(uint32_t h) {
-    struct nvmap_pin_handle ph = { h, 0, 1 };
-    if (ioctl(nvmap_fd, NVMAP_IOC_PIN_MULT, &ph) < 0) { perror("nvmap pin"); return 0; }
-    return (uint32_t)ph.addr;
-}
-static void nvmap_unpin(uint32_t h) {
-    struct nvmap_pin_handle ph = { h, 0, 1 };
-    ioctl(nvmap_fd, NVMAP_IOC_UNPIN_MULT, &ph);
-}
-/* If the engine wrote through a different mapping than the one we read
- * back through, the data can be sitting there while our read returns what
- * was in cache -- indistinguishable from a capture that never happened. */
-struct nvmap_cache_op {
-    unsigned long addr;
-    uint32_t handle, len;
-    int32_t op;
-};
-#define NVMAP_IOC_CACHE   _IOW(NVMAP_IOC_MAGIC, 12, struct nvmap_cache_op)
-#define NVMAP_CACHE_OP_INV 1
-
-static void nvmap_invalidate(uint32_t h, uint32_t len) {
-    struct nvmap_cache_op c = { 0, h, len, NVMAP_CACHE_OP_INV };
-    ioctl(nvmap_fd, NVMAP_IOC_CACHE, &c);
-}
-
-static int nvmap_rw(uint32_t h, uint32_t off, void *d, uint32_t n, int wr) {
-    struct nvmap_rw_handle rw = { (unsigned long)d, h, off, n, n, n, 1 };
-    return ioctl(nvmap_fd, wr ? NVMAP_IOC_WRITE : NVMAP_IOC_READ, &rw);
-}
-
 int main(int argc, char **argv)
 {
     /* Default to the front camera: it is the one that still works through
@@ -2145,7 +1614,8 @@ int main(int argc, char **argv)
     uint32_t isp_in_fmt = 0;
     uint32_t gpp_gain = 0x3fff0000;
     int luma_lo = 0;
-    uint32_t in_dims = 0x00780078, in_mode = 1, in_phase = 0;
+    uint32_t in_dims = 0, in_mode = 1, in_phase = 0;
+    int in_dims_set = 0, in_phase_set = 0;
     /* The channel-to-ISP interface. Three is the only value anything names,
      * and what the rest of the field means has never been looked at -- it
      * is the one register on the VI side that describes the handover. */
@@ -2253,11 +1723,11 @@ int main(int argc, char **argv)
             gpp_gain = (uint32_t)strtoul(a + 6, 0, 16);
         else if (strcmp(a, "--luma-lo") == 0) luma_lo = 1;
         else if (strncmp(a, "--in-dims=", 10) == 0)
-            in_dims = (uint32_t)strtoul(a + 10, 0, 16);
+            { in_dims = (uint32_t)strtoul(a + 10, 0, 16); in_dims_set = 1; }
         else if (strncmp(a, "--in-mode=", 10) == 0)
             in_mode = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-phase=", 11) == 0)
-            in_phase = (uint32_t)strtoul(a + 11, 0, 16);
+            { in_phase = (uint32_t)strtoul(a + 11, 0, 16); in_phase_set = 1; }
         else if (strncmp(a, "--ispintf=", 10) == 0)
             ispintf = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
@@ -2291,6 +1761,15 @@ int main(int argc, char **argv)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
     }
+
+    /* The resolution-dependent set, keyed to the exact size: the stock
+     * camera refuses to run when these do not agree with the frame. */
+    const struct geom_cfg *geo = geom_for(W, H);
+    if (W != 2592 && W != 1280)
+        printf("WARNING: no measured geometry for %ux%u -- using the"
+               " nearest captured set\n", W, H);
+    if (!in_dims_set) in_dims = geo->in_dims;
+    if (!in_phase_set) in_phase = geo->in_phase;
 
     uint32_t base = VI_CSI_BASE(port);
     uint32_t stride = W * 2;                 /* RAW10 lands in 16-bit words */
@@ -2555,7 +2034,8 @@ int main(int argc, char **argv)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
                      isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase, zero_init, isp_apply, stats_ctrl, stock_cfg);
+                     in_phase, zero_init, isp_apply, stats_ctrl, stock_cfg,
+                     geo);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);

@@ -1601,6 +1601,7 @@ int main(int argc, char **argv)
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
     uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
+    int fast_arm = 0;   /* --fast-arm: arm the next ISP frame right after the last completes */
     /* The memory-side rate the channel asks for. The driver does not set a
      * number here at all -- it computes an isochronous bandwidth from the
      * frame size and sets a latency allowance, neither of which we can reach
@@ -1704,6 +1705,7 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
+        else if (strcmp(a, "--fast-arm") == 0)    fast_arm = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2895,14 +2897,21 @@ int main(int argc, char **argv)
                     }
                     /* A moment beyond the condition, because the last
                      * transfer may still be draining when it fires. */
-                    usleep(20000);
+                    if (!fast_arm) usleep(20000);
                     printf("  ISP wrote after %dms%s\n", w2,
                            syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
                 }
 
                 /* One whole frame from the start, plus what the caller asks
-                 * for on top. */
-                usleep((useconds_t)period * 500 + settle * 1000);
+                 * for on top -- unless --fast-arm. The sensor's active part
+                 * is about a third of the 66 ms period; a trigger that
+                 * arrives a quarter of a second after the last frame lands
+                 * at a random phase, and inside the active part it catches
+                 * a frame already under way: the receiver flags it (parser
+                 * 0x34, 0x1b4) and the block never completes. The stock
+                 * camera arms the next frame the moment the previous one is
+                 * done, inside the blanking. */
+                if (!fast_arm) usleep((useconds_t)period * 500 + settle * 1000);
                 mwaited = settle;
                 done = started;
             }

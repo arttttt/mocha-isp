@@ -1673,6 +1673,7 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * captures agree on that. The others do not follow from any rule two
      * points can settle, so they are taken as they came. */
     int full = (W >= 2592);
+    if (geo_blocks) {
     g[n++] = OP_INCR(0x800, 3);
     g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
     g[n++] = OP_INCR(0x820, 3);
@@ -1696,7 +1697,12 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = full ? 0x05100288 : 0x02800140;
     g[n++] = full ? 0x03cc01e6 : 0x01de00ee;
     g[n++] = 0x00000021;
-    (void)geo_blocks;
+    }
+    /* Still behind the flag. With the large frame's numbers this group took
+     * the channel down, and with the small frame's own numbers, measured
+     * from a second capture at exactly our size, it takes the channel down
+     * too. So it is not the values: this configuration will not accept
+     * these blocks, and the run that works does not send them. */
 
     /* The output stage, with the four words we had been leaving as a stub.
      * Every fractional field in ours was zero, which builds no luminance at

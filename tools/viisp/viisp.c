@@ -1181,7 +1181,13 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    uint32_t g[48];
+    /* 48 was enough without the geometry group and eleven words short with
+     * it: the tail of the matrix went over the end of the array and into
+     * the return address, and the crash landed at 0x40000024 with the
+     * matrix words in the saved registers. Every run of --geo-blocks died
+     * this way, which is what "the geometry blocks take the channel down"
+     * actually was. */
+    uint32_t g[128];
     int n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
 
@@ -1525,6 +1531,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
 
 int main(int argc, char **argv)
 {
+    /* Through adb the output is a pipe and fully buffered, so a crash takes
+     * the last screen of it along; the log then ends several steps before
+     * the place that died. Unbuffered, every line is out before the next
+     * thing happens. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     /* Default to the front camera: it is the one that still works through
      * the stock app, so its live register values are on record and a
      * mismatch means our configuration, not the hardware. The rear does not

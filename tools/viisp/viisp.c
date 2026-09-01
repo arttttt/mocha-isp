@@ -951,9 +951,13 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * writes it -- not stock, not us, we only clear it -- and the stage it
      * belongs to is silent here alongside the demosaic. Worth one value. */
     if (stats_ctrl) { g[n++] = OP_INCR(0x902, 1); g[n++] = stats_ctrl; }
+    /* The shift fields, and ours were a step too high. Injected into the
+     * stock camera in place of its own they made its picture brighter --
+     * 137.9 against 124.6 by measurement, and visibly so -- which is what
+     * one extra step of scaling does to every demosaic coefficient. */
     g[n++] = OP_INCR(0x904, 2);
-    g[n++] = 0x00005555; g[n++] = 0x00000001;
-    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
+    g[n++] = 0x00004444; g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00004334;
 
     /* Three of these words are addresses, not settings: a base and two
      * windows a fixed distance into it. We had been sending the stock

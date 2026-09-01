@@ -21,6 +21,7 @@ int enable_late;
 int per_frame_cal = 1;
 int geo_blocks;
 int stream_xfer;
+uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;
 uint32_t rgb2y = 0x001c984c;

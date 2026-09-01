@@ -40,6 +40,7 @@
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 
 /* ---- nvmap ---- */
 #define NVMAP_IOC_MAGIC 'N'
@@ -353,7 +354,7 @@ int main(int argc, char **argv)
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
     int dm = 0, dm_all = 0, ccm = 0, commit = 0, pipe = 0, two_pass = 0;
-    int dims = 0, full = 0, yuv = 0;
+    int dims = 0, full = 0, yuv = 0, xfer_stream = 0;
     uint32_t enable = 0x00000007;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -375,6 +376,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dims") == 0)        dims = 1;
         else if (strcmp(a, "--full") == 0)        full = 1;
         else if (strcmp(a, "--yuv") == 0)         yuv = 1;
+        else if (strcmp(a, "--xfer-stream") == 0) xfer_stream = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -488,7 +490,18 @@ int main(int argc, char **argv)
      * submitted cleanly and wrote nothing. These are the DMA thresholds our
      * own init sends -- output burst, input burst, mode -- and they are the
      * part that has to come from us. --no-dma leaves them out. */
-    if (dma_init) {
+    if (xfer_stream) {
+        /* The transfer block as the stock camera runs with it, with the
+         * last word switched to the memory source. The four leading words
+         * turned out to be what puts the block into its full pipeline on
+         * the VI path (viisp --stream-xfer); here they go together with
+         * 0x01C = 2, which the ablation on the live camera showed to be the
+         * source select (1 = VI, 2 = memory). */
+        cmd[n++] = OP_INCR(0x018, 5);
+        cmd[n++] = 0x0a00500a; cmd[n++] = 0x00008089;
+        cmd[n++] = 0x013645cb; cmd[n++] = 0x000001e7;
+        cmd[n++] = 0x00000002;
+    } else if (dma_init) {
         cmd[n++] = OP_INCR(0x019, 1); cmd[n++] = 0x00000400;
         cmd[n++] = OP_INCR(0x01B, 2); cmd[n++] = 0x00000200;
                                       cmd[n++] = 0x00000002;
@@ -698,11 +711,19 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("submitted, fence=%u\n", sa.fence);
+    struct timeval t0, t1;
+    gettimeofday(&t0, 0);
     struct nvhost_ctrl_syncpt_waitex_args wa = { sp_memory, sa.fence, 5000, 0 };
     if (ioctl(ctrl_fd, NVHOST_IOCTL_CTRL_SYNCPT_WAITEX, &wa) < 0)
         printf("TIMEOUT waiting for syncpt %u\n", sp_memory);
-    else
-        printf("done, syncpt value %u\n", wa.value);
+    else {
+        gettimeofday(&t1, 0);
+        double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_usec - t0.tv_usec) / 1e3;
+        /* No sensor in the way here: this is the block's own time for the
+         * frame, submission included. */
+        printf("done, syncpt value %u, %.1f ms for %ux%u (%.0f Mpix/s)\n",
+               wa.value, ms, W, H, (double)W * H / ms / 1e3);
+    }
 
     /* Planar read-back: each plane on its own. */
     if (yuv) {

@@ -1021,13 +1021,20 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
     g[n++] = 0x00000000; g[n++] = 0x00000000;
-    /* Behind a flag: with stock's own coefficients here the block stops
-     * writing anything at all, so they want something else we have not
-     * found yet. The empty matrix at least produces a frame. */
-    g[n++] = 0x00000000; g[n++] = ccm ? 0xf9500800 : 0;
-    g[n++] = ccm ? 0x0000fec0 : 0; g[n++] = ccm ? 0x096004c0 : 0;
-    g[n++] = ccm ? 0x000001d0 : 0; g[n++] = ccm ? 0xfac0fd50 : 0;
-    g[n++] = ccm ? 0x00000800 : 0; g[n++] = 0x00000000;
+    /* A row at a time, because the whole matrix at once takes the channel
+     * down. The words are signed pairs in eleven fractional bits, 0x0800
+     * being one, and they come in three rows: the first builds the
+     * luminance, the other two the colour differences. Sending only the
+     * first tells us whether it is the arithmetic the block objects to or
+     * the amount of it. */
+    g[n++] = 0x00000000;
+    g[n++] = ccm >= 1 ? 0xf9500800 : 0;
+    g[n++] = ccm >= 1 ? 0x0000fec0 : 0;
+    g[n++] = ccm >= 2 ? 0x096004c0 : 0;
+    g[n++] = ccm >= 2 ? 0x000001d0 : 0;
+    g[n++] = ccm >= 3 ? 0xfac0fd50 : 0;
+    g[n++] = ccm >= 3 ? 0x00000800 : 0;
+    g[n++] = 0x00000000;
     /* Three per-channel words. The reprocess tool carries the same
      * 0x3fff0000 here and comes out monochrome too, which makes this the
      * one value both paths share and both paths fail on. The output is also
@@ -2057,7 +2064,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
-        else if (strcmp(a, "--ccm") == 0)         ccm = 1;
+        else if (strcmp(a, "--ccm") == 0)         ccm = 3;
+        else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
         else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
                                                     enable_late = 1; }
         else if (strncmp(a, "--rgb2y=", 8) == 0)

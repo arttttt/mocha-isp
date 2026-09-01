@@ -1661,21 +1661,27 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * stage that walks the picture was reading rows that were not there,
      * and what it computed for the luma was nothing. */
     uint32_t geo = ((H - 32) << 16) | (W - 32);
-    /* Behind a flag, because these three take the channel down whatever
-     * they carry: with our own pointer, with stock's pointer, with stock's
-     * geometry and with geometry derived for the frame in hand. It is the
-     * blocks themselves this configuration will not accept, not the numbers
-     * in them -- the working run does not send them at all. */
-    if (geo_blocks) {
-        g[n++] = OP_INCR(0x800, 3);
-        g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
-        g[n++] = OP_INCR(0x820, 3);
-        g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
-        g[n++] = OP_INCR(0xc00, 3);
-        g[n++] = 0x00007901; g[n++] = 0x00000000;
-        g[n++] = (0x0103u << 16) | W;
-    }
-    (void)geo;
+    /* Measured, not derived. The stock camera has now been captured twice
+     * -- at 2592 by 1944, and at 1280 by 720 in its own video mode -- so
+     * these are its numbers for the frame in hand rather than a formula
+     * fitted through a single point. Earlier attempts sent the large
+     * frame's numbers at the small size and took the channel down, which
+     * looked like the blocks being unacceptable and was really them
+     * describing a picture nearly twice the size of the one arriving.
+     *
+     * The geometry word is the frame less thirty-two each way, and both
+     * captures agree on that. The others do not follow from any rule two
+     * points can settle, so they are taken as they came. */
+    int full = (W >= 2592);
+    g[n++] = OP_INCR(0x800, 3);
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = OP_INCR(0x820, 3);
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = OP_INCR(0xc00, 3);
+    g[n++] = full ? 0x00007901 : 0x00005a01;
+    g[n++] = 0x00000000;
+    g[n++] = full ? 0x01030a20 : ((0x0082u << 16) | W);
+    (void)geo_blocks;
 
     /* The output stage, with the four words we had been leaving as a stub.
      * Every fractional field in ours was zero, which builds no luminance at
@@ -1692,8 +1698,13 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = 0x00930000; g[n++] = 0x00220000;
     g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
     g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
-    g[n++] = 0x00280010; g[n++] = 0x0003003f;
-    g[n++] = 0x001d002c; g[n++] = 0x0002003f;
+    /* And this tail is per-resolution too: the small capture has different
+     * numbers here, and sending the large frame's was another way of
+     * describing the wrong picture. */
+    g[n++] = full ? 0x00280010 : 0x00130020;
+    g[n++] = full ? 0x0003003f : 0x0002003f;
+    g[n++] = full ? 0x001d002c : 0x000a0028;
+    g[n++] = full ? 0x0002003f : 0x0001003f;
 
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;

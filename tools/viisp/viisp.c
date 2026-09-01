@@ -1911,6 +1911,10 @@ int main(int argc, char **argv)
     /* Sent to the ISP rather than to memory, and the pixel transform is NOT
      * bypassed -- the driver clears that bit whenever the ISP is in the
      * path, because the ISP wants pixels rather than raw wire words. */
+    /* The receiver can be told to deliver to memory and to the ISP at the
+     * same time, and that settles by comparison what has been guesswork:
+     * the raw frame and what the ISP made of THAT SAME frame, side by
+     * side. Add the memory bit with --both. */
     uint32_t image_def = (0u << BYPASS_PXL_TRANSFORM_OFFSET) |
                          (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
                          IMAGE_DEF_DEST_ISP_B;
@@ -2107,6 +2111,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
+        else if (strcmp(a, "--both") == 0)
+            image_def |= IMAGE_DEF_DEST_MEM;
         else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }
         else if (strncmp(a, "--phy-cil=", 10) == 0)
             phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
@@ -2410,7 +2416,11 @@ int main(int argc, char **argv)
      *
      * A job of its own that carries nothing and finishes at once: no
      * relocation to keep alive, nothing to park on. */
-    if (isp_route && !(image_def & IMAGE_DEF_DEST_MEM)) {
+    /* Route to the ISP whenever the ISP is among the destinations -- the
+     * old test asked whether memory was NOT one of them, which meant
+     * delivering to both silently dropped the routing. */
+    if (isp_route && (image_def & (IMAGE_DEF_DEST_ISP_A |
+                                   IMAGE_DEF_DEST_ISP_B))) {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
         uint32_t g[10];

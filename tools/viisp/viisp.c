@@ -3010,9 +3010,8 @@ int main(int argc, char **argv)
                 uint32_t was = syncpt_read(sp_mem);
                 isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 1, isp_enable);
                 usleep(60000);
-                printf("  after the first warm-up: output %+d, stats %+d\n",
-                       (int)(syncpt_read(sp_mem) - was),
-                       (int)(syncpt_read(sps[1]) - syncpt_read(sps[1])));
+                printf("  after the first warm-up: output condition %+d\n",
+                       (int)(syncpt_read(sp_mem) - was));
 
                 isp_demosaic(isp_fd, isp_sp, out_h, stats_h, u_off, v_off,
                              work_iova);

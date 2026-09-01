@@ -923,10 +923,17 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00005555; g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
 
+    /* Three of these words are addresses, not settings: a base and two
+     * windows a fixed distance into it. We had been sending the stock
+     * process's base, 0x10000000, which in our address space is nothing --
+     * so the stage that works through them had nowhere to work, and that
+     * is the most likely reason the luma surface came back as zeros while
+     * the third one still received something. Ours goes in instead, with
+     * the same two offsets. */
     g[n++] = OP_INCR(0x920, 10);
-    g[n++] = 0x00000002; g[n++] = 0x10001660;
-    g[n++] = 0x00000000; g[n++] = 0x1000f4a0;
-    g[n++] = 0x0000fa80; g[n++] = 0x10000000;
+    g[n++] = 0x00000002; g[n++] = work_iova + 0x1660;
+    g[n++] = 0x00000000; g[n++] = work_iova + 0xf4a0;
+    g[n++] = 0x0000fa80; g[n++] = work_iova;
     g[n++] = 0x00001c50; g[n++] = 0x30001000;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
@@ -1438,7 +1445,21 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
     for (unsigned b = 0; b < sizeof blk / sizeof blk[0]; b++) {
         g[n++] = blk[b].noninc ? OP_NONINCR(blk[b].m, blk[b].n)
                                : OP_INCR(blk[b].m, blk[b].n);
+        unsigned first = n;
         for (unsigned i = 0; i < blk[b].n; i++) g[n++] = blk[b].d[i];
+
+        /* Some of what the capture holds is not configuration but the
+         * stock process's own addresses, and those mean nothing here --
+         * loading them verbatim is what pointed the block at memory it
+         * could not reach. Every one of them gets our scratch instead.
+         *
+         * The tile engine takes its working memory through these, which is
+         * why the luma came back as zeros while the third surface still
+         * received something: that path needs no intermediate storage. */
+        if (blk[b].m == 0x400)
+            for (unsigned i = 4; i <= 7; i++) g[first + i] = work_iova;
+        else if (blk[b].m == 0x800 || blk[b].m == 0x820)
+            g[first] = work_iova;
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
@@ -2187,7 +2208,13 @@ int main(int argc, char **argv)
             }
         }
 
-        stats_h = nvmap_create(64 * 1024);
+        /* Half a megabyte, which is what the stock camera gives it: its
+         * statistics buffers sit half a megabyte apart, eight of them in
+         * rotation. Sixty-four kilobytes was enough only while the
+         * statistics stage was never asked to finish -- as soon as its
+         * condition was armed the stage started writing, and ran off the
+         * end into the memory controller. */
+        stats_h = nvmap_create(512 * 1024);
         if (stats_h && nvmap_alloc(stats_h) == 0) {
             stats_iova = nvmap_pin(stats_h);
             /* Filled with a pattern of its own, so what the ISP puts there

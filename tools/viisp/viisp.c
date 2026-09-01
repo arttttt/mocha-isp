@@ -1317,14 +1317,30 @@ static int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
  * their own carrying nothing else. The values here are that job, word for
  * word.
  */
-static int isp_demosaic(int isp_fd, uint32_t sp)
+static int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
+                        uint32_t stats_h, uint32_t u_off, uint32_t v_off)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     uint32_t g[160];
     unsigned n = 0;
+    int y_word, u_word, v_word, stats_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
+
+    /* Carrying the surfaces as well, though this job has nothing to say
+     * about them: the mapping belongs to whichever job carried the
+     * relocation, and a job submitted between two frames without them lets
+     * it lapse. The memory controller caught the ISP writing into an
+     * address inside our own output that was no longer mapped. */
+    g[n++] = OP_INCR(0xE04, 3);
+    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0xE07, 3);
+    u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0xE0A, 3);
+    v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = OP_INCR(0x100, 4);
+    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
 
     g[n++] = OP_INCR(0x902, 1);
     g[n++] = isp_dm_902[0];
@@ -1345,6 +1361,13 @@ static int isp_demosaic(int isp_fd, uint32_t sp)
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
 
+    struct nvhost_reloc rel[4] = {
+        { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
+        { cmd_h, (uint32_t)u_word * 4, out_h, u_off },
+        { cmd_h, (uint32_t)v_word * 4, out_h, v_off },
+        { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
+    };
+    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
     struct nvhost_cmdbuf cb = { cmd_h, 0, n };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
@@ -1353,9 +1376,12 @@ static int isp_demosaic(int isp_fd, uint32_t sp)
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
+    sa.num_relocs = 4;
     sa.timeout = 3000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.relocs = (uint32_t)(uintptr_t)rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
     errno = 0;
@@ -2778,7 +2804,8 @@ int main(int argc, char **argv)
                 /* After the first frame, in its own job, the way the
                  * capture shows the stock stack doing it. */
                 if (isp_fd >= 0 && out_iova && shot > 0 && !dm_sent) {
-                    isp_demosaic(isp_fd, isp_sp);
+                    isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
+                                 u_off, v_off);
                     dm_sent = 1;
                 }
 

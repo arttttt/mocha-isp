@@ -665,7 +665,10 @@ static int enable_late;
 /* Whether to send the stock camera's colour-conversion coefficients, and
  * whether to send the three geometry-bearing blocks beside them -- those
  * take the channel down whatever they carry, so they are off. */
-static int ccm;
+/* On, because an empty matrix means a black picture -- proved by putting
+ * ours into the stock camera, which went black on the spot. Everything we
+ * have captured until today was taken with it empty. */
+static int ccm = 3;
 static int geo_blocks;
 
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte

@@ -1828,13 +1828,29 @@ int main(int argc, char **argv)
     /* Stock's own plane offsets for this sensor are 0x540000 and 0x6a0000 --
      * a wider gap than the planes need, and not what rounding the sizes up
      * produces. Overridable for that reason. */
+    /* Block-linear does not write row by row: it fills tiles sixty-four
+     * bytes wide and eight rows tall, gathered into blocks, and a plane
+     * therefore occupies whole blocks whether or not the picture fills
+     * them. Sizing a plane as stride times height is right for a linear
+     * surface and short for this one -- at 720 rows the last chroma plane
+     * needs 384 rows of room, not 360, and the fifteen kilobytes of
+     * difference is exactly where the memory controller caught the ISP
+     * writing outside our surface. */
+    int isp_blocklinear = ((isp_fmt >> 24) & 0xFF) == 0x04;
+    unsigned rows_y = isp_blocklinear ? ((OH + 127) & ~127u) : OH;
+    unsigned rows_uv = isp_blocklinear ? (((OH / 2) + 127) & ~127u) : OH / 2;
+
     uint32_t u_off = opt_u_off ? opt_u_off
-                               : ((stride_y * OH + 0xFFFF) & ~0xFFFFu);
+                               : ((stride_y * rows_y + 0xFFFF) & ~0xFFFFu);
     uint32_t v_off = opt_v_off ? opt_v_off
-                               : ((u_off + stride_uv * (OH / 2) + 0xFFFF)
+                               : ((u_off + stride_uv * rows_uv + 0xFFFF)
                                   & ~0xFFFFu);
-    uint32_t out_bytes = isp_planar ? v_off + stride_uv * (OH / 2)
-                                    : stride_y * OH;
+    uint32_t out_bytes = isp_planar ? v_off + stride_uv * rows_uv
+                                    : stride_y * rows_y;
+    /* And a block over, because the block height is inferred rather than
+     * read from anywhere: running past the end costs a reboot, and sixty
+     * four kilobytes costs nothing. */
+    if (isp_blocklinear) out_bytes += 0x10000;
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
     uint32_t work_iova = 0, stats_iova = 0;

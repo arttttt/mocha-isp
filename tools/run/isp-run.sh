@@ -42,6 +42,11 @@ done
 # it: a host1x channel timeout, or the register bus refusing the block.
 ERRPAT='cdma_timeout|Host read timeout|Host write timeout'
 
+# And the ones that do not wedge anything but are still the hardware
+# telling us we got something wrong -- a write to memory it cannot reach.
+# This was missed once already because the check did not look for it.
+FAULTPAT='mc-err|mcerr|SMMU fault'
+
 wait_ready() {
     adb wait-for-device >/dev/null 2>&1
     for _ in $(seq 1 60); do

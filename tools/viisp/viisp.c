@@ -619,19 +619,59 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  * The driver patches the last two words before sending: 0x053 takes 1 and
  * 0x054 takes 0, and there is deliberately no trigger at the end. */
 #include "isp_b_cal.h"
+#include "isp_stock.h"
+
+/* Put the stock camera's own configuration into the gather.
+ *
+ * Every block it fills in when it opens the ISP, with the values it fills
+ * them with -- read out of the running process, not reconstructed. This is
+ * what was missing: the shape of these blocks we had right, and the
+ * clearing pass matches stock block for block, but the coefficient arrays
+ * behind the demosaic (0x903, sixty-four words, and 0x907, thirty-six) we
+ * only ever zeroed. The stage was switched on and computing with nothing.
+ *
+ * The work buffer's address is ours, not the one the stock process had.
+ */
+static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
+{
+    unsigned count = sizeof isp_stock_blocks / sizeof isp_stock_blocks[0];
+    for (unsigned b = 0; b < count; b++) {
+        const struct isp_block *bl = &isp_stock_blocks[b];
+        const uint32_t *d = bl->data;
+
+        /* Skipped deliberately: its second word is where the stock process
+         * kept its scratch buffer, and that address means nothing here. */
+        if (bl->method == 0x053) continue;
+
+        if (bl->mode == 0) {
+            g[n++] = OP_INCR(bl->method, bl->count);
+            for (unsigned i = 0; i < bl->count; i++) g[n++] = d[i];
+        } else {
+            /* One word to the method itself, the rest to the array port
+             * that follows it. */
+            g[n++] = OP_INCR(bl->method, 1);
+            g[n++] = d[0];
+            g[n++] = OP_NONINCR(bl->method + 1, bl->count - 1);
+            for (unsigned i = 1; i < bl->count; i++) g[n++] = d[i];
+        }
+    }
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
+    return n;
+}
 
 static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                     uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
                     uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
                     uint32_t gpp_gain, int luma_lo,
                     uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
-                    int zero_init, int apply, uint32_t stats_ctrl)
+                    int zero_init, int apply, uint32_t stats_ctrl,
+                    int stock_cfg)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
      * is fourteen hundred words. */
     /* Two clearing passes plus the runtime block and the blob. */
-    uint32_t bytes = (words + 6144) * 4;
+    uint32_t bytes = (words + 12288) * 4;
     uint32_t cmd_h = nvmap_create((bytes + 4095) & ~4095u);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
@@ -921,6 +961,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * fall back to the least it can do, which is what we see. */
     g[n - 2] = 0x00000001;                /* 0x053 */
     g[n - 1] = work_iova;                 /* 0x054 */
+
+    /* And then the real thing, last, so it stands over everything above:
+     * the configuration read out of the stock camera while it was running.
+     * The demosaic coefficients live here and nowhere else we could reach. */
+    if (stock_cfg) n = isp_stock_emit(g, n, work_iova);
+
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
 
     /* Commit. Everything above this is written into shadow state and takes
@@ -1262,7 +1308,8 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      uint32_t trigger, uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
                      uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-                     uint32_t in_fmt, uint32_t work_iova, int per_frame_cal)
+                     uint32_t in_fmt, uint32_t work_iova, int per_frame_cal,
+                     uint32_t proc_flags)
 {
     /* Room for the calibration too, now that it rides with every frame. */
     uint32_t cmd_h = nvmap_create(16384);
@@ -1314,8 +1361,12 @@ static int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0xE0A, 3);
     v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
 
+    /* The first word of this block is the only flags field the streaming
+     * path has. The April notes call a non-zero value there fatal, but that
+     * was the reprocess path, and this one behaves differently enough to be
+     * worth its own look. */
     g[n++] = OP_INCR(0x500, 6);
-    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = proc_flags; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
     g[n++] = (H << 16) | W;
 
     /* Tell the block what is arriving. The input-format register is
@@ -1543,6 +1594,9 @@ int main(int argc, char **argv)
      * default now: it is what the camera on this device actually does. */
     int zero_init = 1;
     int isp_apply = 1;
+    /* On by default: it is measured configuration from the working camera,
+     * where everything else here is reconstruction. */
+    int stock_cfg = 1;
     uint32_t opt_u_off = 0, opt_v_off = 0;
     /* The kind to allocate the ISP's output as. Zero means an ordinary
      * pitch-linear buffer; 0xFE is what the block-linear format wants. */
@@ -1556,6 +1610,7 @@ int main(int argc, char **argv)
     int out_iovmm = 0;
     int isp_only = 0;
     uint32_t stats_ctrl = 0;
+    uint32_t proc_flags = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -1617,6 +1672,7 @@ int main(int argc, char **argv)
             ispintf = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
         else if (strcmp(a, "--no-apply") == 0)     isp_apply = 0;
+        else if (strcmp(a, "--no-stock-cfg") == 0) stock_cfg = 0;
         else if (strncmp(a, "--u-off=", 8) == 0)
             opt_u_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--v-off=", 8) == 0)
@@ -1629,6 +1685,8 @@ int main(int argc, char **argv)
                                                      use_sensor = 0; }
         else if (strncmp(a, "--stats-ctrl=", 13) == 0)
             stats_ctrl = (uint32_t)strtoul(a + 13, 0, 16);
+        else if (strncmp(a, "--proc-flags=", 13) == 0)
+            proc_flags = (uint32_t)strtoul(a + 13, 0, 16);
         else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
@@ -1847,7 +1905,7 @@ int main(int argc, char **argv)
             isp_init(isp_fd, work_h, isp_enable, isp_sp,
                      work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
                      isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase, zero_init, isp_apply, stats_ctrl);
+                     in_phase, zero_init, isp_apply, stats_ctrl, stock_cfg);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
@@ -2523,7 +2581,8 @@ int main(int argc, char **argv)
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
                               sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                              isp_in_fmt, work_iova, per_frame_cal);
+                              isp_in_fmt, work_iova, per_frame_cal,
+                              proc_flags);
                 }
 
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
@@ -2619,7 +2678,8 @@ isp_wait:
         isp_base_mem = syncpt_read(sp_mem);
         isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                   isp_trigger, u_off, v_off, sp_mem, sp_stats, sp_loadv,
-                  isp_sp, 0, 0, isp_in_fmt, work_iova, per_frame_cal);
+                  isp_sp, 0, 0, isp_in_fmt, work_iova, per_frame_cal,
+                              proc_flags);
         int w3 = 0;
         while (syncpt_read(sp_mem) == isp_base_mem && w3 < 4000) {
             isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off, isp_sp);

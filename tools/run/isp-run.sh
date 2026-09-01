@@ -89,6 +89,9 @@ fi
 
 adb shell "rm -f /data/local/tmp/viisp_out.raw /data/local/tmp/vicap.raw"
 
+faults_before=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
+faults_before=${faults_before:-0}
+
 echo "=== run: ${ARGS[*]:-（defaults）} ==="
 adb shell "$DEV ${ARGS[*]:-}" 2>&1 | tr -d '\r'
 
@@ -104,6 +107,16 @@ if [ "$after" -gt "$before" ]; then
 else
     echo "channel survived"
     status=0
+fi
+
+faults_after=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
+faults_after=${faults_after:-0}
+if [ "$faults_after" -gt "${faults_before:-0}" ]; then
+    echo "MEMORY CONTROLLER FAULTED -- the hardware wrote somewhere it"
+    echo "could not reach, so the surface is wrong even if the frame looks"
+    echo "plausible:"
+    adb shell "dmesg | grep -E '$FAULTPAT' | tail -6" 2>/dev/null | tr -d '\r'
+    status=1
 fi
 
 adb shell 'ls -l /data/local/tmp/viisp_out.raw 2>/dev/null' | tr -d '\r'

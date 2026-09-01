@@ -28,7 +28,7 @@
  * Build: tools/hybrid/build-hybrid.sh (on the build server)
  * Usage: ./hybrid <raw_bayer> [--width=N] [--height=N] [--w0=N] [--yuv-cfg]
  *                 [--no-lib] [--hw-apply] [--isp=1|2] [--dm] [--dm-all]
- *                 [--ccm] [--out-fmt=0xN] [--in-fmt=0xN]
+ *                 [--ccm] [--commit] [--out-fmt=0xN] [--in-fmt=0xN]
  */
 
 #include <stdio.h>
@@ -214,8 +214,7 @@ static int shim_loaded(void)
     return found;
 }
 
-static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply,
-                          int allow_unstripped)
+static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply)
 {
     void *rm = dlopen("libnvrm.so", RTLD_NOW);
     void *isp = dlopen("libnvisp_v3.so", RTLD_NOW);
@@ -283,30 +282,28 @@ static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply,
         unsetenv("NVRM_SHIM_STRIP");
 
         int submits = 0, scanned = 0, stripped = 0, failed = 0;
+        char trig[256] = "?";
         FILE *st = fopen(SHIM_STATUS, "r");
         if (st) {
-            if (fscanf(st, "submits=%d scanned=%d stripped=%d failed=%d",
-                       &submits, &scanned, &stripped, &failed) != 4)
+            if (fscanf(st, "submits=%d scanned=%d stripped=%d failed=%d triggers=%255s",
+                       &submits, &scanned, &stripped, &failed, trig) < 4)
                 submits = -1;
             fclose(st);
         } else {
             submits = -1;
         }
         printf("HwSettingsApply: rc=%d; shim: %d submits, %d gathers scanned, "
-               "%d streaming triggers stripped, %d refused\n",
-               rc, submits, scanned, stripped, failed);
+               "ISP_CONTROL values %s, %d streaming triggers stripped, %d refused\n",
+               rc, submits, scanned, trig, stripped, failed);
 
-        /* Not proven safe means not continued: the block may be armed for
-         * a stream that never comes, and anything we do on top only makes
-         * the state harder to read. Close it while the library still can. */
-        if (rc != 0 || submits < 0 || failed) {
-            printf("Apply did not go through cleanly -- closing, not continuing\n");
-            lib_tear_down();
-            return 0;
-        }
-        if (stripped == 0 && !allow_unstripped) {
-            printf("the library's gather carried no streaming trigger to strip; "
-                   "not continuing without --allow-unstripped\n");
+        /* Not proven safe means not continued. Proven means: the shim saw
+         * every submit, read every gather, and refused nothing -- so any
+         * streaming trigger there is gone. (On this kernel the library
+         * ends its gathers with 0x0F, the apply, and there is nothing to
+         * strip; what took the device down before was leaving without
+         * NvIspClose.) Close it while the library still can. */
+        if (rc != 0 || submits <= 0 || scanned <= 0 || failed) {
+            printf("Apply was not seen through by the shim -- closing, not continuing\n");
             lib_tear_down();
             return 0;
         }
@@ -324,7 +321,7 @@ int main(int argc, char **argv)
     }
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
-    int dm = 0, dm_all = 0, ccm = 0, allow_unstripped = 0;
+    int dm = 0, dm_all = 0, ccm = 0, commit = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
@@ -338,7 +335,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dm") == 0)          dm = 1;
         else if (strcmp(a, "--dm-all") == 0)      dm = dm_all = 1;
         else if (strcmp(a, "--ccm") == 0)         ccm = 1;
-        else if (strcmp(a, "--allow-unstripped") == 0) allow_unstripped = 1;
+        else if (strcmp(a, "--commit") == 0)      commit = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -354,7 +351,7 @@ int main(int argc, char **argv)
            dm_all ? "all blocks" : dm ? "coefficients" : "off",
            ccm ? "on" : "off");
 
-    if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply, allow_unstripped)) {
+    if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply)) {
         printf("library bring-up failed -- stopping\n");
         return 1;
     }
@@ -480,6 +477,17 @@ int main(int argc, char **argv)
     work_reloc = n;
     cmd[n++] = 1;
     cmd[n++] = 0;
+
+    /* What the library does right after its own configuration and work
+     * pointer: ISP_CONTROL = 0x0F, the apply. Every one of its eight
+     * configuration rounds ends with it. If the block only takes new
+     * settings at this point, then everything we wrote above sat in the
+     * shadow and never reached the pipeline -- which would be why a
+     * gather full of demosaic blocks changed nothing. */
+    if (commit) {
+        cmd[n++] = OP_NONINCR(0x00C, 1); cmd[n++] = 0x0F;
+    }
+
     cmd[n++] = OP_INCR(0xE00, 1); cmd[n++] = ((W - 1) & 0x3FFF) << 16;
     cmd[n++] = OP_INCR(0xE01, 1); cmd[n++] = ((H - 1) & 0x3FFF) << 16;
     cmd[n++] = OP_INCR(0xE02, 1); cmd[n++] = out_fmt;

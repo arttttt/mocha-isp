@@ -212,14 +212,41 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 /* ---- the strip ---- */
 
 static int submits, scanned, stripped, failed;
+static char triggers[256];          /* every ISP_CONTROL value seen, in order */
 
 static void status_write(void) {
     FILE *f = fopen(STATUS_PATH, "w");
     if (!f) return;
-    fprintf(f, "submits=%d scanned=%d stripped=%d failed=%d\n",
-            submits, scanned, stripped, failed);
+    fprintf(f, "submits=%d scanned=%d stripped=%d failed=%d triggers=%s\n",
+            submits, scanned, stripped, failed, triggers[0] ? triggers : "-");
     fclose(f);
 }
+
+static void trigger_seen(uint32_t v) {
+    size_t len = strlen(triggers);
+    if (len + 4 >= sizeof triggers) return;
+    snprintf(triggers + len, sizeof triggers - len, "%s%02x", len ? "," : "", v);
+}
+
+/* The submit comes in two shapes and the library uses the wider one:
+ * NVHOST_IOCTL_CHANNEL_SUBMIT is nr 26 with 64-bit pointers (120 bytes
+ * on this kernel), NVHOST32_ is nr 15 with 32-bit ones. Same cmdbuf
+ * records behind both. */
+struct submit32 {
+    uint32_t submit_version, num_syncpt_incrs, num_cmdbufs;
+    uint32_t num_relocs, num_waitchks, timeout;
+    uint32_t syncpt_incrs, cmdbufs;
+};
+struct submit64 {
+    uint32_t submit_version, num_syncpt_incrs, num_cmdbufs;
+    uint32_t num_relocs, num_waitchks, timeout;
+    uint32_t syncpt_incrs, fence;
+    uint64_t cmdbuf_exts;
+    uint32_t flags, reserved;
+    uint64_t pad[2];
+    uint64_t cmdbufs;
+};
+struct cmdbuf_rec { uint32_t mem; uint32_t offset; uint32_t words; };
 
 static int nvmap_rw(int fd, uint32_t handle, uint32_t off, void *buf,
                     uint32_t len, int write) {
@@ -239,19 +266,25 @@ static int strip_gather(uint32_t *w, uint32_t words, unsigned g) {
     while (i < words) {
         uint32_t op = w[i], opc = op >> 28, m = (op >> 16) & 0xfff, cnt = op & 0xffff;
         if (opc == 1 || opc == 2) {                 /* INCR / NONINCR */
-            if (m == 0x00c && cnt == 1 && i + 1 < words && w[i + 1] == 0x05) {
-                fprintf(stderr, "nvrm_shim: NOP streaming trigger, gather %u word %u\n", g, i);
-                w[i] = 0x20000000; w[i + 1] = 0x20000000;
-                hits++;
+            if (m == 0x00c && cnt == 1 && i + 1 < words) {
+                trigger_seen(w[i + 1]);
+                if (w[i + 1] == 0x05) {
+                    fprintf(stderr, "nvrm_shim: NOP streaming trigger, gather %u word %u\n", g, i);
+                    w[i] = 0x20000000; w[i + 1] = 0x20000000;
+                    hits++;
+                }
             }
             i += 1 + cnt;
         } else if (opc == 3) {                      /* MASK */
             i += 1 + (uint32_t)__builtin_popcount(cnt);
         } else if (opc == 4) {                      /* IMM */
-            if (m == 0x00c && cnt == 0x05) {
-                fprintf(stderr, "nvrm_shim: NOP streaming trigger (IMM), gather %u word %u\n", g, i);
-                w[i] = 0x20000000;
-                hits++;
+            if (m == 0x00c) {
+                trigger_seen(cnt);
+                if (cnt == 0x05) {
+                    fprintf(stderr, "nvrm_shim: NOP streaming trigger (IMM), gather %u word %u\n", g, i);
+                    w[i] = 0x20000000;
+                    hits++;
+                }
             }
             i += 1;
         } else {                                    /* SETCLASS and the rest */
@@ -295,24 +328,28 @@ int ioctl(int fd, int request, ...) {
         return shim_nvmap_mmap(fd, (struct nvmap_map_caller *)arg);
     }
 
-    /* Channel SUBMIT (NR=15, 32-bit form) while stripping is on. */
+    /* Channel SUBMIT, either form, while the scan is on. */
     #define NVHOST_MAGIC 'H'
-    if (type == NVHOST_MAGIC && nr == 15 && strip_streaming) {
-        struct {
-            uint32_t submit_version, num_syncpt_incrs, num_cmdbufs;
-            uint32_t num_relocs, num_waitchks, timeout;
-            uint32_t syncpt_incrs, cmdbufs;
-        } *sa = arg;
-        struct { uint32_t mem; uint32_t offset; uint32_t words; } *cbs =
-            (void *)(uintptr_t)sa->cmdbufs;
+    if (type == NVHOST_MAGIC && (nr == 15 || nr == 26) && strip_streaming) {
+        uint32_t num_cmdbufs;
+        struct cmdbuf_rec *cbs;
+        if (nr == 26) {
+            struct submit64 *sa = arg;
+            num_cmdbufs = sa->num_cmdbufs;
+            cbs = (struct cmdbuf_rec *)(uintptr_t)sa->cmdbufs;
+        } else {
+            struct submit32 *sa = arg;
+            num_cmdbufs = sa->num_cmdbufs;
+            cbs = (struct cmdbuf_rec *)(uintptr_t)sa->cmdbufs;
+        }
 
         submits++;
         if (nvmap_fd_cached < 0)
             return refuse("no nvmap fd seen yet, cannot read the gather back");
-        if (sa->num_cmdbufs == 0 || sa->num_cmdbufs > 16)
+        if (num_cmdbufs == 0 || num_cmdbufs > 16)
             return refuse("implausible cmdbuf count");
 
-        for (uint32_t g = 0; g < sa->num_cmdbufs; g++) {
+        for (uint32_t g = 0; g < num_cmdbufs; g++) {
             uint32_t words = cbs[g].words;
             if (words == 0 || words > (1u << 20))
                 return refuse("implausible gather length");

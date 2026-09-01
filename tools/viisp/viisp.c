@@ -1165,20 +1165,16 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     };
     struct nvhost_reloc_shift sh[2] = { { 0 }, { 0 } };
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-    /* Every increment this gather causes, declared: the immediate one on
-     * our sequencing counter (first, so it is the job's fence) and the
-     * three conditions armed above -- 4 on 36, 5 on 37, 6 on 39. A job
-     * that arms a condition without declaring it leaves the hardware one
-     * ahead of the kernel on that counter, and the kernel's waits on it
-     * then never expire. */
-    struct nvhost_syncpt_incr si[4] = {
-        { sp, 1 }, { 36, 1 }, { 37, 1 }, { 39, 1 },
-    };
+    /* Declared: only the immediate increment on the sequencing counter.
+     * Declaring the three armed conditions as well (36, 37, 39) turned the
+     * output into deterministic garbage on 2026-09-02 -- identical to the
+     * decimal across six runs -- and the reason is not understood yet. */
+    struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
-    struct nvhost_fence fence[4] = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } };
+    struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 4;
+    sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
     sa.num_relocs = 2;
     sa.timeout = 3000;
@@ -1531,21 +1527,14 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     };
     struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-    /* Every increment this gather causes, declared: the immediate one on
-     * our sequencing counter first (the job's fence, and it comes after the
-     * waits, so the pins outlive the frame), then condition 4 on the memory
-     * counter and, when armed, 5 on statistics and 6 on loadv. */
-    struct nvhost_syncpt_incr si[4];
-    unsigned nsi = 0;
-    si[nsi++] = (struct nvhost_syncpt_incr){ sp, 1 };
-    si[nsi++] = (struct nvhost_syncpt_incr){ sp_mem, 1 };
-    if (sp_stats) si[nsi++] = (struct nvhost_syncpt_incr){ sp_stats, 1 };
-    if (sp_loadv) si[nsi++] = (struct nvhost_syncpt_incr){ sp_loadv, 1 };
+    /* Declared: only the immediate increment on the sequencing counter --
+     * see the warm-up for why the armed conditions are not declared too. */
+    struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
-    struct nvhost_fence fence[4] = { { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } };
+    struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = nsi;
+    sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
     sa.num_relocs = 4;
     /* This job is parked on a counter we raise after the whole capture, so

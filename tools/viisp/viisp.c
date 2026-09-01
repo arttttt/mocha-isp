@@ -662,8 +662,11 @@ static uint32_t rgb2y = 0x001c984c;
  * frame, once for the session -- instead of at open and in the setup. */
 static int do_warmup;
 static int enable_late;
-/* Whether to send the stock camera's colour-conversion coefficients. */
+/* Whether to send the stock camera's colour-conversion coefficients, and
+ * whether to send the three geometry-bearing blocks beside them -- those
+ * take the channel down whatever they carry, so they are off. */
 static int ccm;
+static int geo_blocks;
 
 /* Buffer sizes, in kilobytes. The statistics buffer is half a megabyte
  * because that is what the stock camera gives it -- its eight sit exactly
@@ -1658,16 +1661,21 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * stage that walks the picture was reading rows that were not there,
      * and what it computed for the luma was nothing. */
     uint32_t geo = ((H - 32) << 16) | (W - 32);
-    /* The first word stays as the capture has it. Pointing it at our own
-     * buffer was tried and takes the channel down, so only the geometry
-     * changes here -- one thing at a time. */
-    g[n++] = OP_INCR(0x800, 3);
-    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
-    g[n++] = OP_INCR(0x820, 3);
-    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
-    g[n++] = OP_INCR(0xc00, 3);
-    g[n++] = 0x00007901; g[n++] = 0x00000000;
-    g[n++] = (0x0103u << 16) | W;
+    /* Behind a flag, because these three take the channel down whatever
+     * they carry: with our own pointer, with stock's pointer, with stock's
+     * geometry and with geometry derived for the frame in hand. It is the
+     * blocks themselves this configuration will not accept, not the numbers
+     * in them -- the working run does not send them at all. */
+    if (geo_blocks) {
+        g[n++] = OP_INCR(0x800, 3);
+        g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+        g[n++] = OP_INCR(0x820, 3);
+        g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
+        g[n++] = OP_INCR(0xc00, 3);
+        g[n++] = 0x00007901; g[n++] = 0x00000000;
+        g[n++] = (0x0103u << 16) | W;
+    }
+    (void)geo;
 
     /* The output stage, with the four words we had been leaving as a stub.
      * Every fractional field in ours was zero, which builds no luminance at
@@ -2159,6 +2167,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
         else if (strcmp(a, "--ccm") == 0)         ccm = 3;
+        else if (strcmp(a, "--geo-blocks") == 0)  geo_blocks = 1;
         else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
         else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
                                                     enable_late = 1; }

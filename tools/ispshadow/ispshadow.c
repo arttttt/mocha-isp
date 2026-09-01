@@ -45,9 +45,11 @@ static int pid_of(const char *name)
     DIR *d = opendir("/proc");
     if (!d) return -1;
     struct dirent *e;
-    int found = -1;
+    int found = -1, self = (int)getpid();
     while ((e = readdir(d))) {
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int p = atoi(e->d_name);
+        if (p == self) continue;        /* our own arguments name it too */
         char path[64], buf[256];
         snprintf(path, sizeof path, "/proc/%s/cmdline", e->d_name);
         int fd = open(path, O_RDONLY);
@@ -56,7 +58,8 @@ static int pid_of(const char *name)
         close(fd);
         if (n <= 0) continue;
         buf[n] = 0;
-        if (strstr(buf, name)) { found = atoi(e->d_name); break; }
+        /* The first token only: arguments can name another program. */
+        if (strstr(buf, name)) { found = p; break; }
     }
     closedir(d);
     return found;
@@ -125,7 +128,8 @@ int main(int argc, char **argv)
                    fclose(mf); return 1; }
 
     char line[512];
-    int best_n = 0;
+    size_t scanned = 0;
+    int hits = 0, best_n = 0;
     uintptr_t best_addr = 0;
     uint32_t *best_buf = 0;
     size_t best_words = 0, best_at = 0;
@@ -151,9 +155,11 @@ int main(int argc, char **argv)
         ssize_t got = pread(mem, buf, len, (off_t)s);
         if (got <= 0) { free(buf); continue; }
         size_t words = (size_t)got / 4;
+        scanned += words;
 
         for (size_t i = 0; i + 4 < words; i++) {
             if (buf[i] != (uint32_t)anchor) continue;
+            hits++;
             /* Walk back to whichever earlier position chains exactly onto
              * this one -- that is the head of the list. */
             size_t head = i;
@@ -188,6 +194,8 @@ int main(int argc, char **argv)
     close(mem);
 
     if (!best_buf || best_n < 2) {
+        printf("scanned %zu words, %d place(s) hold 0x%lx, longest chain %d\n",
+               scanned, hits, anchor, best_n);
         printf("no descriptor chain found (is the camera open?)\n");
         free(best_buf);
         return 1;

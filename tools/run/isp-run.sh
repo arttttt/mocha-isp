@@ -111,7 +111,9 @@ else
 fi
 
 if [ "$DEPLOY" = 1 ]; then
-    for f in "$BIN" "${EXTRA[@]}"; do
+    # The ${arr[@]+...} form: an empty array is "unbound" to the bash 3.2
+    # on the Mac under set -u, and this is the one spelling that survives.
+    for f in "$BIN" ${EXTRA[@]+"${EXTRA[@]}"}; do
         scp -q "$SERVER:$REMOTE_DIR/$f" "$ROOT/build/out/$f" || exit 1
         adb push "$ROOT/build/out/$f" "$DEV_DIR/$f" >/dev/null || exit 1
         adb shell "chmod 755 $DEV_DIR/$f"

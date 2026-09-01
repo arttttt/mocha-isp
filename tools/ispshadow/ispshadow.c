@@ -102,7 +102,7 @@ int main(int argc, char **argv)
 {
     const char *pname = "mediaserver";
     long anchor = 0x900;
-    int pid = -1, c_array = 0, want_all = 0;
+    int pid = -1, c_array = 0, want_all = 0, verbose = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -111,6 +111,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--anchor=", 9) == 0) anchor = strtol(a + 9, 0, 0);
         else if (strcmp(a, "--c-array") == 0)     c_array = 1;
         else if (strcmp(a, "--all") == 0)         want_all = 1;
+        else if (strcmp(a, "--verbose") == 0)     verbose = 1;
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -157,6 +158,10 @@ int main(int argc, char **argv)
         uint32_t *buf = malloc(len);
         if (!buf) continue;
         ssize_t got = pread(mem, buf, len, (off_t)s);
+        if (verbose)
+            printf("  %08lx-%08lx %s %-16s -> %ld%s\n", (unsigned long)s,
+                   (unsigned long)e, perms, nm, (long)got,
+                   got < 0 ? strerror(errno) : "");
         if (got <= 0) { free(buf); continue; }
         size_t words = (size_t)got / 4;
         scanned += words;

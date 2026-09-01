@@ -641,6 +641,12 @@ static int real_sent;
 static int use_real_pass;
 /* Whether to arm the statistics and load conditions the way stock does. */
 static int arm_stats;
+/* Whether to point the working-memory registers at our own scratch instead
+ * of leaving the captured values. It is the right thing in principle --
+ * those are the stock process's addresses -- but done this way it stops
+ * the frame completing, so it stays behind a flag until the sizes each
+ * stage wants are known rather than guessed. */
+static int own_scratch;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -931,9 +937,12 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * the third one still received something. Ours goes in instead, with
      * the same two offsets. */
     g[n++] = OP_INCR(0x920, 10);
-    g[n++] = 0x00000002; g[n++] = work_iova + 0x1660;
-    g[n++] = 0x00000000; g[n++] = work_iova + 0xf4a0;
-    g[n++] = 0x0000fa80; g[n++] = work_iova;
+    g[n++] = 0x00000002;
+    g[n++] = own_scratch ? work_iova + 0x1660 : 0x10001660;
+    g[n++] = 0x00000000;
+    g[n++] = own_scratch ? work_iova + 0xf4a0 : 0x1000f4a0;
+    g[n++] = 0x0000fa80;
+    g[n++] = own_scratch ? work_iova : 0x10000000;
     g[n++] = 0x00001c50; g[n++] = 0x30001000;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
@@ -1456,6 +1465,7 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
          * The tile engine takes its working memory through these, which is
          * why the luma came back as zeros while the third surface still
          * received something: that path needs no intermediate storage. */
+        if (!own_scratch) continue;
         if (blk[b].m == 0x400)
             for (unsigned i = 4; i <= 7; i++)
                 g[first + i] = work_iova + 0x100000 + (i - 4) * 0x40000;
@@ -1921,6 +1931,7 @@ int main(int argc, char **argv)
             dm_after = atoi(a + 11);
         else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
+        else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)

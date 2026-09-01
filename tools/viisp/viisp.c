@@ -416,16 +416,20 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x820, 3);
     g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
 
+    /* The 720 capture's real histogram windows: word 0 is 0x1d and the
+     * four window words describe the 1280x720 frame -- the zeros-and-
+     * 0x70000 tail was the 8x8 warm-up's values, never the running
+     * configuration. */
     g[n++] = OP_INCR(0x930, 18);
-    g[n++] = 0x0000001c; g[n++] = 0x88888888;
+    g[n++] = 0x0000001d; g[n++] = 0x88888888;
     g[n++] = 0x78787800; g[n++] = 0x00000078;
     g[n++] = 0x88888888; g[n++] = 0x78787800;
     g[n++] = 0x00000078; g[n++] = 0x88888888;
     g[n++] = 0x78787800; g[n++] = 0x00000078;
     g[n++] = 0x88888888; g[n++] = 0x78787800;
     g[n++] = 0x00000078; g[n++] = 0x3fc00000;
-    g[n++] = 0x00000000; g[n++] = 0x00070000;
-    g[n++] = 0x00000000; g[n++] = 0x00070000;
+    g[n++] = 0x00220000; g[n++] = 0x0004003f;
+    g[n++] = 0x00120000; g[n++] = 0x0003003f;
 
     g[n++] = OP_INCR(0xC00, 3);
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;

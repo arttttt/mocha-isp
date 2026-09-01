@@ -3374,6 +3374,24 @@ int main(int argc, char **argv)
             }
         }
         if (warm_h) {
+            /* The warm-up wrote an eight-by-eight decimation of the whole
+             * frame into this buffer. Dump it before letting it go. */
+            uint8_t w[512];
+            if (nvmap_rw(warm_h, 0, w, sizeof w, 0) == 0) {
+                FILE *wf = fopen("/data/local/tmp/viisp_warm.bin", "wb");
+                if (wf) { fwrite(w, 1, sizeof w, wf); fclose(wf); }
+                printf("warm buffer (8x8 decimated frame), 64 bytes:");
+                for (int i = 0; i < 64; i++)
+                    printf(" %02x", w[i * 4]);   /* stride 0x100, one row of 8 every 256 */
+                printf("\n");
+                printf("warm rows:");
+                for (int r = 0; r < 8; r++) {
+                    printf("\n  ");
+                    for (int c = 0; c < 8; c++)
+                        printf(" %02x", w[r * 256 + c]);
+                }
+                printf("\n");
+            }
             nvmap_unpin(warm_h);
             ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)warm_h);
         }

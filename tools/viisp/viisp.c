@@ -3003,29 +3003,15 @@ int main(int argc, char **argv)
          * coefficients, then a second warm-up frame, then the working
          * configuration. Skipping all of this and going straight to a real
          * frame is what left the luma path cold. */
+        uint32_t warm_h = 0;
+        int warm_left = 0;
         if (do_warmup && isp_fd >= 0) {
-            uint32_t warm_h = nvmap_create(64 * 1024);
+            warm_h = nvmap_create(64 * 1024);
             if (warm_h && nvmap_alloc(warm_h) == 0) {
                 nvmap_pin(warm_h);
-                uint32_t was = syncpt_read(sp_mem);
-                isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 1, isp_enable);
-                usleep(60000);
-                printf("  after the first warm-up: output condition %+d\n",
-                       (int)(syncpt_read(sp_mem) - was));
-
-                isp_demosaic(isp_fd, isp_sp, out_h, stats_h, u_off, v_off,
-                             work_iova);
-                dm_sent = 1;
-
-                isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 0, isp_enable);
-                usleep(60000);
-
-                if (use_real_pass) {
-                    isp_real_pass(isp_fd, isp_sp, work_iova);
-                    real_sent = 1;
-                }
-                nvmap_unpin(warm_h);
-                ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)warm_h);
+                warm_left = 2;
+            } else {
+                warm_h = 0;
             }
         }
 
@@ -3089,7 +3075,22 @@ int main(int argc, char **argv)
                     real_sent = 1;
                 }
 
-                if (isp_fd >= 0 && out_iova && stats_h) {
+                /* The warm-up needs pixels, which is what running it before
+                 * the capture ever started was missing. So it goes here
+                 * instead, in place of a real frame, while the receiver is
+                 * armed and the sensor is delivering -- the way stock runs
+                 * it, between frames of a live stream. */
+                if (warm_left > 0 && isp_fd >= 0 && warm_h) {
+                    isp_base_mem = syncpt_read(sp_mem);
+                    isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
+                               warm_left == 2, isp_enable);
+                    if (warm_left == 2 && !dm_sent) {
+                        isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
+                                     u_off, v_off, work_iova);
+                        dm_sent = 1;
+                    }
+                }
+                else if (isp_fd >= 0 && out_iova && stats_h) {
                     isp_base_mem = syncpt_read(sp_mem);
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                               isp_trigger, u_off, v_off,
@@ -3163,6 +3164,22 @@ int main(int argc, char **argv)
                    attempt, attempt == 1 ? "" : "s", waited, mwaited,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
                                : T124_PP_A_PIXEL_PARSER_STATUS));
+
+            /* A warm-up round is not one of the frames that were asked
+             * for, so it does not spend one. */
+            if (warm_left > 0) {
+                printf("  (that was a warm-up round, output condition %+d)\n",
+                       (int)(syncpt_read(sp_mem) - isp_base_mem));
+                if (--warm_left == 0 && use_real_pass && !real_sent) {
+                    isp_real_pass(isp_fd, isp_sp, work_iova);
+                    real_sent = 1;
+                }
+                shot--;
+            }
+        }
+        if (warm_h) {
+            nvmap_unpin(warm_h);
+            ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)warm_h);
         }
 
         /* Stop the capture before reading a single byte. The trigger bit

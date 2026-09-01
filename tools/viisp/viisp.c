@@ -632,7 +632,37 @@ static int nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
  *
  * The work buffer's address is ours, not the one the stock process had.
  */
-static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
+/* Which part of the pipeline a block belongs to.
+ *
+ * Sending the whole table at once cost a capture and a reboot: the
+ * statistics blocks went in with it, ours had been configured differently,
+ * and the frame then waited on a statistics syncpoint that never moved.
+ * One thing at a time, so a failure says which thing.
+ */
+#define STOCK_DEMOSAIC 1
+#define STOCK_COLOUR   2
+#define STOCK_STATS    4
+#define STOCK_INPUT    8
+
+static unsigned stock_group(unsigned method)
+{
+    switch (method) {
+    case 0x900: case 0x902: case 0x904: case 0x906: case 0x908:
+    case 0x506:
+        return STOCK_DEMOSAIC;
+    case 0x600: case 0x650: case 0x651: case 0x653: case 0x655:
+    case 0x657: case 0xd00: case 0xd0a: case 0xd0c: case 0xd20:
+        return STOCK_COLOUR;
+    case 0x909: case 0x910: case 0x919: case 0x91b: case 0x91d:
+    case 0x91f: case 0x920:
+        return STOCK_STATS;
+    default:
+        return STOCK_INPUT;
+    }
+}
+
+static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
+                               unsigned groups)
 {
     unsigned count = sizeof isp_stock_blocks / sizeof isp_stock_blocks[0];
     for (unsigned b = 0; b < count; b++) {
@@ -642,6 +672,7 @@ static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
         /* Skipped deliberately: its second word is where the stock process
          * kept its scratch buffer, and that address means nothing here. */
         if (bl->method == 0x053) continue;
+        if (!(stock_group(bl->method) & groups)) continue;
 
         if (bl->mode == 0) {
             g[n++] = OP_INCR(bl->method, bl->count);
@@ -655,7 +686,7 @@ static unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
             for (unsigned i = 1; i < bl->count; i++) g[n++] = d[i];
         }
     }
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
+    if (groups) { g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova; }
     return n;
 }
 
@@ -965,7 +996,7 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     /* And then the real thing, last, so it stands over everything above:
      * the configuration read out of the stock camera while it was running.
      * The demosaic coefficients live here and nowhere else we could reach. */
-    if (stock_cfg) n = isp_stock_emit(g, n, work_iova);
+    if (stock_cfg) n = isp_stock_emit(g, n, work_iova, stock_cfg);
 
     g[n++] = OP_INCR(0x015, 1); g[n++] = enable;
 
@@ -1594,9 +1625,10 @@ int main(int argc, char **argv)
      * default now: it is what the camera on this device actually does. */
     int zero_init = 1;
     int isp_apply = 1;
-    /* On by default: it is measured configuration from the working camera,
-     * where everything else here is reconstruction. */
-    int stock_cfg = 1;
+    /* The demosaic group only, by default. Sending the whole table at once
+     * took the statistics path down with it; the coefficients are what we
+     * came for, so start with those alone and add a group at a time. */
+    unsigned stock_cfg = STOCK_DEMOSAIC;
     uint32_t opt_u_off = 0, opt_v_off = 0;
     /* The kind to allocate the ISP's output as. Zero means an ordinary
      * pitch-linear buffer; 0xFE is what the block-linear format wants. */
@@ -1673,6 +1705,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
         else if (strcmp(a, "--no-apply") == 0)     isp_apply = 0;
         else if (strcmp(a, "--no-stock-cfg") == 0) stock_cfg = 0;
+        else if (strncmp(a, "--stock=", 8) == 0)
+            stock_cfg = (unsigned)strtoul(a + 8, 0, 0);
         else if (strncmp(a, "--u-off=", 8) == 0)
             opt_u_off = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--v-off=", 8) == 0)

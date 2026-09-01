@@ -158,19 +158,19 @@ int main(int argc, char **argv)
          * it, so work backwards and each answer is already known. Hunting
          * for one anchoring method and guessing at the head was finding
          * whichever fragment happened to come first. */
-        int32_t *len = calloc(words + 1, sizeof *len);
-        if (!len) { free(buf); continue; }
+        int32_t *chain = calloc(words + 1, sizeof *chain);
+        if (!chain) { free(buf); continue; }
         for (size_t i = words; i-- > 0; ) {
             size_t sz = desc_size(buf + i, words - i);
             if (!sz) continue;
             if (buf[i] == (uint32_t)anchor) hits++;
-            len[i] = 1 + ((i + sz < words) ? len[i + sz] : 0);
+            chain[i] = 1 + ((i + sz < words) ? chain[i + sz] : 0);
         }
         size_t head = 0;
         int n = 0;
         for (size_t i = 0; i < words; i++)
-            if (len[i] > n) { n = len[i]; head = i; }
-        free(len);
+            if (chain[i] > n) { n = chain[i]; head = i; }
+        free(chain);
 
         if (n > best_n) {
             best_n = n;

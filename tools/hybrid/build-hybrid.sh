@@ -19,7 +19,9 @@ mkdir -p "$OUTDIR"
 # Delete first: a failed build must not leave a stale binary that looks fresh.
 OUT="$OUTDIR/hybrid"
 rm -f "$OUT"
-$CC -std=gnu99 -pie -O2 -Wall -I"$ROOT/tools/viisp" -o "$OUT" "$SRC" -ldl
+# The viisp headers carry the whole stock configuration; whatever this tool
+# does not send yet is an unused table, not a warning worth reading.
+$CC -std=gnu99 -pie -O2 -Wall -Wno-unused-const-variable -I"$ROOT/tools/viisp" -o "$OUT" "$SRC" -ldl
 
 echo "=== built: $OUT ($(stat -c%s "$OUT") bytes) ==="
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$OUT" | grep NEEDED

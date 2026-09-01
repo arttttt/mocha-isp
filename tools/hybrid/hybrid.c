@@ -29,7 +29,7 @@
  * Usage: ./hybrid <raw_bayer> [--width=N] [--height=N] [--w0=N] [--yuv-cfg]
  *                 [--no-lib] [--hw-apply] [--isp=1|2] [--dm] [--dm-all]
  *                 [--ccm] [--commit] [--pipe] [--two-pass] [--enable=HEX]
- *                 [--out-fmt=0xN] [--in-fmt=0xN]
+ *                 [--dims] [--full] [--out-fmt=0xN] [--in-fmt=0xN]
  */
 
 #include <stdio.h>
@@ -96,8 +96,38 @@ struct nvhost32_submit_args {
 #define ISP_CLASS_A 0x32
 #define ISP_CLASS_B 0x34
 
-/* The demosaic coefficients, word for word from the stock capture. */
+/* The demosaic coefficients, word for word from the stock capture, and the
+ * rest of the stock configuration: the shadow the live camera holds
+ * (isp_stock.h) and the values its real pass sends at 2592x1944
+ * (isp_real.h). Both are viisp's; --full sends them here. */
 #include "isp_demosaic.h"
+#include "isp_stock.h"
+#include "isp_real.h"
+
+/* Statistics windows as the running configuration has them (viisp carries
+ * the same words); the 0x70000 tail is the 8x8 warm-up's, not this. */
+static const uint32_t win_930[18] = {
+    0x0000001d, 0x88888888, 0x78787800, 0x00000078, 0x88888888, 0x78787800,
+    0x00000078, 0x88888888, 0x78787800, 0x00000078, 0x88888888, 0x78787800,
+    0x00000078, 0x3fc00000, 0x00220000, 0x0004003f, 0x00120000, 0x0003003f,
+};
+
+static int emit(uint32_t *cmd, int n, uint32_t method, const uint32_t *v, int count)
+{
+    cmd[n++] = OP_INCR(method, count);
+    for (int i = 0; i < count; i++) cmd[n++] = v[i];
+    return n;
+}
+
+/* The stock's mode-1 shape: one INCR for the head word, one NONINCR for
+ * the table behind it. */
+static int emit_split(uint32_t *cmd, int n, uint32_t method, const uint32_t *v, int count)
+{
+    cmd[n++] = OP_INCR(method, 1); cmd[n++] = v[0];
+    cmd[n++] = OP_NONINCR(method + 1, count - 1);
+    for (int i = 1; i < count; i++) cmd[n++] = v[i];
+    return n;
+}
 
 /* The rest of the demosaic family, from the same capture (tools/viisp/
  * isp_stock.h carries the full set; only these are needed here). */
@@ -323,6 +353,7 @@ int main(int argc, char **argv)
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
     int dm = 0, dm_all = 0, ccm = 0, commit = 0, pipe = 0, two_pass = 0;
+    int dims = 0, full = 0;
     uint32_t enable = 0x00000007;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -341,9 +372,16 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--pipe") == 0)        pipe = 1;
         else if (strcmp(a, "--two-pass") == 0)    two_pass = 1;
         else if (strncmp(a, "--enable=", 9) == 0) enable = strtoul(a + 9, 0, 16);
+        else if (strcmp(a, "--dims") == 0)        dims = 1;
+        else if (strcmp(a, "--full") == 0)        full = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
+    /* --full is the whole stock configuration for a frame: every block the
+     * live camera's shadow holds, with the real pass's values, plus the
+     * frame's own dimensions and a statistics buffer. It implies the
+     * smaller switches. */
+    if (full) { pipe = dm = dm_all = ccm = commit = dims = 1; }
     if (inst != 1 && inst != 2) { printf("--isp must be 1 or 2\n"); return 1; }
     isp_class = inst == 2 ? ISP_CLASS_B : ISP_CLASS_A;
     const char *isp_node = inst == 2 ? "/dev/nvhost-isp.1" : "/dev/nvhost-isp";
@@ -352,11 +390,12 @@ int main(int argc, char **argv)
            use_lib ? "library" : "no", hw_apply ? " + HwSettingsApply" : "");
     printf("ISP-%c class 0x%02x, geometry %ux%u, in 0x%08x, out 0x%08x, "
            "demosaic %s, matrix %s, pipeline blocks %s, enable 0x%08x, "
-           "trigger %s%s\n",
+           "trigger %s%s%s%s\n",
            inst == 2 ? 'B' : 'A', isp_class, W, H, in_fmt, out_fmt,
            dm_all ? "all blocks" : dm ? "coefficients" : "off",
            ccm ? "on" : "off", pipe ? "stock" : "off", enable,
-           two_pass ? "0x09 then 0x0B" : "0x0B", commit ? ", 0x0F apply first" : "");
+           two_pass ? "0x09 then 0x0B" : "0x0B", commit ? ", 0x0F apply first" : "",
+           dims ? ", frame dims in 0x500" : "", full ? ", FULL stock configuration" : "");
 
     if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply)) {
         printf("library bring-up failed -- stopping\n");
@@ -402,14 +441,16 @@ int main(int argc, char **argv)
 
     uint32_t in_size = W * H * 2, out_size = W * 4 * H;
     uint32_t in_h = nvmap_create(in_size), out_h = nvmap_create(out_size);
-    uint32_t cmd_h = nvmap_create(4096), work_h = nvmap_create(512 * 1024);
-    if (!in_h || !out_h || !cmd_h || !work_h) {
+    uint32_t cmd_h = nvmap_create(16384), work_h = nvmap_create(512 * 1024);
+    uint32_t stats_h = nvmap_create(512 * 1024);
+    if (!in_h || !out_h || !cmd_h || !work_h || !stats_h) {
         printf("alloc failed\n");
         lib_tear_down();
         return 1;
     }
     nvmap_alloc(in_h); nvmap_alloc(out_h); nvmap_alloc(cmd_h); nvmap_alloc(work_h);
-    nvmap_pin(in_h); nvmap_pin(out_h); nvmap_pin(work_h);
+    nvmap_alloc(stats_h);
+    nvmap_pin(in_h); nvmap_pin(out_h); nvmap_pin(work_h); nvmap_pin(stats_h);
 
     /* Load the frame, zero the output so anything present afterwards is the
      * hardware's doing. */
@@ -429,8 +470,8 @@ int main(int argc, char **argv)
 
     /* The frame, and nothing else -- plus, on request, the blocks the
      * stock camera sends before its frames and we never had. */
-    uint32_t cmd[512];
-    int n = 0, y_reloc, in_reloc, work_reloc;
+    uint32_t cmd[4096];
+    int n = 0, y_reloc, in_reloc, work_reloc, stats_reloc = -1;
     cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
 
     /* The hybrid proper: the library selected the pipeline, but nothing in
@@ -449,6 +490,15 @@ int main(int argc, char **argv)
      * 0x200=1 with the plain 0x0B trigger never completing; this is the
      * first time it goes together with the rest of the stock configuration
      * and the two-pass trigger of the stock memory path. */
+    /* The head of the stock's real pass: output stage, geometry, statistics
+     * windows, and the first block of the memory/statistics path. */
+    if (full) {
+        n = emit(cmd, n, 0x400, isp_real_400, 12);
+        n = emit(cmd, n, 0x800, isp_real_800, 3);
+        n = emit(cmd, n, 0x820, isp_real_820, 3);
+        n = emit(cmd, n, 0x930, win_930, 18);
+        n = emit(cmd, n, 0xc00, isp_real_c00, 3);
+    }
     if (pipe) {
         cmd[n++] = OP_INCR(0x202, 3);
         cmd[n++] = 0x00000001; cmd[n++] = 0x00780078; cmd[n++] = 0x00780078;
@@ -457,6 +507,16 @@ int main(int argc, char **argv)
         cmd[n++] = OP_INCR(0x205, 4);
         cmd[n++] = 0x00000000; cmd[n++] = 0x000600c8;
         cmd[n++] = 0x000f000f; cmd[n++] = 0x00000000;
+    }
+    if (full) {
+        n = emit(cmd, n, 0x700, isp_real_700, 16);
+        n = emit(cmd, n, 0x750, isp_real_750, 16);
+        n = emit(cmd, n, 0xd00, isp_real_d00, 10);
+        cmd[n++] = OP_INCR(0xd0a, 1); cmd[n++] = isp_real_d0a[0];
+        cmd[n++] = OP_NONINCR(0xd0b, 480);
+        for (int i = 0; i < 480; i++) cmd[n++] = isp_real_d0b[i];
+        n = emit(cmd, n, 0xd0c, isp_blk_d0c, 2);
+        n = emit(cmd, n, 0xd20, isp_blk_d20, 6);
     }
 
     /* The demosaic: enable, then the two coefficient sets with their shift
@@ -491,9 +551,22 @@ int main(int argc, char **argv)
         cmd[n++] = OP_INCR(0x920, 10);
         for (int i = 0; i < 10; i++) cmd[n++] = dm_920[i];
     }
+    if (full) n = emit(cmd, n, 0x506, isp_blk_506, 9);
     if (ccm) {
         cmd[n++] = OP_INCR(0x600, 16);
         for (int i = 0; i < 16; i++) cmd[n++] = ccm_600[i];
+    }
+    /* The tail of the stock's real pass: the four lookup tables with their
+     * enable (1, as viisp settled -- 3 hung the channel), and the two
+     * 0x300 blocks. */
+    if (full) {
+        cmd[n++] = OP_INCR(0x650, 1); cmd[n++] = 0x00000001;
+        n = emit_split(cmd, n, 0x651, isp_blk_651, 258);
+        n = emit_split(cmd, n, 0x653, isp_blk_653, 258);
+        n = emit_split(cmd, n, 0x655, isp_blk_655, 258);
+        n = emit_split(cmd, n, 0x657, isp_blk_657, 258);
+        n = emit(cmd, n, 0x300, isp_blk_300, 4);
+        n = emit(cmd, n, 0x304, isp_blk_304, 4);
     }
 
     cmd[n++] = OP_INCR(0x053, 2);
@@ -518,6 +591,15 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE04, 3);
     y_reloc = n;
     cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = W * 4;
+    /* The frame's dimensions, where the stock's real frames carry them:
+     * five zero words and (H << 16) | W. The 8x8 warm-ups put decimation
+     * factors here instead; a frame with nothing here has no window to
+     * process, which is one way to get an output of nothing. */
+    if (dims) {
+        cmd[n++] = OP_INCR(0x500, 6);
+        cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0;
+        cmd[n++] = (H << 16) | W;
+    }
     cmd[n++] = OP_INCR(0xE31, 1); cmd[n++] = (H << 16) | W;
     cmd[n++] = OP_INCR(0xE33, 1); cmd[n++] = in_fmt;
     cmd[n++] = OP_INCR(0xE34, 3);
@@ -528,6 +610,13 @@ int main(int argc, char **argv)
     /* ISP_ENABLE. Ours has always been 7; the stock camera writes
      * 0x04040007, two more bits high up, and --enable lets us send that. */
     cmd[n++] = OP_INCR(0x015, 1); cmd[n++] = enable;
+    /* Where the statistics go. The stock frame names a buffer here; a full
+     * pipeline with nowhere to put them is another way to get nothing. */
+    if (full) {
+        cmd[n++] = OP_INCR(0x100, 4);
+        stats_reloc = n;
+        cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = 0;
+    }
     cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
     /* One conditional increment, on the memory syncpoint, and it is the one
      * the submit declares. The other two the ISP-B channel hands out --
@@ -553,6 +642,10 @@ int main(int argc, char **argv)
     shifts[nr++].shift = 0;
     relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)in_reloc * 4, in_h, 0 };
     shifts[nr++].shift = 0;
+    if (stats_reloc >= 0) {
+        relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)stats_reloc * 4, stats_h, 0 };
+        shifts[nr++].shift = 0;
+    }
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp_memory, 1 };
@@ -633,8 +726,8 @@ int main(int argc, char **argv)
         }
     }
 
-    nvmap_unpin(work_h); nvmap_unpin(out_h); nvmap_unpin(in_h);
-    nvmap_free(cmd_h); nvmap_free(work_h); nvmap_free(out_h); nvmap_free(in_h);
+    nvmap_unpin(stats_h); nvmap_unpin(work_h); nvmap_unpin(out_h); nvmap_unpin(in_h);
+    nvmap_free(cmd_h); nvmap_free(stats_h); nvmap_free(work_h); nvmap_free(out_h); nvmap_free(in_h);
     close(ctrl_fd); close(nvmap_fd);
     /* The channel descriptor is the library's: it closes it, not us. */
     lib_tear_down();

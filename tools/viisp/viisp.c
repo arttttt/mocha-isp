@@ -1324,8 +1324,27 @@ static void isp_stop(int isp_fd, uint32_t sp)
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
     errno = 0;
+    uint32_t was = syncpt_read(sp);
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("ISP stopped: rc=%d (%s)\n", rc, rc == 0 ? "ok" : strerror(errno));
+
+    /* Wait for the block to actually take it. Submitting and walking away
+     * left a write still in flight, and by the time it landed the buffer
+     * had been unmapped: the memory controller reported a decode error
+     * from the ISP's own write client on an address in what had been our
+     * output. Nothing here may release memory the hardware can still
+     * reach. */
+    int waited = 0;
+    while (syncpt_read(sp) == was && waited < 500) {
+        usleep(2000);
+        waited += 2;
+    }
+    /* And a moment beyond that, because the disable is what the job
+     * carries, not proof that the last transfer has drained. */
+    usleep(20000);
+
+    printf("ISP stopped: rc=%d (%s), settled in %d ms%s\n", rc,
+           rc == 0 ? "ok" : strerror(errno), waited,
+           syncpt_read(sp) == was ? " -- NEVER ACKNOWLEDGED" : "");
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
 }
 

@@ -101,18 +101,18 @@ echo "=== camera path after the run ==="
 sleep 6
 after=$(channel_errors); after=${after:-0}
 if [ "$after" -gt "$before" ]; then
-    echo "CHANNEL DIED during this run -- the result below is not evidence"
+    echo "verdict: CHANNEL DIED -- the result is not evidence"
     adb shell "dmesg | grep -E '$ERRPAT' | tail -5" 2>/dev/null | tr -d '\r'
     status=1
 else
-    echo "channel survived"
+    echo "verdict: channel survived"
     status=0
 fi
 
 faults_after=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
 faults_after=${faults_after:-0}
 if [ "$faults_after" -gt "${faults_before:-0}" ]; then
-    echo "MEMORY CONTROLLER FAULTED -- the hardware wrote somewhere it"
+    echo "verdict: MEMORY CONTROLLER FAULTED -- the hardware wrote where it"
     echo "could not reach, so the surface is wrong even if the frame looks"
     echo "plausible:"
     adb shell "dmesg | grep -E '$FAULTPAT' | tail -6" 2>/dev/null | tr -d '\r'

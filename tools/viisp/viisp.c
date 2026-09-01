@@ -1457,9 +1457,12 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
          * why the luma came back as zeros while the third surface still
          * received something: that path needs no intermediate storage. */
         if (blk[b].m == 0x400)
-            for (unsigned i = 4; i <= 7; i++) g[first + i] = work_iova;
-        else if (blk[b].m == 0x800 || blk[b].m == 0x820)
-            g[first] = work_iova;
+            for (unsigned i = 4; i <= 7; i++)
+                g[first + i] = work_iova + 0x100000 + (i - 4) * 0x40000;
+        else if (blk[b].m == 0x800)
+            g[first] = work_iova + 0x80000;
+        else if (blk[b].m == 0x820)
+            g[first] = work_iova + 0xC0000;
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
@@ -2176,7 +2179,11 @@ int main(int argc, char **argv)
          * reprocess tool calls it required for a cold start. */
         /* Big enough for the offsets the runtime configuration hands out --
          * it reaches 0x3f4a0 into this buffer. */
-        work_h = nvmap_create(512 * 1024);
+        /* Two megabytes, laid out below into separate windows: the stock
+         * configuration points several different stages at several
+         * different places, and aiming them all at one address makes them
+         * tread on each other. */
+        work_h = nvmap_create(2 * 1024 * 1024);
         if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
 
         /* Stock configures the other block first and in full. Do the same

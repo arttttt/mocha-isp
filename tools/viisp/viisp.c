@@ -1681,6 +1681,21 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = full ? 0x00007901 : 0x00005a01;
     g[n++] = 0x00000000;
     g[n++] = full ? 0x01030a20 : ((0x0082u << 16) | W);
+
+    /* And this one changes with the frame as well, which the diff between
+     * the two captures turned up and I had not known: every word but the
+     * first and the last is different at the smaller size. */
+    g[n++] = OP_INCR(0xd00, 10);
+    g[n++] = 0x00000001;
+    g[n++] = full ? 0x00ca4580 : 0x01999990;
+    g[n++] = full ? 0x006522c0 : 0x00ccccc0;
+    g[n++] = full ? 0x00ca4580 : 0x01999990;
+    g[n++] = full ? 0x010db200 : 0x02222220;
+    g[n++] = full ? 0x0086d900 : 0x01111110;
+    g[n++] = full ? 0x010db200 : 0x02222220;
+    g[n++] = full ? 0x05100288 : 0x02800140;
+    g[n++] = full ? 0x03cc01e6 : 0x01de00ee;
+    g[n++] = 0x00000021;
     (void)geo_blocks;
 
     /* The output stage, with the four words we had been leaving as a stub.

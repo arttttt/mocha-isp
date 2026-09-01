@@ -499,14 +499,19 @@ int main(int argc, char **argv)
         n = emit(cmd, n, 0x930, win_930, 18);
         n = emit(cmd, n, 0xc00, isp_real_c00, 3);
     }
+    /* The values are the ones the stock camera runs with, not the ones it
+     * opens with: both captures (2592 and 720) send {1, 00780078, 00780078}
+     * and a zero 0x208 in the opening rounds, then {1, 02000200, 02000200}
+     * and 0x208 = 0x3333 in the pass before the real frames. The live
+     * shadow read by ispshadow (isp_stock.h) still holds the opening set. */
     if (pipe) {
         cmd[n++] = OP_INCR(0x202, 3);
-        cmd[n++] = 0x00000001; cmd[n++] = 0x00780078; cmd[n++] = 0x00780078;
+        cmd[n++] = 0x00000001; cmd[n++] = 0x02000200; cmd[n++] = 0x02000200;
         cmd[n++] = OP_INCR(0x200, 2);
         cmd[n++] = 0x00000001; cmd[n++] = 0x00000000;
         cmd[n++] = OP_INCR(0x205, 4);
         cmd[n++] = 0x00000000; cmd[n++] = 0x000600c8;
-        cmd[n++] = 0x000f000f; cmd[n++] = 0x00000000;
+        cmd[n++] = 0x000f000f; cmd[n++] = 0x00003333;
     }
     if (full) {
         n = emit(cmd, n, 0x700, isp_real_700, 16);

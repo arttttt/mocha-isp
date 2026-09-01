@@ -29,7 +29,7 @@
  * Usage: ./hybrid <raw_bayer> [--width=N] [--height=N] [--w0=N] [--yuv-cfg]
  *                 [--no-lib] [--hw-apply] [--isp=1|2] [--dm] [--dm-all]
  *                 [--ccm] [--commit] [--pipe] [--two-pass] [--enable=HEX]
- *                 [--dims] [--full] [--out-fmt=0xN] [--in-fmt=0xN]
+ *                 [--dims] [--full] [--yuv] [--out-fmt=0xN] [--in-fmt=0xN]
  */
 
 #include <stdio.h>
@@ -353,7 +353,7 @@ int main(int argc, char **argv)
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
     int dm = 0, dm_all = 0, ccm = 0, commit = 0, pipe = 0, two_pass = 0;
-    int dims = 0, full = 0;
+    int dims = 0, full = 0, yuv = 0;
     uint32_t enable = 0x00000007;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -374,6 +374,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--enable=", 9) == 0) enable = strtoul(a + 9, 0, 16);
         else if (strcmp(a, "--dims") == 0)        dims = 1;
         else if (strcmp(a, "--full") == 0)        full = 1;
+        else if (strcmp(a, "--yuv") == 0)         yuv = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -382,6 +383,12 @@ int main(int argc, char **argv)
      * frame's own dimensions and a statistics buffer. It implies the
      * smaller switches. */
     if (full) { pipe = dm = dm_all = ccm = commit = dims = 1; }
+    /* --yuv: three pitch-linear planes (the 0x010000E6 the April tool used
+     * for its planar runs) instead of one RGBA surface. In the bypass the
+     * planar output put the picture in the V plane and nothing in Y -- the
+     * same shape viisp gets from the sensor -- and RGBA put it in one lane;
+     * with the pipeline on, RGBA came out black and planar is untried. */
+    if (yuv && out_fmt == 0x43) out_fmt = 0x010000E6;
     if (inst != 1 && inst != 2) { printf("--isp must be 1 or 2\n"); return 1; }
     isp_class = inst == 2 ? ISP_CLASS_B : ISP_CLASS_A;
     const char *isp_node = inst == 2 ? "/dev/nvhost-isp.1" : "/dev/nvhost-isp";
@@ -472,6 +479,8 @@ int main(int argc, char **argv)
      * stock camera sends before its frames and we never had. */
     uint32_t cmd[4096];
     int n = 0, y_reloc, in_reloc, work_reloc, stats_reloc = -1;
+    int u_reloc = -1, v_reloc = -1;
+    const uint32_t u_off = W * H, v_off = W * H + (W / 2) * (H / 2);
     cmd[n++] = OP_SETCLASS(isp_class, 0, 0);
 
     /* The hybrid proper: the library selected the pipeline, but nothing in
@@ -595,7 +604,15 @@ int main(int argc, char **argv)
     cmd[n++] = OP_INCR(0xE03, 1); cmd[n++] = 0;
     cmd[n++] = OP_INCR(0xE04, 3);
     y_reloc = n;
-    cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = W * 4;
+    cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = yuv ? W : W * 4;
+    if (yuv) {
+        cmd[n++] = OP_INCR(0xE07, 3);
+        u_reloc = n;
+        cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = W / 2;
+        cmd[n++] = OP_INCR(0xE0A, 3);
+        v_reloc = n;
+        cmd[n++] = 0; cmd[n++] = 0; cmd[n++] = W / 2;
+    }
     /* The frame's dimensions, where the stock's real frames carry them:
      * five zero words and (H << 16) | W. The 8x8 warm-ups put decimation
      * factors here instead; a frame with nothing here has no window to
@@ -638,9 +655,15 @@ int main(int argc, char **argv)
     printf("gather: %d words\n", n);
     nvmap_write(cmd_h, 0, cmd, n * 4);
 
-    struct nvhost_reloc relocs[4];
-    struct nvhost_reloc_shift shifts[4];
+    struct nvhost_reloc relocs[6];
+    struct nvhost_reloc_shift shifts[6];
     int nr = 0;
+    if (u_reloc >= 0) {
+        relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)u_reloc * 4, out_h, u_off };
+        shifts[nr++].shift = 0;
+        relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)v_reloc * 4, out_h, v_off };
+        shifts[nr++].shift = 0;
+    }
     relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)(work_reloc + 1) * 4, work_h, 0 };
     shifts[nr++].shift = 0;
     relocs[nr] = (struct nvhost_reloc){ cmd_h, (uint32_t)y_reloc * 4, out_h, 0 };
@@ -681,10 +704,33 @@ int main(int argc, char **argv)
     else
         printf("done, syncpt value %u\n", wa.value);
 
+    /* Planar read-back: each plane on its own. */
+    if (yuv) {
+        static const char *pn[3] = { "Y", "U", "V" };
+        uint32_t off[3] = { 0, u_off, v_off };
+        uint32_t len[3] = { W * H, (W / 2) * (H / 2), (W / 2) * (H / 2) };
+        uint8_t *rb = malloc(chunk);
+        for (int p = 0; p < 3; p++) {
+            uint64_t sum = 0; uint32_t nz = 0, lo = 255, hi = 0;
+            for (uint32_t o = 0; o < len[p]; o += chunk) {
+                uint32_t part = len[p] - o < chunk ? len[p] - o : chunk;
+                if (nvmap_read(out_h, off[p] + o, rb, part) < 0) break;
+                for (uint32_t i = 0; i < part; i++) {
+                    sum += rb[i]; nz += rb[i] != 0;
+                    if (rb[i] < lo) lo = rb[i];
+                    if (rb[i] > hi) hi = rb[i];
+                }
+            }
+            printf("  plane %s: min=%3u max=%3u mean=%6.1f nonzero=%u of %u\n",
+                   pn[p], lo, hi, (double)sum / len[p], nz, len[p]);
+        }
+        free(rb);
+    }
+
     /* Read back: the first bytes, and each channel separately -- with a
      * synthetic frame the red-lit and blue-lit bands must differ if the
      * mosaic is being demosaiced rather than averaged. */
-    {
+    if (!yuv) {
         uint32_t scan = out_size < (4u << 20) ? out_size : (4u << 20);
         uint8_t *rb = malloc(chunk);
         uint32_t lo[4] = {255,255,255,255}, hi[4] = {0,0,0,0}, cnt[4] = {0,0,0,0};

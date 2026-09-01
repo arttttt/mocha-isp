@@ -113,6 +113,7 @@ int main(int argc, char **argv)
     unsigned maxattr = 256;
     int do_set = 0, do_apply = 0;
     long dump_off = 0, dump_len = 0;
+    int ramp = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -120,6 +121,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--max=", 6) == 0)  maxattr = (unsigned)atoi(a + 6);
         else if (strcmp(a, "--set") == 0)       do_set = 1;
         else if (strcmp(a, "--apply") == 0)     { do_set = 1; do_apply = 1; }
+        else if (strcmp(a, "--ramp") == 0)      { do_set = 1; ramp = 1; }
         else if (strncmp(a, "--dump=", 7) == 0) {
             do_set = 1;
             dump_off = strtol(a + 7, (char **)&a, 0);
@@ -250,11 +252,22 @@ int main(int argc, char **argv)
             memset(m[q], 0, sizeof m[q]);
             memset(k[q], 0, sizeof k[q]);
             memset(k2[q], 0, sizeof k2[q]);
-            /* Distinct per phase, so the converted words are recognisable
-             * on the other side rather than four identical runs. */
-            m[q][4]  = 1.0f / (float)(1 << q);
-            k[q][5]  = 1.0f / (float)(1 << q);
-            k2[q][5] = 1.0f / (float)(1 << q);
+            if (ramp) {
+                /* A staircase instead of a single spike: with every entry
+                 * distinct, where each one lands among the packed words can
+                 * be read straight off, and the packing stops being a
+                 * guess. Same for every phase, so the four groups should
+                 * come out identical. */
+                for (int i = 0; i < 9; i++)  m[q][i]  = (i + 1) / 9.0f;
+                for (int i = 0; i < 16; i++) k[q][i]  = (i + 1) / 16.0f;
+                for (int i = 0; i < 16; i++) k2[q][i] = (i + 1) / 16.0f;
+            } else {
+                /* Distinct per phase, so the converted words are
+                 * recognisable rather than four identical runs. */
+                m[q][4]  = 1.0f / (float)(1 << q);
+                k[q][5]  = 1.0f / (float)(1 << q);
+                k2[q][5] = 1.0f / (float)(1 << q);
+            }
         }
 
         uint8_t st[0x40];

@@ -373,8 +373,6 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
              int zero_init, int apply, uint32_t stats_ctrl,
              int stock_cfg, const struct geom_cfg *geo);
 int isp_init_a(int fd, uint32_t sp);
-int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
-                  uint32_t u_off, uint32_t v_off, uint32_t sp);
 int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
                  uint32_t stats_h, uint32_t u_off, uint32_t v_off,
                  uint32_t work_iova);

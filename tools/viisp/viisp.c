@@ -330,7 +330,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
             { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
             { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
             { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
-            { 0x910, 9, 0 }, { 0x919, 1, 0 }, { 0x91A, 9, 1 },
+            { 0x910, 9, 0 },
             { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
             { 0x91E, 9, 1 },
             { 0x506, 9, 0 }, { 0x600, 16, 0 },
@@ -347,7 +347,9 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
                                      : OP_INCR(z[k].m, z[k].n);
                 for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
             }
-            /* The two words stock leaves set in the whole of that pass. */
+            /* The one block whose tail is not zeros: stock sets the eighth
+             * slot of the 0x91a array port, and the header word with it. */
+            g[n++] = OP_INCR(0x919, 1); g[n++] = 0x00000000;
             g[n++] = OP_NONINCR(0x91A, 9);
             for (int i = 0; i < 8; i++) g[n++] = 0;
             g[n++] = 0x00000200;
@@ -873,56 +875,9 @@ int isp_init_a(int fd, uint32_t sp)
  * Parking a job to hold the mapping is not an option -- it outlives the
  * timeout the kernel allows and takes the channel with it.
  *
- * So instead: a short job that carries the same relocations and nothing
- * else, submitted again and again. Each one is over in moments and cannot
- * strand anything, and between them the mapping never lapses. */
-int isp_keepalive(int fd, uint32_t out_h, uint32_t stats_h,
-                         uint32_t u_off, uint32_t v_off, uint32_t sp)
-{
-    uint32_t cmd_h = nvmap_create(4096);
-    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-
-    uint32_t g[24];
-    int n = 0, y_word, u_word, v_word, stats_word;
-    g[n++] = OP_SETCLASS(ISP_CLASS_B);
-    g[n++] = OP_INCR(0xE04, 3);
-    y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = OP_INCR(0xE07, 3);
-    u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = OP_INCR(0xE0A, 3);
-    v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = OP_INCR(0x100, 4);
-    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = OP_IMM(0, sp);
-    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
-
-    struct nvhost_reloc rel[4] = {
-        { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
-        { cmd_h, (uint32_t)u_word * 4, out_h, u_off },
-        { cmd_h, (uint32_t)v_word * 4, out_h, v_off },
-        { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
-    };
-    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
-    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-    struct nvhost_syncpt_incr si = { sp, 1 };
-    uint32_t cls = ISP_CLASS_B;
-    struct nvhost_fence fence = { 0, 0 };
-    struct nvhost32_submit_args sa;
-    memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 1;
-    sa.num_cmdbufs = 1;
-    sa.num_relocs = 4;
-    sa.timeout = 3000;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
-    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-    sa.relocs = (uint32_t)(uintptr_t)rel;
-    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
-    sa.class_ids = (uint32_t)(uintptr_t)&cls;
-    sa.fences = (uint32_t)(uintptr_t)&fence;
-    int rc = ioctl(fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
-    return rc;
-}
+ * So instead: the frame job parks itself on the frame's own completion and
+ * on statistics, so the relocation pins last exactly as long as the writes
+ * they guard. No second job, no flood, nothing to strand. */
 
 /* Put the block back to sleep. Without this it stays armed and writes a
  * later frame into a buffer we have already let go -- the memory controller
@@ -1321,11 +1276,12 @@ void isp_stop(int isp_fd, uint32_t sp)
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return;
 
-    uint32_t g[10];
+    /* No 0x00C=0: the stock camera never writes a zero trigger, and a write
+     * the hardware has no meaning for is one more thing to differ on. */
+    uint32_t g[8];
     int n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_INCR(0x015, 1); g[n++] = 0x00000000;
-    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x00000000;
     g[n++] = OP_IMM(0, sp);
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
@@ -1479,12 +1435,27 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
 
-    /* No parked job here. Twice now a host1x wait held this channel past
-     * the timeout the kernel allows and killed it, and each time cost a
-     * reboot. It was never the right cure anyway: the buffer went
-     * unmapped because the ISP was still writing after our program had
-     * torn everything down, and waiting for the block to report the write
-     * before we tear down fixes that without holding anything. */
+    /* Park the job on the frame's own completion and on statistics, the way
+     * stock's post-frame submit does. The relocation pins then last exactly
+     * as long as the writes they guard, and the keepalive flood that papered
+     * over the gap is gone. The threshold is read at submit time: nothing
+     * else on this exclusive channel moves 36 or 37 between here and the
+     * frame, so +1 is unambiguous. If the sensor never delivers, the job
+     * sits until its timeout and the channel dies -- the same price every
+     * wedged run paid. */
+    {
+        uint32_t want_mem = syncpt_read(sp_mem) + 1;
+        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+        g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
+        if (sp_stats) {
+            uint32_t want_stats = syncpt_read(sp_stats) + 1;
+            g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+            g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+            g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
+        }
+    }
+
     g[n++] = OP_IMM(0, sp);
     (void)hold_sp; (void)hold_at;
 
@@ -1857,6 +1828,29 @@ int main(int argc, char **argv)
      * read from anywhere: running past the end costs a reboot, and sixty
      * four kilobytes costs nothing. */
     if (isp_blocklinear) out_bytes += 0x10000;
+
+    /* The planes must tile without overlap: the ISP writes each surface to
+     * its full block-rounded extent, and two surfaces sharing bytes is what
+     * a silently dead channel looks like. Refuse the run instead. */
+    {
+        uint32_t yext = stride_y * rows_y;
+        uint32_t uext = stride_uv * rows_uv;
+        uint32_t vend = v_off + uext;
+        int bad = 0;
+        if (isp_planar) {
+            if (u_off < yext) bad = 1;
+            if (v_off < u_off + uext) bad = 1;
+            if (vend > out_bytes) bad = 1;
+            if ((u_off | v_off) & 0xFFF) bad = 1;
+        }
+        if (bad) {
+            printf("plane layout invalid: Y[0..%u) U@%u+%u V@%u+%u,"
+                   " buffer %u, 4K alignment required --"
+                   " fix --u-off/--v-off\n",
+                   yext, u_off, uext, v_off, uext, out_bytes);
+            return 1;
+        }
+    }
     int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
     uint32_t work_iova = 0, stats_iova = 0;
@@ -2793,6 +2787,11 @@ int main(int argc, char **argv)
                  * running past the job timeout the kernel allows -- and a
                  * job that overruns takes the ISP channel with it, which
                  * costs a reboot. Short and self-limiting instead. */
+                /* The parked job now holds the mapping until the frame and
+                 * the statistics are actually done, so the loop here only
+                 * watches -- no more keepalive submits every two
+                 * milliseconds, which was what buried the channel in
+                 * three-second timeouts whenever anything stalled. */
                 if (isp_fd >= 0 && out_iova) {
                     int w2 = 0;
                     /* A full-resolution frame writes at roughly three rows a
@@ -2800,24 +2799,12 @@ int main(int argc, char **argv)
                      * second -- six hundred milliseconds cut it off at
                      * seventeen hundred rows of nineteen hundred. */
                     while (syncpt_read(sp_mem) == isp_base_mem && w2 < 2500) {
-                        /* Re-map while we wait. Without this the larger
-                         * frames fault on the output buffer part way
-                         * through and never complete. */
-                        isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off,
-                                      isp_sp);
                         usleep(2000);
                         w2 += 2;
                     }
-                    /* The condition firing says the frame is done, not that
-                     * every byte of it has landed. Leaving the moment it
-                     * fires let the mapping go while the block was still
-                     * writing, and the memory controller caught it inside
-                     * our own output. So hold it a little longer. */
-                    for (int t = 0; t < 15; t++) {
-                        isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off,
-                                      isp_sp);
-                        usleep(2000);
-                    }
+                    /* A moment beyond the condition, because the last
+                     * transfer may still be draining when it fires. */
+                    usleep(20000);
                     printf("  ISP wrote after %dms%s\n", w2,
                            syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
                 }
@@ -2915,7 +2902,6 @@ isp_wait:
                               proc_flags);
         int w3 = 0;
         while (syncpt_read(sp_mem) == isp_base_mem && w3 < 4000) {
-            isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off, isp_sp);
             usleep(5000);
             w3 += 5;
         }

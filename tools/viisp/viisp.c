@@ -2953,6 +2953,16 @@ int main(int argc, char **argv)
                         usleep(2000);
                         w2 += 2;
                     }
+                    /* The condition firing says the frame is done, not that
+                     * every byte of it has landed. Leaving the moment it
+                     * fires let the mapping go while the block was still
+                     * writing, and the memory controller caught it inside
+                     * our own output. So hold it a little longer. */
+                    for (int t = 0; t < 15; t++) {
+                        isp_keepalive(isp_fd, out_h, stats_h, u_off, v_off,
+                                      isp_sp);
+                        usleep(2000);
+                    }
                     printf("  ISP wrote after %dms%s\n", w2,
                            syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
                 }

@@ -1658,10 +1658,13 @@ static int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * stage that walks the picture was reading rows that were not there,
      * and what it computed for the luma was nothing. */
     uint32_t geo = ((H - 32) << 16) | (W - 32);
+    /* The first word stays as the capture has it. Pointing it at our own
+     * buffer was tried and takes the channel down, so only the geometry
+     * changes here -- one thing at a time. */
     g[n++] = OP_INCR(0x800, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
     g[n++] = OP_INCR(0x820, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = geo;
+    g[n++] = 0x85001000; g[n++] = 0x00100010; g[n++] = geo;
     g[n++] = OP_INCR(0xc00, 3);
     g[n++] = 0x00007901; g[n++] = 0x00000000;
     g[n++] = (0x0103u << 16) | W;

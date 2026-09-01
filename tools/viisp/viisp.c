@@ -647,6 +647,8 @@ static int arm_stats;
  * the frame completing, so it stays behind a flag until the sizes each
  * stage wants are known rather than guessed. */
 static int own_scratch;
+/* Buffer sizes, in kilobytes. These are the ones a frame completes with. */
+static unsigned stats_kb = 64, work_kb = 512;
 
 /* Put the stock camera's own configuration into the gather.
  *
@@ -1932,6 +1934,10 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
         else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
+        else if (strncmp(a, "--stats-kb=", 11) == 0)
+            stats_kb = (unsigned)strtoul(a + 11, 0, 0);
+        else if (strncmp(a, "--work-kb=", 10) == 0)
+            work_kb = (unsigned)strtoul(a + 10, 0, 0);
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
@@ -2190,11 +2196,7 @@ int main(int argc, char **argv)
          * reprocess tool calls it required for a cold start. */
         /* Big enough for the offsets the runtime configuration hands out --
          * it reaches 0x3f4a0 into this buffer. */
-        /* Two megabytes, laid out below into separate windows: the stock
-         * configuration points several different stages at several
-         * different places, and aiming them all at one address makes them
-         * tread on each other. */
-        work_h = nvmap_create(2 * 1024 * 1024);
+        work_h = nvmap_create(work_kb * 1024);
         if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
 
         /* Stock configures the other block first and in full. Do the same
@@ -2226,13 +2228,12 @@ int main(int argc, char **argv)
             }
         }
 
-        /* Half a megabyte, which is what the stock camera gives it: its
-         * statistics buffers sit half a megabyte apart, eight of them in
-         * rotation. Sixty-four kilobytes was enough only while the
-         * statistics stage was never asked to finish -- as soon as its
-         * condition was armed the stage started writing, and ran off the
-         * end into the memory controller. */
-        stats_h = nvmap_create(512 * 1024);
+        /* The stock camera's statistics buffers sit half a megabyte apart,
+         * eight of them in rotation, so half a megabyte is what it gives
+         * them. But growing ours to that stopped the frame completing --
+         * measured, twice -- so the size is a knob and the default is the
+         * one that works. */
+        stats_h = nvmap_create(stats_kb * 1024);
         if (stats_h && nvmap_alloc(stats_h) == 0) {
             stats_iova = nvmap_pin(stats_h);
             /* Filled with a pattern of its own, so what the ISP puts there

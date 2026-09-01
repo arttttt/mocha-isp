@@ -1044,7 +1044,11 @@ static int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = gpp_gain; g[n++] = 0x10001000;
     }
 
-    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
+    /* One, which is what the stock camera has here. We were sending three,
+     * and writing coefficients into a stage set up differently from the way
+     * their owner set it up is a fair account of a block that stalls
+     * part-way through the stream rather than faulting on anything. */
+    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
     }   /* end of the reconstructed streaming init */

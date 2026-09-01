@@ -1,27 +1,41 @@
 /*
- * NvRm compatibility shim for MIUI blobs on SmokeR24.1 kernel.
+ * NvRm shim: sits between libnvrm and the kernel, in front of its ioctl.
  *
- * Problem: MIUI libnvrm.so calls NVMAP_IOC_MMAP (ioctl 'N'/5) which was
- * removed in newer kernels. The kernel returns ENOTTY, libnvrm ignores
- * the error, and subsequent code crashes on NULL push buffer pointer.
+ * Two jobs, both needed only while the MIUI ISP library is doing its own
+ * bring-up inside our process:
  *
- * Solution: Intercept ioctl() and translate NVMAP_IOC_MMAP to the new
- * path: NVMAP_IOC_GET_FD → mmap() on dmabuf fd.
+ * 1. NVMAP_IOC_MMAP translation -- the 24.1 kernel removed that ioctl;
+ *    libnvrm ignores the error and later dereferences a null push buffer.
+ *    Translated to GET_FD + mmap on the dmabuf. The stock kernel still has
+ *    the ioctl, and there libnvrm does not even call it, so this part is
+ *    idle on the stock kernel. Kept as it was in April.
  *
- * Old flow (MIUI libnvrm.so):
- *   addr = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, nvmap_fd, 0)
- *   ioctl(nvmap_fd, NVMAP_IOC_MMAP, {handle, 0, size, flags, addr})
- *   // kernel binds the VMA to the nvmap handle
+ * 2. Stripping the streaming trigger from HwSettingsApply's gather. The
+ *    library ends its calibration submit with ISP_CONTROL (0x00C) = 0x05,
+ *    which starts the block waiting for sensor pixels. Nothing feeds it,
+ *    so it waits forever, and when the channel is closed the kernel waits
+ *    for the block and the device hangs. That is what happened twice on
+ *    2026-09-02: the April version of this strip only looked inside
+ *    buffers it had itself mapped through job 1, found none on the stock
+ *    kernel, and passed the trigger through while the caller believed it
+ *    stripped.
  *
- * New flow (this shim):
- *   ioctl(nvmap_fd, NVMAP_IOC_GET_FD, {handle}) → dmabuf_fd
- *   addr = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, dmabuf_fd, offset)
- *   // return addr to caller via the map_caller struct
+ *    Now the strip does not depend on how the library mapped anything. On
+ *    every channel SUBMIT while NVRM_SHIM_STRIP is set, each command
+ *    buffer is read back through NVMAP_IOC_READ by the handle and offset
+ *    the submit itself names, walked as host1x opcodes, and any
+ *    ISP_CONTROL=0x05 is replaced with a NOP through NVMAP_IOC_WRITE. Each
+ *    gather is also saved to /data/local/tmp/libgather_<submit>_<n>.bin --
+ *    the record of what the library actually sends. If a buffer cannot be
+ *    read or written back, the submit is REFUSED (returns -1) rather than
+ *    passed through unchecked, so the library's Apply fails and nothing
+ *    reaches the hardware. The running tally goes to
+ *    /data/local/tmp/nvrm_shim_status.txt for the caller to check.
  *
  * Build:
- *   $CC --sysroot=$SYSROOT -std=gnu99 -shared -fPIC -o nvrm_shim.so nvrm_shim.c
+ *   $CC --sysroot=$SYSROOT -std=gnu99 -shared -fPIC -o nvrm_shim.so nvrm_shim.c -ldl
  *
- * Usage: load via dlopen BEFORE libnvrm.so, or LD_PRELOAD
+ * Usage: LD_PRELOAD=/data/local/tmp/nvrm_shim.so <program>
  */
 
 #define _GNU_SOURCE
@@ -36,6 +50,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <linux/ioctl.h>
+
+#define STATUS_PATH "/data/local/tmp/nvrm_shim_status.txt"
+#define GATHER_PATH_FMT "/data/local/tmp/libgather_%02d_%u.bin"
 
 /* nvmap ioctl magic */
 #define NVMAP_IOC_MAGIC 'N'
@@ -61,17 +78,13 @@ struct nvmap_create_handle {
 };
 #define NVMAP_IOC_GET_FD _IOWR(NVMAP_IOC_MAGIC, 15, struct nvmap_create_handle)
 
-/* NVMAP_IOC_PARAM — get handle parameters */
-struct nvmap_handle_param {
-    uint32_t handle;
-    uint32_t param;
-    unsigned long result;
+/* Read/write a handle's contents through the driver, whoever mapped it. */
+struct nvmap_rw_handle {
+    unsigned long addr; uint32_t handle; uint32_t offset;
+    uint32_t elem_size; uint32_t hmem_stride; uint32_t user_stride; uint32_t count;
 };
-#define NVMAP_IOC_PARAM _IOWR(NVMAP_IOC_MAGIC, 8, struct nvmap_handle_param)
-#define NVMAP_HANDLE_PARAM_SIZE 1
-
-/* Strip streaming commands from ISP gathers (set via env NVRM_SHIM_STRIP=1) */
-static int strip_streaming = -1; /* -1 = not checked yet */
+#define NVMAP_IOC_WRITE _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
+#define NVMAP_IOC_READ  _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
 
 /* Track dmabuf fds so we can close them later */
 #define MAX_MAPPED 64
@@ -156,10 +169,8 @@ static int shim_nvmap_mmap(int fd, struct nvmap_map_caller *mc) {
         mapped[num_mapped].length = mc->length;
         mapped[num_mapped].dmabuf_fd = dmabuf_fd;
         num_mapped++;
-    } else {
-        /* Can't track, but don't leak fd */
-        /* Keep fd open — closing it would unmap the buffer */
     }
+    /* Otherwise keep the fd open -- closing it would unmap the buffer. */
 
     /* Step 4: Return new address to caller */
     mc->addr = (unsigned long)new_addr;
@@ -171,15 +182,9 @@ static int shim_nvmap_mmap(int fd, struct nvmap_map_caller *mc) {
  * Intercept mmap on /dev/nvmap.
  *
  * Old kernel allowed mmap on /dev/nvmap fd to create a VMA, then
- * NVMAP_IOC_MMAP bound that VMA to a handle's pages.
- * New kernel rejects mmap on /dev/nvmap entirely.
- *
- * We intercept mmap and if it's on an nvmap-like fd (detected by
- * MAP_SHARED + the fd matching our tracked nvmap fd), we let it
- * return a dummy page that will be replaced by the MMAP ioctl shim.
- *
- * Actually simpler: just allocate anonymous memory as placeholder.
- * The MMAP ioctl shim will munmap it and remap via dmabuf.
+ * NVMAP_IOC_MMAP bound that VMA to a handle's pages. New kernel rejects
+ * mmap on /dev/nvmap entirely. If mmap fails on the nvmap fd, hand back
+ * anonymous memory as a placeholder; the MMAP ioctl shim replaces it.
  */
 static int nvmap_fd_cached = -1;
 
@@ -190,10 +195,7 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 
     void *result = real_mmap(addr, length, prot, flags, fd, offset);
 
-    /* If mmap failed on what looks like /dev/nvmap, provide anonymous memory */
     if (result == MAP_FAILED && fd >= 0 && (flags & MAP_SHARED)) {
-        /* Check if this is an nvmap fd by trying a harmless nvmap ioctl */
-        /* Actually, track the nvmap fd from the first successful nvmap ioctl */
         if (fd == nvmap_fd_cached) {
             result = real_mmap(NULL, length, prot,
                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -207,6 +209,66 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
     return result;
 }
 
+/* ---- the strip ---- */
+
+static int submits, scanned, stripped, failed;
+
+static void status_write(void) {
+    FILE *f = fopen(STATUS_PATH, "w");
+    if (!f) return;
+    fprintf(f, "submits=%d scanned=%d stripped=%d failed=%d\n",
+            submits, scanned, stripped, failed);
+    fclose(f);
+}
+
+static int nvmap_rw(int fd, uint32_t handle, uint32_t off, void *buf,
+                    uint32_t len, int write) {
+    struct nvmap_rw_handle rw = {
+        .addr = (unsigned long)buf, .handle = handle, .offset = off,
+        .elem_size = len, .hmem_stride = len, .user_stride = len, .count = 1,
+    };
+    return real_ioctl(fd, write ? NVMAP_IOC_WRITE : NVMAP_IOC_READ, &rw);
+}
+
+/* Walk one gather as host1x opcodes and NOP every ISP_CONTROL = 0x05.
+ * Returns the number replaced. Walking by opcode, not by word: a data
+ * word that happens to look like the trigger must not be touched. */
+static int strip_gather(uint32_t *w, uint32_t words, unsigned g) {
+    int hits = 0;
+    uint32_t i = 0;
+    while (i < words) {
+        uint32_t op = w[i], opc = op >> 28, m = (op >> 16) & 0xfff, cnt = op & 0xffff;
+        if (opc == 1 || opc == 2) {                 /* INCR / NONINCR */
+            if (m == 0x00c && cnt == 1 && i + 1 < words && w[i + 1] == 0x05) {
+                fprintf(stderr, "nvrm_shim: NOP streaming trigger, gather %u word %u\n", g, i);
+                w[i] = 0x20000000; w[i + 1] = 0x20000000;
+                hits++;
+            }
+            i += 1 + cnt;
+        } else if (opc == 3) {                      /* MASK */
+            i += 1 + (uint32_t)__builtin_popcount(cnt);
+        } else if (opc == 4) {                      /* IMM */
+            if (m == 0x00c && cnt == 0x05) {
+                fprintf(stderr, "nvrm_shim: NOP streaming trigger (IMM), gather %u word %u\n", g, i);
+                w[i] = 0x20000000;
+                hits++;
+            }
+            i += 1;
+        } else {                                    /* SETCLASS and the rest */
+            i += 1;
+        }
+    }
+    return hits;
+}
+
+static int refuse(const char *why) {
+    fprintf(stderr, "nvrm_shim: REFUSING submit: %s\n", why);
+    failed++;
+    status_write();
+    errno = ECANCELED;
+    return -1;
+}
+
 /* Intercepted ioctl */
 int ioctl(int fd, int request, ...) {
     void *arg;
@@ -217,12 +279,12 @@ int ioctl(int fd, int request, ...) {
 
     init_real_ioctl();
 
-    strip_streaming = getenv("NVRM_SHIM_STRIP") ? 1 : 0;
+    int strip_streaming = getenv("NVRM_SHIM_STRIP") ? 1 : 0;
 
     unsigned int nr = _IOC_NR(request);
     unsigned int type = _IOC_TYPE(request);
 
-    /* Track nvmap fd for mmap interception */
+    /* Track nvmap fd: for the mmap fallback, and for reading gathers back. */
     if (type == NVMAP_IOC_MAGIC && nvmap_fd_cached < 0) {
         nvmap_fd_cached = fd;
         fprintf(stderr, "nvrm_shim: detected nvmap fd=%d\n", fd);
@@ -233,106 +295,59 @@ int ioctl(int fd, int request, ...) {
         return shim_nvmap_mmap(fd, (struct nvmap_map_caller *)arg);
     }
 
-    /* Intercept nvhost SUBMIT (NR=15, 32-bit version) on ISP channel.
-     * Scan gather for streaming trigger and conditional syncpt incrs,
-     * NOP them out so ISP doesn't start waiting for VI pixels.
-     * This turns a streaming calibration gather into calibration-only. */
+    /* Channel SUBMIT (NR=15, 32-bit form) while stripping is on. */
     #define NVHOST_MAGIC 'H'
     if (type == NVHOST_MAGIC && nr == 15 && strip_streaming) {
-        /* 32-bit submit: cmdbufs at offset 28 in struct */
         struct {
             uint32_t submit_version, num_syncpt_incrs, num_cmdbufs;
             uint32_t num_relocs, num_waitchks, timeout;
             uint32_t syncpt_incrs, cmdbufs;
-            /* ... rest doesn't matter */
         } *sa = arg;
-
         struct { uint32_t mem; uint32_t offset; uint32_t words; } *cbs =
             (void *)(uintptr_t)sa->cmdbufs;
 
-        /* When stripping streaming, tell kernel to expect 0 syncpt incrs.
-         * Without the trigger, conditional incrs never fire → kernel
-         * timeout → channel reset → our reprocess gather dies.
-         * Setting num_syncpt_incrs=0 prevents kernel from waiting. */
-        int found_trigger = 0;
-
-        /* Dump gather contents to file for analysis */
-        {
-            static int dump_count = 0;
-            struct { uint32_t mem; uint32_t offset; uint32_t words; } *dump_cbs =
-                (void *)(uintptr_t)sa->cmdbufs;
-            for (uint32_t dg = 0; dg < sa->num_cmdbufs; dg++) {
-                for (int dm = 0; dm < num_mapped; dm++) {
-                    /* Each mapped region corresponds to a dmabuf.
-                     * The cmdbuf mem handle may not match directly,
-                     * but all push bufs are mapped. Try each. */
-                    uint32_t *pb = (uint32_t *)mapped[dm].addr;
-                    uint32_t pb_bytes = mapped[dm].length;
-                    if (dump_cbs[dg].offset + dump_cbs[dg].words * 4 <= pb_bytes) {
-                        uint32_t *gather = pb + dump_cbs[dg].offset / 4;
-                        char fname[128];
-                        snprintf(fname, sizeof(fname),
-                                 "/data/local/tmp/gather_%d_%d.bin",
-                                 dump_count, dg);
-                        FILE *gf = fopen(fname, "wb");
-                        if (gf) {
-                            fwrite(gather, 4, dump_cbs[dg].words, gf);
-                            fclose(gf);
-                            fprintf(stderr, "nvrm_shim: dumped G[%d] %u words to %s\n",
-                                    dg, dump_cbs[dg].words, fname);
-                        }
-                        break;
-                    }
-                }
-            }
-            dump_count++;
-        }
+        submits++;
+        if (nvmap_fd_cached < 0)
+            return refuse("no nvmap fd seen yet, cannot read the gather back");
+        if (sa->num_cmdbufs == 0 || sa->num_cmdbufs > 16)
+            return refuse("implausible cmdbuf count");
 
         for (uint32_t g = 0; g < sa->num_cmdbufs; g++) {
-            /* Find the gather in our mapped push buffers */
-            for (int m = 0; m < num_mapped; m++) {
-                if (mapped[m].dmabuf_fd < 0) continue;
-                /* Push buffer is mapped at mapped[m].addr */
-                uint32_t *pb = (uint32_t *)mapped[m].addr;
-                uint32_t pb_words = mapped[m].length / 4;
-
-                /* Scan for ISP streaming commands */
-                for (uint32_t i = 0; i < pb_words - 1; i++) {
-                    uint32_t op = pb[i];
-                    uint32_t opcode = op >> 28;
-                    uint32_t method = (op >> 16) & 0xFFF;
-                    uint32_t count = op & 0xFFFF;
-
-                    /* NONINCR(0x00C, 1) + trigger 0x05 → NOP
-                     * 0x05 = streaming runtime (strip — no VI data)
-                     * 0x0F = calibration apply (KEEP — ISP needs it!) */
-                    if (opcode == 2 && method == 0x00C && count == 1) {
-                        if (pb[i+1] == 0x05) {
-                            fprintf(stderr, "nvrm_shim: NOP trigger 0x%02x at pb[%u]\n",
-                                    pb[i+1], i);
-                            /* Dump 5 words before trigger to see syncpt format */
-                            fprintf(stderr, "nvrm_shim: context pb[%u..%u]:",
-                                    i > 5 ? i-5 : 0, i+1);
-                            for (int j = (i > 5 ? i-5 : 0); j <= i+1; j++)
-                                fprintf(stderr, " %08x", pb[j]);
-                            fprintf(stderr, "\n");
-                            pb[i] = 0x20000000;
-                            pb[i+1] = 0x20000000;
-                            found_trigger = 1;
-                        }
-                    }
-
-                    /* Syncpt incrs are tracked via submit args, not push buffer.
-                     * We zero num_syncpt_incrs above when stripping triggers. */
-                }
+            uint32_t words = cbs[g].words;
+            if (words == 0 || words > (1u << 20))
+                return refuse("implausible gather length");
+            uint32_t *buf = malloc((size_t)words * 4);
+            if (!buf)
+                return refuse("out of memory");
+            if (nvmap_rw(nvmap_fd_cached, cbs[g].mem, cbs[g].offset, buf, words * 4, 0) < 0) {
+                free(buf);
+                return refuse("NVMAP_IOC_READ of the gather failed");
             }
-        }
+            scanned++;
 
-        /* If we stripped 0x05 but not 0x0F, calibration applies normally.
-         * Conditional syncpt incrs should fire after 0x0F completes. */
-        if (found_trigger) {
-            fprintf(stderr, "nvrm_shim: stripped %d streaming triggers\n", found_trigger);
+            char fname[128];
+            snprintf(fname, sizeof fname, GATHER_PATH_FMT, submits, g);
+            FILE *gf = fopen(fname, "wb");
+            if (gf) {
+                fwrite(buf, 4, words, gf);
+                fclose(gf);
+            }
+            fprintf(stderr, "nvrm_shim: submit %d gather %u: %u words (handle %u off %u) -> %s\n",
+                    submits, g, words, cbs[g].mem, cbs[g].offset, fname);
+
+            int hits = strip_gather(buf, words, g);
+            if (hits) {
+                if (nvmap_rw(nvmap_fd_cached, cbs[g].mem, cbs[g].offset, buf, words * 4, 1) < 0) {
+                    free(buf);
+                    return refuse("NVMAP_IOC_WRITE of the stripped gather failed");
+                }
+                stripped += hits;
+            }
+            free(buf);
         }
+        fprintf(stderr, "nvrm_shim: submit %d passes: %d triggers stripped so far\n",
+                submits, stripped);
+        status_write();
     }
 
     return real_ioctl(fd, request, arg);

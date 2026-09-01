@@ -136,6 +136,28 @@ static int nvmap_fd = -1;
 static unsigned W = 3264, H = 2448;
 static uint32_t isp_class = ISP_CLASS_A;
 
+/* What the library opened, so it can close it itself on every way out.
+ * Leaving the process without NvIspClose leaves the channel to the kernel's
+ * teardown, and a block left waiting takes the device down with it. */
+static void *g_isp_lib, *g_hIsp, *g_hw0, *g_hw1;
+
+static void lib_tear_down(void)
+{
+    if (!g_isp_lib || !g_hIsp) return;
+    void (*HwDestroy)(void *) = dlsym(g_isp_lib, "NvIspHwSettingsDestroy");
+    void (*Close)(void *) = dlsym(g_isp_lib, "NvIspClose");
+    if (HwDestroy) {
+        if (g_hw1) HwDestroy(g_hw1);
+        if (g_hw0) HwDestroy(g_hw0);
+    }
+    g_hw0 = g_hw1 = 0;
+    if (Close) Close(g_hIsp);
+    printf("library closed its channel (NvIspClose)\n");
+    g_hIsp = 0;
+}
+
+#define SHIM_STATUS "/data/local/tmp/nvrm_shim_status.txt"
+
 static uint32_t nvmap_create(uint32_t size) {
     struct nvmap_create_handle ch = { .size = size };
     if (ioctl(nvmap_fd, NVMAP_IOC_CREATE, &ch) < 0) { perror("nvmap create"); return 0; }
@@ -192,11 +214,13 @@ static int shim_loaded(void)
     return found;
 }
 
-static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply)
+static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply,
+                          int allow_unstripped)
 {
     void *rm = dlopen("libnvrm.so", RTLD_NOW);
     void *isp = dlopen("libnvisp_v3.so", RTLD_NOW);
     if (!rm || !isp) { printf("dlopen: %s\n", dlerror()); return 0; }
+    g_isp_lib = isp;
 
     int (*NvRmOpen)(void **, uint32_t) = dlsym(rm, "NvRmOpen");
     int (*NvIspOpen)(void *, int, void **) = dlsym(isp, "NvIspOpen");
@@ -215,6 +239,7 @@ static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply)
     rc = NvIspOpen(hRm, inst, &hIsp);         /* 1 = ISP-A, 2 = ISP-B */
     printf("NvIspOpen(%d): rc=%d handle=%p\n", inst, rc, hIsp);
     if (!hIsp) return 0;
+    g_hIsp = hIsp;
 
     uint32_t cfg1[16];
     memcpy(cfg1, yuv_cfg ? CFG_YUV : CFG_PRIMARY, sizeof cfg1);
@@ -241,18 +266,50 @@ static void *lib_bring_up(uint32_t w0, int yuv_cfg, int inst, int hw_apply)
         if (!shim_loaded()) {
             printf("nvrm_shim.so is not preloaded -- HwSettingsApply would "
                    "leave a streaming trigger waiting forever; stopping\n");
+            lib_tear_down();
             return 0;
         }
-        void *hw0 = 0, *hw1 = 0;
-        rc = HwCreate(hIsp, &hw0);
-        printf("HwSettingsCreate[0]: rc=%d settings=%p\n", rc, hw0);
-        rc = HwCreate(hIsp, &hw1);
-        printf("HwSettingsCreate[1]: rc=%d settings=%p\n", rc, hw1);
-        if (!hw0) return 0;
+        rc = HwCreate(hIsp, &g_hw0);
+        printf("HwSettingsCreate[0]: rc=%d settings=%p\n", rc, g_hw0);
+        rc = HwCreate(hIsp, &g_hw1);
+        printf("HwSettingsCreate[1]: rc=%d settings=%p\n", rc, g_hw1);
+        if (!g_hw0) { lib_tear_down(); return 0; }
+
+        /* The shim reports what it did through a file; a stale one from an
+         * earlier run must not be mistaken for this one. */
+        unlink(SHIM_STATUS);
         setenv("NVRM_SHIM_STRIP", "1", 1);
-        rc = HwApply(hw0);
+        rc = HwApply(g_hw0);
         unsetenv("NVRM_SHIM_STRIP");
-        printf("HwSettingsApply: rc=%d (streaming trigger stripped by the shim)\n", rc);
+
+        int submits = 0, scanned = 0, stripped = 0, failed = 0;
+        FILE *st = fopen(SHIM_STATUS, "r");
+        if (st) {
+            if (fscanf(st, "submits=%d scanned=%d stripped=%d failed=%d",
+                       &submits, &scanned, &stripped, &failed) != 4)
+                submits = -1;
+            fclose(st);
+        } else {
+            submits = -1;
+        }
+        printf("HwSettingsApply: rc=%d; shim: %d submits, %d gathers scanned, "
+               "%d streaming triggers stripped, %d refused\n",
+               rc, submits, scanned, stripped, failed);
+
+        /* Not proven safe means not continued: the block may be armed for
+         * a stream that never comes, and anything we do on top only makes
+         * the state harder to read. Close it while the library still can. */
+        if (rc != 0 || submits < 0 || failed) {
+            printf("Apply did not go through cleanly -- closing, not continuing\n");
+            lib_tear_down();
+            return 0;
+        }
+        if (stripped == 0 && !allow_unstripped) {
+            printf("the library's gather carried no streaming trigger to strip; "
+                   "not continuing without --allow-unstripped\n");
+            lib_tear_down();
+            return 0;
+        }
     }
     return hIsp;
 }
@@ -267,7 +324,7 @@ int main(int argc, char **argv)
     }
     uint32_t w0 = 1, out_fmt = 0x43, in_fmt = 0x10200024;
     int yuv_cfg = 0, use_lib = 1, dma_init = 1, hw_apply = 0, inst = 1;
-    int dm = 0, dm_all = 0, ccm = 0;
+    int dm = 0, dm_all = 0, ccm = 0, allow_unstripped = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
@@ -281,6 +338,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dm") == 0)          dm = 1;
         else if (strcmp(a, "--dm-all") == 0)      dm = dm_all = 1;
         else if (strcmp(a, "--ccm") == 0)         ccm = 1;
+        else if (strcmp(a, "--allow-unstripped") == 0) allow_unstripped = 1;
         else if (strncmp(a, "--out-fmt=", 10) == 0) out_fmt = strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--in-fmt=", 9) == 0)   in_fmt = strtoul(a + 9, 0, 16);
     }
@@ -296,7 +354,7 @@ int main(int argc, char **argv)
            dm_all ? "all blocks" : dm ? "coefficients" : "off",
            ccm ? "on" : "off");
 
-    if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply)) {
+    if (use_lib && !lib_bring_up(w0, yuv_cfg, inst, hw_apply, allow_unstripped)) {
         printf("library bring-up failed -- stopping\n");
         return 1;
     }
@@ -324,6 +382,7 @@ int main(int argc, char **argv)
     }
     if (nvmap_fd < 0 || isp_fd < 0 || ctrl_fd < 0) {
         printf("open failed: nvmap=%d isp=%d ctrl=%d\n", nvmap_fd, isp_fd, ctrl_fd);
+        lib_tear_down();
         return 1;
     }
 
@@ -339,14 +398,18 @@ int main(int argc, char **argv)
     uint32_t in_size = W * H * 2, out_size = W * 4 * H;
     uint32_t in_h = nvmap_create(in_size), out_h = nvmap_create(out_size);
     uint32_t cmd_h = nvmap_create(4096), work_h = nvmap_create(512 * 1024);
-    if (!in_h || !out_h || !cmd_h || !work_h) { printf("alloc failed\n"); return 1; }
+    if (!in_h || !out_h || !cmd_h || !work_h) {
+        printf("alloc failed\n");
+        lib_tear_down();
+        return 1;
+    }
     nvmap_alloc(in_h); nvmap_alloc(out_h); nvmap_alloc(cmd_h); nvmap_alloc(work_h);
     nvmap_pin(in_h); nvmap_pin(out_h); nvmap_pin(work_h);
 
     /* Load the frame, zero the output so anything present afterwards is the
      * hardware's doing. */
     FILE *f = fopen(argv[1], "rb");
-    if (!f) { perror("open raw"); return 1; }
+    if (!f) { perror("open raw"); lib_tear_down(); return 1; }
     uint8_t *buf = calloc(1, in_size);
     size_t got = fread(buf, 1, in_size, f);
     fclose(f);
@@ -468,7 +531,9 @@ int main(int argc, char **argv)
     sa.fences = (uint32_t)(uintptr_t)&fence;
 
     if (ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa) < 0) {
-        perror("submit"); return 1;
+        perror("submit");
+        lib_tear_down();
+        return 1;
     }
     printf("submitted, fence=%u\n", sa.fence);
     struct nvhost_ctrl_syncpt_waitex_args wa = { sp_memory, sa.fence, 5000, 0 };
@@ -529,7 +594,9 @@ int main(int argc, char **argv)
 
     nvmap_unpin(work_h); nvmap_unpin(out_h); nvmap_unpin(in_h);
     nvmap_free(cmd_h); nvmap_free(work_h); nvmap_free(out_h); nvmap_free(in_h);
-    close(ctrl_fd); close(isp_fd); close(nvmap_fd);
+    close(ctrl_fd); close(nvmap_fd);
+    /* The channel descriptor is the library's: it closes it, not us. */
+    lib_tear_down();
     printf("=== done ===\n");
     return 0;
 }

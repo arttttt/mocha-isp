@@ -125,7 +125,10 @@ faults_before=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r
 faults_before=${faults_before:-0}
 
 echo "=== run: $BIN ${ARGS[*]:-（defaults）} ==="
-adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r'
+# The whole output is kept: a filtered view on the terminal has already
+# hidden the one line that mattered once.
+mkdir -p "$ROOT/build"
+adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log"
 
 # The part that matters and that keeps getting skipped.
 echo

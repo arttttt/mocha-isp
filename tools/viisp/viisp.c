@@ -1563,13 +1563,14 @@ static int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
  * and two scratch pages the processing block wants pointers to.
  */
 static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
-                      uint32_t stats_h, int write_enable, uint32_t enable)
+                      uint32_t stats_h, int write_enable, uint32_t enable,
+                      unsigned W, unsigned H)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     uint32_t g[48];
-    int n = 0, y_word, p2_word, p3_word, stats_word;
+    int n = 0, y_word, stats_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_INCR(0xE00, 1); g[n++] = 0x00070000;   /* eight across */
     g[n++] = OP_INCR(0xE01, 1); g[n++] = 0x00070000;   /* eight down */
@@ -1578,11 +1579,17 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     g[n++] = OP_INCR(0xE04, 3);
     y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0x00000100;
 
+    /* Three of these are how far the incoming frame is decimated to reach
+     * eight by eight, so they are computed from the frame that is actually
+     * arriving. We had the numbers for a 2592 by 1944 frame hard-coded
+     * while the receiver delivered 1280 by 720, which set the decimator to
+     * a width that was not there -- and that is why the warm-up sometimes
+     * never finished. Both captures agree on the three forms. */
     g[n++] = OP_INCR(0x500, 6);
     g[n++] = 0x00000003;                                /* the flags word */
-    g[n++] = 0x00000ca4;
-    p2_word = n; g[n++] = 0;
-    p3_word = n; g[n++] = 0;
+    g[n++] = (1u << 23) / W;
+    g[n++] = (W / 128) << 24;
+    g[n++] = (H / 8) << 20;
     g[n++] = 0x00000000;
     g[n++] = 0x00080008;                                /* eight by eight */
 
@@ -1601,13 +1608,14 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
-    struct nvhost_reloc rel[4] = {
+    /* Two, not four: the pair in the middle of the processing block are
+     * decimation ratios, not addresses, and relocating them was writing
+     * buffer pointers into arithmetic. */
+    struct nvhost_reloc rel[2] = {
         { cmd_h, (uint32_t)y_word * 4, warm_h, 0 },
-        { cmd_h, (uint32_t)p2_word * 4, warm_h, 0x1000 },
-        { cmd_h, (uint32_t)p3_word * 4, warm_h, 0x2000 },
         { cmd_h, (uint32_t)stats_word * 4, stats_h, 0 },
     };
-    struct nvhost_reloc_shift sh[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
+    struct nvhost_reloc_shift sh[2] = { { 0 }, { 0 } };
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
@@ -1616,7 +1624,7 @@ static int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
-    sa.num_relocs = 4;
+    sa.num_relocs = 2;
     sa.timeout = 3000;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
@@ -3259,7 +3267,7 @@ int main(int argc, char **argv)
                 if (warm_left > 0 && isp_fd >= 0 && warm_h) {
                     isp_base_mem = syncpt_read(sp_mem);
                     isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
-                               warm_left == 2, isp_enable);
+                               warm_left == 2, isp_enable, W, OH);
                     if (warm_left == 2 && !dm_sent) {
                         isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                      u_off, v_off, work_iova);

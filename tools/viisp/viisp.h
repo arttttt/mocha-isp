@@ -136,6 +136,8 @@ struct nvhost_ctrl_syncpt_read_args { uint32_t id, value; };
 struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
 #define NVHOST_IOCTL_CHANNEL_SET_CLK_RATE \
     _IOW(NVHOST_IOCTL_MAGIC, 10, struct nvhost_clk_rate_args)
+#define NVHOST_IOCTL_CHANNEL_GET_CLK_RATE \
+    _IOWR(NVHOST_IOCTL_MAGIC, 9, struct nvhost_clk_rate_args)
 #define NVHOST_IOCTL_CTRL_SYNCPT_READ \
     _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
 struct nvhost_ctrl_syncpt_incr_args { uint32_t id; };

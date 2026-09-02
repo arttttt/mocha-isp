@@ -1619,6 +1619,7 @@ int main(int argc, char **argv)
     uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
     int fast_arm = 0;   /* --fast-arm: arm the next ISP frame right after the last completes */
+    uint32_t isp_clk = 384000000;   /* --isp-clk=HZ */
     /* The memory-side rate the channel asks for. The driver does not set a
      * number here at all -- it computes an isochronous bandwidth from the
      * frame size and sets a latency allowance, neither of which we can reach
@@ -1723,6 +1724,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strcmp(a, "--fast-arm") == 0)    fast_arm = 1;
+        else if (strncmp(a, "--isp-clk=", 10) == 0) isp_clk = (uint32_t)strtoul(a + 10, 0, 0);
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2013,12 +2015,19 @@ int main(int argc, char **argv)
         sp_stats = arm_stats ? sps[1] : 0;
         sp_loadv = arm_stats ? sps[3] : 0;
 
-        /* The ISP's own clocks, at the rates the reprocess tool uses. */
+        /* The ISP's own clocks. 384 MHz carried 1280 wide (40 Mpix/s at
+         * the sensor's line rate); at 2592 the pipeline has to take 81
+         * Mpix/s and no frame completed, so the rate is a knob now. */
         struct nvhost_clk_rate_args ic;
-        ic.moduleid = 0; ic.rate = 384000000;
+        ic.moduleid = 0; ic.rate = isp_clk;
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
         ic.moduleid = 1; ic.rate = 768000000;
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        {
+            struct nvhost_clk_rate_args rd = { .rate = 0, .moduleid = 0 };
+            if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_CLK_RATE, &rd) == 0)
+                printf("ISP clock: asked %u Hz, running %u Hz\n", isp_clk, rd.rate);
+        }
 
         /* Two register writes before anything else, both of which stock
          * makes when it opens the ISP. 0xFC is the block's own enable. 0x54

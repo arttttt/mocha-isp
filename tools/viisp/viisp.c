@@ -51,6 +51,8 @@
 #define VI_CSI_BASE(n)              (0x100 + (n) * 0x100)
 #define VI_CSI_SW_RESET             0x000
 #define VI_CSI_SINGLE_SHOT          0x004
+#define VI_CSI_SINGLE_SHOT_STATE_UPDATE 0x008   /* the stock writes 1 once per session */
+#define TEGRA_VI_CFG_DVFS           0x0F0   /* the stock writes 0x10100010; reset value 0x4040007f */
 #define VI_CSI_IMAGE_DEF            0x00c
 /* The two between IMAGE_DEF and IMAGE_SIZE, which we had never written.
  * The stock camera sets them in one run of six with the rest of the group,
@@ -1767,6 +1769,8 @@ int main(int argc, char **argv)
          * job, real pass). Also drops the live-shadow blocks from the
          * opening rounds, which is where the real coefficients came in. */
         else if (strcmp(a, "--bare-warmup") == 0) { bare_warmup = 1; stock_cfg = 0; }
+        else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 1;
+        else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -1981,7 +1985,12 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    int isp_fd = open("/dev/nvhost-isp.1", O_RDWR);
+    /* --no-isp: never open the ISP channel. With --image-def=00200001 the
+     * frame goes to memory alone, which is how the receiver and VI are
+     * judged on their own -- a parser status with the ISP out of the
+     * picture cannot be back-pressure from an ISP that stopped taking
+     * lines. */
+    int isp_fd = no_isp ? -1 : open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
     uint32_t work_iova = 0, stats_iova = 0;
     uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
@@ -2415,7 +2424,10 @@ int main(int argc, char **argv)
         /* The pads: C carries the clock-and-data back mode, D and E are
          * left at zero. E being zero is not an omission -- the lane pad
          * itself takes no configuration on this port. */
-        vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
+        /* The stock camera never writes CILC's pad register for the front
+         * sensor: only CILA/CILB (zero) and CILE (zero, then THS 9). The
+         * 4x brick mode here is what the R21.5 V4L2 driver did. */
+        if (!stock_vi) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
         vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
         vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
 
@@ -2429,17 +2441,24 @@ int main(int argc, char **argv)
          * both times. */
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, 0x280301f1);
+        /* --stock-vi: the words the stock camera (an R19-era stack) writes
+         * through its VI channel, read out of its gathers -- PAD_FRAME 0
+         * where the R21.5 driver has NOPAD, CONTROL1 clear, the packet-skip
+         * threshold 0x7f with two extra low bits in INPUT_STREAM_CONTROL.
+         * The same words at 2592 and 1280 wide. */
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, stock_vi ? 0x080301f1 : 0x280301f1);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, 0x00000011);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, stock_vi ? 0 : 0x00000011);
         vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
         vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, 0x003f0000);
+        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, stock_vi ? 0x007f0014 : 0x003f0000);
 
         /* Only the upper half of the brick command is ours; the lower half
-         * belongs to the rear path and has to survive our write. */
+         * belongs to the rear path and has to survive our write. The stock
+         * enables brick E alone (0x10000000) and leaves C and D untouched. */
         vi_wr(T124_CSI_PHY_CIL_COMMAND,
-              (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) | phy_cil_cmd);
+              (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) |
+              (stock_vi ? 0x10000000 : phy_cil_cmd));
         vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
         /* --tpg: let the receiver make its own picture. This splits the
          * problem in half -- if the pattern lands in the buffer then VI,
@@ -2541,6 +2560,14 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_SW_RESET, 0x0);
 
     vi_wr(base + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
+    if (stock_vi) {
+        /* Two VI registers the stock writes and no V4L2 driver of ours ever
+         * has: the DVFS word, and SINGLE_SHOT_STATE_UPDATE = 1 once per
+         * session. Both from the stock's VI gathers, the same at every
+         * resolution. */
+        vi_wr(TEGRA_VI_CFG_DVFS, 0x10100010);
+        vi_wr(base + VI_CSI_SINGLE_SHOT_STATE_UPDATE, 1);
+    }
     /* Measured off a live stock session on this channel: 0x00200004. The
      * transform-bypass bit is CLEAR there, where we had been setting it,
      * and the low nibble carries a 4 we had left at zero. Bypass off is

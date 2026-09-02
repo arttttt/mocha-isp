@@ -22,6 +22,8 @@ int per_frame_cal = 1;
 int geo_blocks;
 int stream_xfer;
 int bare_warmup;    /* --bare-warmup: the stock's placeholders until the warm-ups are done */
+int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
+int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

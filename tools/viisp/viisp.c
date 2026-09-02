@@ -1820,6 +1820,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--fast-arm") == 0)    fast_arm = 1;
         else if (strncmp(a, "--isp-clk=", 10) == 0) isp_clk = (uint32_t)strtoul(a + 10, 0, 0);
         else if (strncmp(a, "--emc-bw=", 9) == 0) emc_bw = strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--isp-wait=", 11) == 0) isp_wait_ms = (int)strtoul(a + 11, 0, 0);
         /* The stock's per-frame gather is some forty words; ours carried the
          * whole calibration (lookup tables, shading) with every frame. */
         else if (strcmp(a, "--no-per-frame-cal") == 0) per_frame_cal = 0;
@@ -2162,6 +2163,16 @@ int main(int argc, char **argv)
          * /sys/kernel/debug/clock/ispb/rate while the channel is busy. */
         printf("ISP clock request: %u Hz -> rc=%d (%s); EMC bandwidth %lu B/s -> rc=%d\n",
                isp_clk, crc0, crc0 ? strerror(cerr0) : "ok", emc_bw, crc1);
+        /* The rate actually granted. GET_CLK_RATE exists in this kernel in
+         * its read-only form (0x80084809, which is what the stock issues);
+         * the read-write form we used to send was "unrecognized". */
+        {
+            struct nvhost_clk_rate_args gr = { 0, 0 };
+            errno = 0;
+            int grc = ioctl(isp_fd, _IOR('H', 9, struct nvhost_clk_rate_args), &gr);
+            printf("ISP clock granted: %u Hz (rc=%d%s%s)\n", gr.rate, grc,
+                   grc ? " " : "", grc ? strerror(errno) : "");
+        }
         /* The ISP write client's latency allowance, as the stock sets it
          * at every opening. Without it, on a fresh boot, the ISP never
          * finished even an 8x8 warm-up; after one run of the stock camera
@@ -3143,7 +3154,7 @@ int main(int argc, char **argv)
                      * millisecond here, so it needs the better part of a
                      * second -- six hundred milliseconds cut it off at
                      * seventeen hundred rows of nineteen hundred. */
-                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < 2500) {
+                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < isp_wait_ms) {
                         usleep(2000);
                         w2 += 2;
                     }

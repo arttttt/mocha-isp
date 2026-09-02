@@ -329,6 +329,7 @@ extern int arm_stats, own_scratch, do_warmup, enable_late;
 extern int per_frame_cal, geo_blocks, ccm, stream_xfer, bare_warmup;
 extern int stock_vi, no_isp, attempts, sensor_late, sensor_twice, cile_rewritten, no_cal;
 extern unsigned long emc_bw;
+extern int isp_wait_ms;
 extern unsigned pre_wait;
 extern uint32_t wb_r, wb_b;
 extern unsigned stats_kb, work_kb;

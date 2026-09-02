@@ -31,6 +31,7 @@ int sensor_twice;    /* --sensor-twice: power the sensor on, off and on again be
 int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
 int no_cal;          /* --no-cal: skip our MIPI calibration, enable the bias pad only (as the 24.1 driver does for one lane) */
 unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
+int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

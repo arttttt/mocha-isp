@@ -1814,6 +1814,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strcmp(a, "--fast-arm") == 0)    fast_arm = 1;
         else if (strncmp(a, "--isp-clk=", 10) == 0) isp_clk = (uint32_t)strtoul(a + 10, 0, 0);
+        else if (strncmp(a, "--emc-bw=", 9) == 0) emc_bw = strtoul(a + 9, 0, 0);
         /* The stock's per-frame gather is some forty words; ours carried the
          * whole calibration (lookup tables, shading) with every frame. */
         else if (strcmp(a, "--no-per-frame-cal") == 0) per_frame_cal = 0;
@@ -2144,14 +2145,14 @@ int main(int argc, char **argv)
          * no pdata entry, and the kernel then falls back to clock zero:
          * the ISP clock was being set twice and the memory never asked
          * for. The stock's figure, 163.2 MB/s, at 2592 and at 1280. */
-        ic.moduleid = (1u << 24) | 0x4b; ic.rate = 163200000;
+        ic.moduleid = (1u << 24) | 0x4b; ic.rate = (uint32_t)emc_bw;
         errno = 0;
         int crc1 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
         /* This kernel has no GET_CLK_RATE (it logs "unrecognized ioctl"), so
          * the rate actually granted is only visible in
          * /sys/kernel/debug/clock/ispb/rate while the channel is busy. */
-        printf("ISP clock request: %u Hz -> rc=%d (%s); EMC bandwidth 163.2 MB/s -> rc=%d\n",
-               isp_clk, crc0, crc0 ? strerror(cerr0) : "ok", crc1);
+        printf("ISP clock request: %u Hz -> rc=%d (%s); EMC bandwidth %lu B/s -> rc=%d\n",
+               isp_clk, crc0, crc0 ? strerror(cerr0) : "ok", emc_bw, crc1);
         /* The ISP write client's latency allowance, as the stock sets it
          * at every opening. Without it, on a fresh boot, the ISP never
          * finished even an 8x8 warm-up; after one run of the stock camera

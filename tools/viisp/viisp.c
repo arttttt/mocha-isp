@@ -2647,20 +2647,13 @@ int main(int argc, char **argv)
          * streaming. We had been asking for 408. */
         c.moduleid = 0; c.rate = 600000000;
         int a1 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
-        /* VI's memory side goes through its own ioctl: a bandwidth in
-         * KB/s that the driver turns into the latency allowance for the
-         * VI write client (and an isomgr reservation). The stock's trace
-         * shows it at 162 MB/s. The "moduleid = 1" clock request this
-         * replaced matched no pdata entry and set the VI clock again. */
-        /* The stock's figure, 162 MB/s; 528 MB/s came back ENOMEM. */
-        unsigned vi_bw_kbps = 162000;
-        /* On the VI control node, not the channel (see the ISP one). */
-        int vcfd = open("/dev/nvhost-ctrl-vi.1", O_RDWR);
-        errno = 0;
-        int a2 = vcfd < 0 ? -1 : ioctl(vcfd, NVHOST_VI_IOCTL_SET_EMC_INFO, &vi_bw_kbps);
-        printf("clock/bandwidth request: module rc=%d, VI bandwidth %u KB/s rc=%d%s%s\n",
-               a1, vi_bw_kbps, a2, a2 ? " " : "", a2 ? strerror(errno) : "");
-        if (vcfd >= 0) close(vcfd);
+        /* No VI bandwidth ioctl: the stock's trace has SET_EMC for the ISP
+         * only, and on this kernel the VI one fails inside the isomgr
+         * ("bad handle" for vi.1) after having set the latency allowance,
+         * leaving an error in dmesg on every run. The old "moduleid = 1"
+         * memory request that used to sit here matched no pdata entry and
+         * set the VI clock a second time. */
+        printf("clock request: VI module rc=%d\n", a1);
     }
 
     /* The syncpoint control register, which we had never written at all --

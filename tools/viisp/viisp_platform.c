@@ -21,6 +21,7 @@ int enable_late;
 int per_frame_cal = 1;
 int geo_blocks;
 int stream_xfer;
+int bare_warmup;    /* --bare-warmup: the stock's placeholders until the warm-ups are done */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

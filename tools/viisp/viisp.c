@@ -426,10 +426,13 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
         g[n++] = 0x00020000; g[n++] = 0x00000000;
     }
 
+    /* The stock has 0x85001000 in the first word here from the opening
+     * to the last frame -- a constant, not an address. Ours put the
+     * statistics buffer's address there, which 1280 wide tolerated. */
     g[n++] = OP_INCR(0x800, 3);
-    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
+    g[n++] = bare_warmup ? 0x85001000 : stats_iova; g[n++] = 0; g[n++] = 0;
     g[n++] = OP_INCR(0x820, 3);
-    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
+    g[n++] = bare_warmup ? 0x85001000 : stats_iova; g[n++] = 0; g[n++] = 0;
 
     /* The 720 capture's real histogram windows: word 0 is 0x1d and the
      * four window words describe the 1280x720 frame -- the zeros-and-
@@ -443,8 +446,16 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x78787800; g[n++] = 0x00000078;
     g[n++] = 0x88888888; g[n++] = 0x78787800;
     g[n++] = 0x00000078; g[n++] = 0x3fc00000;
-    g[n++] = 0x00220000; g[n++] = 0x0004003f;
-    g[n++] = 0x00120000; g[n++] = 0x0003003f;
+    if (bare_warmup) {
+        /* The warm-up form of the windows, which is what the stock has in
+         * place while its 8x8 frames run; the working windows follow in
+         * the colour job. */
+        g[n++] = 0x00000000; g[n++] = 0x00070000;
+        g[n++] = 0x00000000; g[n++] = 0x00070000;
+    } else {
+        g[n++] = 0x00220000; g[n++] = 0x0004003f;
+        g[n++] = 0x00120000; g[n++] = 0x0003003f;
+    }
 
     g[n++] = OP_INCR(0xC00, 3);
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
@@ -519,8 +530,8 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * 137.9 against 124.6 by measurement, and visibly so -- which is what
      * one extra step of scaling does to every demosaic coefficient. */
     g[n++] = OP_INCR(0x904, 2);
-    g[n++] = 0x00004444; g[n++] = 0x00000001;
-    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00004334;
+    g[n++] = bare_warmup ? 0x00005555 : 0x00004444; g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x908, 1); g[n++] = bare_warmup ? 0x00005555 : 0x00004334;
 
     /* Three of these words are addresses, not settings: a base and two
      * windows a fixed distance into it. We had been sending the stock
@@ -616,7 +627,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * and writing coefficients into a stage set up differently from the way
      * their owner set it up is a fair account of a block that stalls
      * part-way through the stream rather than faulting on anything. */
-    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x650, 1); g[n++] = bare_warmup ? 0x00000003 : 0x00000001;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
     }   /* end of the reconstructed streaming init */
@@ -640,12 +651,17 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * there. A pipeline handed a null scratch buffer has every reason to
      * fall back to the least it can do, which is what we see. */
     g[n - 2] = 0x00000001;                /* 0x053 */
-    g[n - 1] = work_iova;                 /* 0x054 */
+    g[n - 1] = bare_warmup ? 0 : work_iova;   /* 0x054: the stock has 0 until the real pass */
 
     /* And then the real thing, last, so it stands over everything above:
      * the configuration read out of the stock camera while it was running.
      * The demosaic coefficients live here and nowhere else we could reach. */
     if (stock_cfg) n = isp_stock_emit(g, n, work_iova, stock_cfg);
+
+    /* Shading off until the real pass, as the stock has it during the
+     * warm-ups; whatever the blob above loaded into 0xd00 is overridden
+     * here, the table itself is harmless while the stage is off. */
+    if (bare_warmup) { g[n++] = OP_INCR(0xd00, 1); g[n++] = 0x00000000; }
 
     /* Unless the enable belongs later: stock writes it exactly once for a
      * whole session, and not here -- it goes inside the first warm-up
@@ -1307,6 +1323,22 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = 0x00000800; g[n++] = 0x00000000;
     g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
     g[n++] = 0x3fff0000; g[n++] = 0x10001000;
+    if (bare_warmup) {
+        /* What the opening held back for the warm-ups: the working
+         * statistics windows and the lookup-table enable at its running
+         * value. */
+        g[n++] = OP_INCR(0x930, 18);
+        g[n++] = 0x0000001d; g[n++] = 0x88888888;
+        g[n++] = 0x78787800; g[n++] = 0x00000078;
+        g[n++] = 0x88888888; g[n++] = 0x78787800;
+        g[n++] = 0x00000078; g[n++] = 0x88888888;
+        g[n++] = 0x78787800; g[n++] = 0x00000078;
+        g[n++] = 0x88888888; g[n++] = 0x78787800;
+        g[n++] = 0x00000078; g[n++] = 0x3fc00000;
+        g[n++] = 0x00220000; g[n++] = 0x0004003f;
+        g[n++] = 0x00120000; g[n++] = 0x0003003f;
+        g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
+    }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
@@ -1728,6 +1760,13 @@ int main(int argc, char **argv)
         /* The stock's per-frame gather is some forty words; ours carried the
          * whole calibration (lookup tables, shading) with every frame. */
         else if (strcmp(a, "--no-per-frame-cal") == 0) per_frame_cal = 0;
+        /* The stock's order: warm-ups on the opening's placeholders -- no
+         * shading, warm-up windows, zero coefficients, 0x5555 shifts,
+         * 0x650 = 3, the constant in 0x800/0x820, no work pointer -- and
+         * the working values only afterwards (coefficient job, colour
+         * job, real pass). Also drops the live-shadow blocks from the
+         * opening rounds, which is where the real coefficients came in. */
+        else if (strcmp(a, "--bare-warmup") == 0) { bare_warmup = 1; stock_cfg = 0; }
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);

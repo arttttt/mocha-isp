@@ -2020,14 +2020,17 @@ int main(int argc, char **argv)
          * Mpix/s and no frame completed, so the rate is a knob now. */
         struct nvhost_clk_rate_args ic;
         ic.moduleid = 0; ic.rate = isp_clk;
-        ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        errno = 0;
+        int crc0 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        int cerr0 = errno;
         ic.moduleid = 1; ic.rate = 768000000;
-        ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
-        {
-            struct nvhost_clk_rate_args rd = { .rate = 0, .moduleid = 0 };
-            if (ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_GET_CLK_RATE, &rd) == 0)
-                printf("ISP clock: asked %u Hz, running %u Hz\n", isp_clk, rd.rate);
-        }
+        errno = 0;
+        int crc1 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        /* This kernel has no GET_CLK_RATE (it logs "unrecognized ioctl"), so
+         * the rate actually granted is only visible in
+         * /sys/kernel/debug/clock/ispb/rate while the channel is busy. */
+        printf("ISP clock request: %u Hz -> rc=%d (%s); memory 768 MHz -> rc=%d\n",
+               isp_clk, crc0, crc0 ? strerror(cerr0) : "ok", crc1);
 
         /* Two register writes before anything else, both of which stock
          * makes when it opens the ISP. 0xFC is the block's own enable. 0x54

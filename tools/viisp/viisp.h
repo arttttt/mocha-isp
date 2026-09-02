@@ -34,6 +34,7 @@
 #define CAR_ENB_SET_W       0x448
 #define CAR_CSI_BIT_H       (1u << 20)
 #define CAR_CILE_BIT_W      (1u << 18)
+#define CAR_CILCD_BIT_W     (1u << 17)   /* the C/D/E brick's shared clock; the stock has it on with CILE */
 #define CAR_ENB_SET_X       0x284
 #define CAR_MIPICAL_BIT_H   (1u << 24)
 #define CAR_CLK72M_BIT_X    (1u << 17)
@@ -330,6 +331,7 @@ extern int per_frame_cal, geo_blocks, ccm, stream_xfer, bare_warmup;
 extern int stock_vi, no_isp, attempts, sensor_late, sensor_twice, cile_rewritten, no_cal;
 extern unsigned long emc_bw;
 extern int isp_wait_ms, stream_n;
+extern unsigned isp_emc_clk;
 extern unsigned pre_wait;
 extern uint32_t wb_r, wb_b;
 extern unsigned stats_kb, work_kb;

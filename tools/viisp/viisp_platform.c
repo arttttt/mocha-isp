@@ -33,6 +33,7 @@ int no_cal;          /* --no-cal: skip our MIPI calibration, enable the bias pad
 unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
 int stream_n;                       /* --stream=N: N frames by the stock's protocol instead of single shots */
+unsigned isp_emc_clk = 81600;       /* --isp-emc-clk: the isp_clk (kHz) in the ISP SET_EMC ioctl; the stock's 81600 -> 162 MB/s ISO */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;
@@ -84,7 +85,10 @@ void car_enable_csi_clocks(void)
     mem_wr(CAR_BASE + CAR_RST_CLR_L, CAR_VI_BIT_L, 0);
 
     mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
-    mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W, &b2);
+    /* CILE and the C/D/E brick's shared clock CILCD: the 24.1 driver notes
+     * that CSI-E through CILE needs both, and during the stock's stream
+     * both bits (W 17 and 18) are on where we had only 18. */
+    mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W | CAR_CILCD_BIT_W, &b2);
     mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);
 
     /* Enabling a clock is only half of what the kernel's helper does: it
@@ -92,7 +96,7 @@ void car_enable_csi_clocks(void)
      * register writes and does nothing, without complaining -- which is
      * what a calibration that starts and never finishes looks like. */
     mem_wr(CAR_BASE + CAR_RST_CLR_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, 0);
-    mem_wr(CAR_BASE + CAR_RST_CLR_W, CAR_CILE_BIT_W, 0);
+    mem_wr(CAR_BASE + CAR_RST_CLR_W, CAR_CILE_BIT_W | CAR_CILCD_BIT_W, 0);
 
     printf("  receiver clocks on and out of reset: H 0x%08x, W 0x%08x, X 0x%08x\n",
            b1, b2, b3);

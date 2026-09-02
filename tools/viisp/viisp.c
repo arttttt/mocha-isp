@@ -1928,6 +1928,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--emc-bw=", 9) == 0) emc_bw = strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--isp-wait=", 11) == 0) isp_wait_ms = (int)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--stream=", 9) == 0) stream_n = (int)strtoul(a + 9, 0, 0);
+        else if (strncmp(a, "--isp-emc-clk=", 14) == 0) isp_emc_clk = (unsigned)strtoul(a + 14, 0, 0);
         /* The stock's per-frame gather is some forty words; ours carried the
          * whole calibration (lookup tables, shading) with every frame. */
         else if (strcmp(a, "--no-per-frame-cal") == 0) per_frame_cal = 0;
@@ -2287,12 +2288,13 @@ int main(int argc, char **argv)
         /* Not on the channel: the channel's ioctl handler refuses every
          * magic but its own with EFAULT. The ISP driver's ioctls live on
          * its control node, /dev/nvhost-ctrl-isp.1 for ISP-B. */
-        struct isp_emc_info ei = { 0, 81600, 0, 16 };
+        struct isp_emc_info ei = { 0, isp_emc_clk, 0, 16 };
         int lfd = open("/dev/nvhost-ctrl-isp.1", O_RDWR);
         errno = 0;
         int lrc = lfd < 0 ? -1 : ioctl(lfd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
-        printf("ISP latency allowance (clk 81600 kHz, 16 bpp out, 162 MB/s HARD) -> rc=%d%s%s\n",
-               lrc, lrc ? " " : "", lrc ? strerror(errno) : "");
+        printf("ISP latency allowance (clk %u kHz, 16 bpp out, %u MB/s HARD) -> rc=%d%s%s\n",
+               isp_emc_clk, isp_emc_clk / 1000 * 16 / 8, lrc,
+               lrc ? " " : "", lrc ? strerror(errno) : "");
         if (lfd >= 0) close(lfd);
 
         /* Two register writes before anything else, both of which stock

@@ -168,17 +168,6 @@ struct isp_emc_info {
 
 /* The pattern generator, at the parser base plus 0x18C, the same way the
  * lane interface sits at plus 0xF4. */
-#define TPG_B_BASE                           (0x86C + 0x18C)
-#define TPG_CTRL                             0x000
-#define TPG_PHASE                            0x008
-#define TPG_RED_FREQ                         0x00C
-#define TPG_RED_FREQ_RATE                    0x010
-#define TPG_GREEN_FREQ                       0x014
-#define TPG_GREEN_FREQ_RATE                  0x018
-#define TPG_BLUE_FREQ                        0x01C
-#define TPG_BLUE_FREQ_RATE                   0x020
-#define PG_MODE_OFFSET                       2
-#define PG_ENABLE                            0x1
 #define T124_PHY_CILB_CONTROL0               0x968
 #define T124_CSI_CIL_B_INT_MASK              0x96C
 /* The CSI block sits at 0x838 in the VI aperture: 0x838+0xF4 is CILA and
@@ -1814,8 +1803,8 @@ int main(int argc, char **argv)
      * already be stuck, and when it is, the channel dies and only a reboot
      * brings the camera back -- so the cost of asking for more is paid by
      * hand, every time. Two is the ceiling; anything larger is clamped. */
-    int tpg = 0, shots = 1, piggyback = 0;
-    int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
+    int shots = 1;
+    int hold = 0, dump_regs = 0;
     uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
     int fast_arm = 1;   /* arm the next ISP frame right after the last completes; --slow-arm paces by the frame period instead */
@@ -1885,7 +1874,6 @@ int main(int argc, char **argv)
     /* Send the calibration with every frame rather than once, as stock
      * does. The init then carries only the clearing pass. */
     int out_iovmm = 0;
-    int isp_only = 0;
     uint32_t stats_ctrl = 0;
     uint32_t proc_flags = 0;
 
@@ -1901,15 +1889,12 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--no-sensor") == 0)   use_sensor = 0;
         else if (strcmp(a, "--dump") == 0)        dump = 1;
-        else if (strncmp(a, "--image-def=", 12) == 0)
-            image_def = (uint32_t)strtoul(a + 12, 0, 16);
         else if (strncmp(a, "--frame-length=", 15) == 0)
             frame_length = (uint32_t)strtoul(a + 15, 0, 0);
         else if (strncmp(a, "--coarse=", 9) == 0)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
-        else if (strcmp(a, "--scan-cil") == 0)    scan_cil = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 2) {
@@ -1920,7 +1905,6 @@ int main(int argc, char **argv)
             }
             if (shots < 1) shots = 1;
         }
-        else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
         else if (strcmp(a, "--slow-arm") == 0)    fast_arm = 0;
         else if (strncmp(a, "--isp-clk=", 10) == 0) isp_clk = (uint32_t)strtoul(a + 10, 0, 0);
@@ -2011,18 +1995,11 @@ int main(int argc, char **argv)
             out_kind = (unsigned)strtoul(a + 11, 0, 16);
         else if (strcmp(a, "--init-a") == 0)       init_a = 1;
         else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
-        else if (strcmp(a, "--isp-only") == 0)     { isp_only = 1;
-                                                     use_sensor = 0; }
         else if (strncmp(a, "--stats-ctrl=", 13) == 0)
             stats_ctrl = (uint32_t)strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--proc-flags=", 13) == 0)
             proc_flags = (uint32_t)strtoul(a + 13, 0, 16);
-        else if (strcmp(a, "--scan-cond") == 0)   scan_cond = 1;
         else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
-        else if (strcmp(a, "--tpg") == 0)         { tpg = 1; use_sensor = 0; }
-        else if (strcmp(a, "--both") == 0)
-            image_def |= IMAGE_DEF_DEST_MEM;
-        else if (strcmp(a, "--piggyback") == 0)   { piggyback = 1; use_sensor = 0; }
         else if (strncmp(a, "--phy-cil=", 10) == 0)
             phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
@@ -2030,6 +2007,11 @@ int main(int argc, char **argv)
         else { printf("unknown option %s\n", a); return 1; }
     }
 
+    /* --no-isp: the frame goes to memory instead of the ISP, so the receiver
+     * and VI can be judged on their own. */
+    if (no_isp)
+        image_def = (image_def & ~(IMAGE_DEF_DEST_MEM | IMAGE_DEF_DEST_ISP_A |
+                                   IMAGE_DEF_DEST_ISP_B)) | IMAGE_DEF_DEST_MEM;
     /* The resolution-dependent set, keyed to the exact size: the stock
      * camera refuses to run when these do not agree with the frame. */
     const struct geom_cfg *geo = geom_for(W, H);
@@ -2525,30 +2507,6 @@ int main(int argc, char **argv)
      * It also corrects a wrong reading: the frame-start syncpoint counts
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
-    if (piggyback) {
-        printf("piggyback: leaving the running configuration alone\n");
-        vi_wr(base + VI_CSI_IMAGE_DEF,
-              (1u << BYPASS_PXL_TRANSFORM_OFFSET) |
-              (IMAGE_FORMAT_T_R16_I << IMAGE_DEF_FORMAT_OFFSET) |
-              IMAGE_DEF_DEST_MEM);
-        vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
-        vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
-        vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
-        vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-        vi_flush("piggyback");
-        usleep(500000);
-        dump_regs = 1;      /* this is the state where capture works */
-        goto readback;
-    }
-
-    /* --isp-only: arm the ISP and touch nothing else. The kernel's own
-     * pattern facility drives VI -- it powers the block, enables the
-     * generator, sets the routing and fires the shot -- so this lets the
-     * colour path be tested on a synthetic frame, with the sensor and our
-     * whole receiver bring-up out of the picture. If the mosaic survives
-     * that too, the question is not about how we describe the sensor. */
-    if (isp_only) goto isp_wait;
-
     pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
     car_enable_csi_clocks();
 
@@ -2558,46 +2516,6 @@ int main(int argc, char **argv)
      * the write engine has no clock to run on. */
     vi_wr(TEGRA_VI_CFG_CG_CTRL, 1);
 
-    if (scan_cil) {
-        /* Which brick does this sensor actually arrive on? Nothing we have
-         * answers it: the board file leaves the port to userspace, and the
-         * device tree's prose and its own property disagree. So ask the
-         * hardware -- the sensor is streaming by now, so bring every pad
-         * out of power-down, enable both halves of the brick command, and
-         * read all five lane interfaces. The one carrying the sensor is the
-         * one whose status stops reading zero. */
-        static const struct { const char *name; unsigned pad, phy, st, cst; }
-        cil[] = {
-            { "A", 0x92C, 0x934, 0x93C, 0x940 },
-            { "B", 0x960, 0x968, 0x970, 0x974 },
-            { "C", 0x994, 0x99C, 0x9A4, 0x9A8 },
-            { "D", 0x9C8, 0x9D0, 0x9D8, 0x9DC },
-            { "E", 0xA08, 0xA10, 0xA18, 0xA1C },
-        };
-        pmc_dpd_release(0x1 | 0x2 | 0x4 | 0x8 | PMC_DPD_BIT_CSIE);
-        vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
-        for (unsigned i = 0; i < 5; i++) {
-            vi_wr(cil[i].pad, 0x00000005);
-            vi_wr(cil[i].phy, 0x00000002);
-            vi_wr(cil[i].st, 0xFFFFFFFF);
-            vi_wr(cil[i].cst, 0xFFFFFFFF);
-        }
-        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x12021202);
-        vi_flush("scan bring-up");
-
-        for (int pass = 0; pass < 3; pass++) {
-            usleep(200000);
-            printf("pass %d:", pass);
-            for (unsigned i = 0; i < 5; i++)
-                printf("  %s=%08x/%08x", cil[i].name,
-                       vi_rd(cil[i].st), vi_rd(cil[i].cst));
-            printf("\n");
-        }
-        printf("parser A=%08x B=%08x\n",
-               vi_rd(T124_PP_A_PIXEL_PARSER_STATUS),
-               vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
-        goto done;
-    }
 
     if (front) {
         /* Port B, one lane, on CIL E. This whole block is the 24.1 driver's
@@ -2669,31 +2587,8 @@ int main(int argc, char **argv)
          * the parser and the write path are all sound and the fault is on
          * the wire; if it does not, the fault is in our channel setup and
          * the sensor was never the question. */
-        if (tpg) {
-            printf("  pattern generator on (port B)\n");
-            vi_wr(TPG_B_BASE + TPG_CTRL, ((1u - 1) << PG_MODE_OFFSET) | PG_ENABLE);
-            vi_wr(TPG_B_BASE + TPG_PHASE, 0);
-            vi_wr(TPG_B_BASE + TPG_RED_FREQ, (0x10u << 16) | 0x10u);
-            vi_wr(TPG_B_BASE + TPG_RED_FREQ_RATE, 0);
-            vi_wr(TPG_B_BASE + TPG_GREEN_FREQ, (0x10u << 16) | 0x10u);
-            vi_wr(TPG_B_BASE + TPG_GREEN_FREQ_RATE, 0);
-            vi_wr(TPG_B_BASE + TPG_BLUE_FREQ, (0x10u << 16) | 0x10u);
-            vi_wr(TPG_B_BASE + TPG_BLUE_FREQ_RATE, 0);
-        }
-
         vi_flush("CSI bring-up");
-        /* --no-cal: skip our MIPI calibration. The 24.1 kernel driver never
-         * calibrates the one-lane front path at all (its lane mask covers
-         * 2, 4 and 8 lanes only) and enables just the bias pad -- and its
-         * pictures are right. Ours are garbage on a fresh boot and right
-         * after one run of the stock camera, whose own calibration leaves
-         * the pads in a state that outlives everything but a reboot. */
-        if (!tpg && !no_cal) mipi_calibrate_csie();
-        else if (no_cal) {
-            mipi_upd(MIPI_BIAS_PAD_CFG2, BIAS_PDVREG, 0);
-            mipi_upd(MIPI_BIAS_PAD_CFG0, BIAS_E_VCLAMP_REF, 0);
-            printf("  MIPI calibration skipped; bias pad enabled (PDVREG 0, VCLAMP_REF 0)\n");
-        }
+        mipi_calibrate_csie();
         printf("  CILE pad0 after bring-up and calibration: 0x%08x\n",
                vi_rd(T124_CILE_PAD_CONFIG0));
     } else {
@@ -2973,49 +2868,6 @@ int main(int argc, char **argv)
             isp_base_loadv = syncpt_read(sp_mem + 3);
         }
 
-        /* Which event numbers does this hardware actually raise? The two we
-         * use for the write acknowledge came from a header that says
-         * outright they were found by trial, and neither of them fires. So
-         * arm every condition in turn against one counter, take a shot, and
-         * let the ones that move name themselves. */
-        if (scan_cond) {
-            uint8_t fill[64], tail[64];
-            memset(fill, 0xA5, sizeof fill);
-            for (uint32_t cond = 0; cond < 32; cond++) {
-                /* Each pass is a real capture, carried to the bottom of the
-                 * frame. The first sweep judged a condition on 150ms of
-                 * waiting, which is less than a frame and less than the
-                 * first shot needs to start at all -- so it was reporting
-                 * which events arrive early, not which ones arrive. */
-                nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
-                uint32_t fs0 = syncpt_read(sp_id), v0 = syncpt_read(sp_mw);
-
-                vi_wr(base + VI_CSI_SW_RESET, 0xF);
-                vi_wr(base + VI_CSI_SW_RESET, 0x0);
-                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
-                      << 8 | sp_id);
-                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, cond << 8 | sp_mw);
-                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-                vi_flush(0);
-
-                int w = 0, done = 0;
-                while (w < 2500 && !done) {
-                    nvmap_rw(buf_h, frame - sizeof tail, tail, sizeof tail, 0);
-                    for (unsigned i = 0; i < sizeof tail; i++)
-                        if (tail[i] != 0xA5) { done = 1; break; }
-                    if (!done) { usleep(1000); w++; }
-                }
-                printf("  condition %2u: %-5s  (frame %s, %dms)\n", cond,
-                       syncpt_read(sp_mw) != v0 ? "FIRES" : "-",
-                       done ? "whole" : (syncpt_read(sp_id) != fs0
-                                         ? "started only" : "never started"),
-                       w);
-            }
-            goto readback;
-        }
 
         /* A trigger written while the sensor is part way through a frame
          * captures only what is left of it: the first shot wrote rows 0 to
@@ -3111,17 +2963,7 @@ int main(int argc, char **argv)
                  * and the row-to-row jumps that looked like tearing were
                  * those holes, since the fill pattern reads as 42405 against
                  * a picture whose values sit near 25. */
-                if (refill && attempt == 2) {
-                    uint32_t chunk = 64 * 1024;
-                    void *p = malloc(chunk);
-                    memset(p, 0xA5, chunk);
-                    for (uint32_t o = 0; o < frame; o += chunk)
-                        nvmap_rw(buf_h, o, p,
-                                 frame - o < chunk ? frame - o : chunk, 1);
-                    free(p);
-                } else {
-                    nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
-                }
+                nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
 
                 /* Reset only on the way in. A reset resynchronises the
                  * parser to wherever the sensor is right now, so resetting
@@ -3360,27 +3202,7 @@ int main(int argc, char **argv)
     usleep(200000);
     goto after_readback;
 
-isp_wait:
-    /* Arm the ISP, then sit still while something else drives VI. */
-    if (isp_fd >= 0 && out_iova && stats_h) {
-        isp_base_mem = syncpt_read(sp_mem);
-        isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                  isp_trigger, u_off, v_off, sp_mem, sp_stats, sp_loadv,
-                  isp_sp, 0, 0, isp_in_fmt, work_iova, per_frame_cal,
-                              proc_flags);
-        int w3 = 0;
-        while (syncpt_read(sp_mem) == isp_base_mem && w3 < 4000) {
-            usleep(5000);
-            w3 += 5;
-        }
-        printf("ISP armed and waiting: wrote %s after %dms\n",
-               syncpt_read(sp_mem) != isp_base_mem ? "yes" : "NO", w3);
-        isp_stop(isp_fd, isp_sp);
-    }
-    goto after_readback;
-
 after_readback:
-    if (isp_only) goto readback;
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),

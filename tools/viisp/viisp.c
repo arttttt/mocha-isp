@@ -1811,6 +1811,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--pre-wait=", 11) == 0)
             pre_wait = (unsigned)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--sensor-early") == 0) sensor_late = 0;
+        else if (strcmp(a, "--sensor-twice") == 0) sensor_twice = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2304,6 +2305,21 @@ int main(int argc, char **argv)
         snprintf(sn, sizeof sn, "/dev/%s", sensor);
         sfd = open(sn, O_RDWR);
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
+        /* --sensor-twice: power the sensor on, off, and on again before the
+         * mode set. The board's power-on releases the reset two
+         * microseconds after enabling the core rail; from cold (a minute or
+         * more since the last power-off) the rail is still ramping and the
+         * part comes up answering on I2C but never streaming, which is
+         * what the first run after every boot looked like. A second
+         * power-on within a second of the first is a warm one. */
+        if (sensor_twice) {
+            usleep(50000);
+            close(sfd);
+            usleep(100000);
+            sfd = open(sn, O_RDWR);
+            if (sfd < 0) { printf("reopen %s: %s\n", sn, strerror(errno)); return 1; }
+            printf("sensor power-cycled once before the mode set\n");
+        }
         if (front) {
             /* Opening the node already powered it -- but only just. The log
              * puts the mode ioctl twenty-five microseconds after the power

@@ -24,6 +24,8 @@ int stream_xfer;
 int bare_warmup;    /* --bare-warmup: the stock's placeholders until the warm-ups are done */
 int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
+int attempts = 2;   /* --attempts: how many single-shot arms before a frame is given up on */
+unsigned pre_wait;  /* --pre-wait: milliseconds to sleep after the sensor mode set */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

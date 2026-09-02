@@ -1771,6 +1771,10 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--bare-warmup") == 0) { bare_warmup = 1; stock_cfg = 0; }
         else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 1;
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
+        else if (strncmp(a, "--attempts=", 11) == 0)
+            attempts = (int)strtoul(a + 11, 0, 0);
+        else if (strncmp(a, "--pre-wait=", 11) == 0)
+            pre_wait = (unsigned)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2288,6 +2292,14 @@ int main(int argc, char **argv)
                 printf("sensor mode: %s\n", strerror(errno));
             else
                 printf("sensor streaming at %ux%u\n", W, H);
+            /* --pre-wait: the first run after a boot never sees a frame
+             * start, the second always does. Whether the sensor merely
+             * needs longer from a cold power-on is the cheapest question
+             * to ask. */
+            if (pre_wait) {
+                printf("  waiting %u ms after the mode set\n", pre_wait);
+                usleep(pre_wait * 1000);
+            }
         } else {
             uint32_t on = 1;
             if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
@@ -2866,7 +2878,7 @@ int main(int argc, char **argv)
             /* Two at most. The first trigger aligns, the second captures;
              * more than that only stretches the run, and a long run is what
              * took the parked job past the timeout the kernel allows. */
-            while (attempt < 2 && !done) {
+            while (attempt < attempts && !done) {
                 uint32_t fs0 = syncpt_read(sp_id);
                 attempt++;
 

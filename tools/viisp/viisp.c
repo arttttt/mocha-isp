@@ -2155,11 +2155,16 @@ int main(int argc, char **argv)
          * at every opening. Without it, on a fresh boot, the ISP never
          * finished even an 8x8 warm-up; after one run of the stock camera
          * -- whose setting outlives everything but a reboot -- it did. */
+        /* Not on the channel: the channel's ioctl handler refuses every
+         * magic but its own with EFAULT. The ISP driver's ioctls live on
+         * its control node, /dev/nvhost-ctrl-isp.1 for ISP-B. */
         struct isp_emc_info ei = { 0, 81600, 0, 16 };
+        int lfd = open("/dev/nvhost-ctrl-isp.1", O_RDWR);
         errno = 0;
-        int lrc = ioctl(isp_fd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
+        int lrc = lfd < 0 ? -1 : ioctl(lfd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
         printf("ISP latency allowance (clk 81600 kHz, 16 bpp out, 162 MB/s HARD) -> rc=%d%s%s\n",
                lrc, lrc ? " " : "", lrc ? strerror(errno) : "");
+        if (lfd >= 0) close(lfd);
 
         /* Two register writes before anything else, both of which stock
          * makes when it opens the ISP. 0xFC is the block's own enable. 0x54
@@ -2635,9 +2640,13 @@ int main(int argc, char **argv)
          * shows it at 162 MB/s. The "moduleid = 1" clock request this
          * replaced matched no pdata entry and set the VI clock again. */
         unsigned vi_bw_kbps = (unsigned)(emc_rate / 1000);
-        int a2 = ioctl(vi_fd, NVHOST_VI_IOCTL_SET_EMC_INFO, &vi_bw_kbps);
-        printf("clock/bandwidth request: module rc=%d, VI bandwidth %u KB/s rc=%d\n",
-               a1, vi_bw_kbps, a2);
+        /* On the VI control node, not the channel (see the ISP one). */
+        int vcfd = open("/dev/nvhost-ctrl-vi.1", O_RDWR);
+        errno = 0;
+        int a2 = vcfd < 0 ? -1 : ioctl(vcfd, NVHOST_VI_IOCTL_SET_EMC_INFO, &vi_bw_kbps);
+        printf("clock/bandwidth request: module rc=%d, VI bandwidth %u KB/s rc=%d%s%s\n",
+               a1, vi_bw_kbps, a2, a2 ? " " : "", a2 ? strerror(errno) : "");
+        if (vcfd >= 0) close(vcfd);
     }
 
     /* The syncpoint control register, which we had never written at all --

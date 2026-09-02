@@ -2525,6 +2525,8 @@ int main(int argc, char **argv)
 
         vi_flush("CSI bring-up");
         if (!tpg) mipi_calibrate_csie();
+        printf("  CILE pad0 after bring-up and calibration: 0x%08x\n",
+               vi_rd(T124_CILE_PAD_CONFIG0));
     } else {
     printf("bringing up the CSI receiver (port A, 4 lanes)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
@@ -2663,6 +2665,9 @@ int main(int argc, char **argv)
      * (see sensor_start_front for why not earlier). */
     if (sensor_late && sfd >= 0 && front && use_sensor)
         sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
+    if (front)
+        printf("  CILE pad0 after the sensor start: 0x%08x\n",
+               vi_rd(T124_CILE_PAD_CONFIG0));
 
     /* Pixel parser: single shot, armed for one frame. */
     uint32_t pp = (port == 0) ? PP_A_PIXEL_STREAM_PP_COMMAND
@@ -2998,6 +3003,20 @@ int main(int argc, char **argv)
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
                 vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+                if (front) {
+                    /* The stock re-writes the CILE pads right before every
+                     * single-shot (its VI gather 0x282/3: pad0 0, pad1 0,
+                     * THS 9), not only at bring-up. After the failed first
+                     * run of every boot this pad register read 0x00200001
+                     * where we had written 0; after a working run, 0. So
+                     * something between our bring-up and the shot rewrites
+                     * it, and we write it back the way the stock does. */
+                    printf("  CILE pad0 before the shot: 0x%08x\n",
+                           vi_rd(T124_CILE_PAD_CONFIG0));
+                    vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
+                    vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
+                    vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+                }
                 vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                           CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
                 vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,

@@ -13,20 +13,24 @@ int plane_rev = 0;
 int dm_sent;
 int dm_after = 1;
 int real_sent;
-int use_real_pass;
-int arm_stats;
+/* The working recipe, as defaults: two 8x8 warm-ups with the enable inside
+ * the first, the statistics conditions armed, the geometry blocks for the
+ * frame size, the real pass after the warm-ups, the stock's streaming
+ * transfer block, the calibration with every frame. */
+int use_real_pass = 1;
+int arm_stats = 1;
 int own_scratch;
-int do_warmup;
-int enable_late;
+int do_warmup = 1;
+int enable_late = 1;
 int per_frame_cal = 1;
-int geo_blocks;
-int stream_xfer;
+int geo_blocks = 1;
+int stream_xfer = 1;
 int bare_warmup;    /* --bare-warmup: the stock's placeholders until the warm-ups are done */
 int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
 int attempts = 2;   /* --attempts: how many single-shot arms before a frame is given up on */
 unsigned pre_wait;  /* --pre-wait: milliseconds to sleep after the sensor mode set */
-int sensor_late = 1; /* the sensor streams only once the receiver is up; --sensor-early for the old order */
+int sensor_late;     /* 0: the sensor streams before the receiver comes up (the MIPI calibration needs the clock lane live). The other order is kept as code only. */
 int sensor_twice;    /* --sensor-twice: power the sensor on, off and on again before the mode set */
 int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
 int no_cal;          /* --no-cal: skip our MIPI calibration, enable the bias pad only (as the 24.1 driver does for one lane) */

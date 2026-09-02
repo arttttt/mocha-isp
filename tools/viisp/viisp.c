@@ -1818,7 +1818,7 @@ int main(int argc, char **argv)
     int hold = 0, dump_regs = 0, scan_cil = 0, refill = 0, scan_cond = 0;
     uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
-    int fast_arm = 0;   /* --fast-arm: arm the next ISP frame right after the last completes */
+    int fast_arm = 1;   /* arm the next ISP frame right after the last completes; --slow-arm paces by the frame period instead */
     uint32_t isp_clk = 384000000;   /* --isp-clk=HZ */
     /* The memory-side rate the channel asks for. The driver does not set a
      * number here at all -- it computes an isochronous bandwidth from the
@@ -1841,7 +1841,7 @@ int main(int argc, char **argv)
      * is why one quarter-size plane came back written and the luma surface
      * stayed empty; and with 0x01FE00E6 the block lays the chroma out from
      * the luma base itself rather than from the addresses we give it. */
-    uint32_t isp_fmt = 0x00000043, isp_e03 = 0;
+    uint32_t isp_fmt = 0x04FE00E6, isp_e03 = 0;   /* YUV420 planar, block-linear: what the stock writes */
     uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
     /* Which of the two routing writes go through host1x methods rather than
      * registers: bit 0 the ISP interface, bit 1 the image definition. */
@@ -1884,7 +1884,6 @@ int main(int argc, char **argv)
     int init_a = 0;
     /* Send the calibration with every frame rather than once, as stock
      * does. The init then carries only the clearing pass. */
-    int per_frame_cal = 1;
     int out_iovmm = 0;
     int isp_only = 0;
     uint32_t stats_ctrl = 0;
@@ -1923,7 +1922,7 @@ int main(int argc, char **argv)
         }
         else if (strcmp(a, "--refill") == 0)      refill = 1;
         else if (strncmp(a, "--settle=", 9) == 0) settle = atoi(a + 9);
-        else if (strcmp(a, "--fast-arm") == 0)    fast_arm = 1;
+        else if (strcmp(a, "--slow-arm") == 0)    fast_arm = 0;
         else if (strncmp(a, "--isp-clk=", 10) == 0) isp_clk = (uint32_t)strtoul(a + 10, 0, 0);
         else if (strncmp(a, "--emc-bw=", 9) == 0) emc_bw = strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--isp-wait=", 11) == 0) isp_wait_ms = (int)strtoul(a + 11, 0, 0);
@@ -1931,7 +1930,6 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--isp-emc-clk=", 14) == 0) isp_emc_clk = (unsigned)strtoul(a + 14, 0, 0);
         /* The stock's per-frame gather is some forty words; ours carried the
          * whole calibration (lookup tables, shading) with every frame. */
-        else if (strcmp(a, "--no-per-frame-cal") == 0) per_frame_cal = 0;
         /* The stock's order: warm-ups on the opening's placeholders -- no
          * shading, warm-up windows, zero coefficients, 0x5555 shifts,
          * 0x650 = 3, the constant in 0x800/0x820, no work pointer -- and
@@ -1949,19 +1947,12 @@ int main(int argc, char **argv)
             attempts = (int)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--pre-wait=", 11) == 0)
             pre_wait = (unsigned)strtoul(a + 11, 0, 0);
-        else if (strcmp(a, "--sensor-early") == 0) sensor_late = 0;
         else if (strcmp(a, "--sensor-twice") == 0) sensor_twice = 1;
         else if (strcmp(a, "--no-cal") == 0)       no_cal = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
-        else if (strcmp(a, "--real-pass") == 0)   use_real_pass = 1;
-        else if (strcmp(a, "--arm-stats") == 0)   arm_stats = 1;
         else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
-        else if (strcmp(a, "--warmup") == 0)      do_warmup = 1;
-        else if (strcmp(a, "--ccm") == 0)         ccm = 3;
-        else if (strcmp(a, "--geo-blocks") == 0)  geo_blocks = 1;
-        else if (strcmp(a, "--stream-xfer") == 0) stream_xfer = 1;
         else if (strncmp(a, "--seq-sp=", 9) == 0)  seq_sp = (uint32_t)atoi(a + 9);
         else if (strncmp(a, "--wb=", 5) == 0) {     /* --wb=R,B in hex 4.12 */
             wb_r = (uint32_t)strtoul(a + 5, 0, 16);
@@ -1969,22 +1960,16 @@ int main(int argc, char **argv)
             if (comma) wb_b = (uint32_t)strtoul(comma + 1, 0, 16);
         }
         else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
-        else if (strcmp(a, "--enable-late") == 0) { do_warmup = 1;
-                                                    enable_late = 1; }
         else if (strncmp(a, "--rgb2y=", 8) == 0)
             rgb2y = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--stats-kb=", 11) == 0)
             stats_kb = (unsigned)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--work-kb=", 10) == 0)
             work_kb = (unsigned)strtoul(a + 10, 0, 0);
-        else if (strncmp(a, "--coarse=", 9) == 0)
-            coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--vi-height=", 12) == 0)
             vi_height = (unsigned)strtoul(a + 12, 0, 0);
         else if (strncmp(a, "--emc=", 6) == 0)
             emc_rate = strtoul(a + 6, 0, 0);
-        else if (strncmp(a, "--isp-fmt=", 10) == 0)
-            isp_fmt = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--isp-e03=", 10) == 0)
             isp_e03 = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--isp-enable=", 13) == 0)

@@ -53,6 +53,26 @@
 #define VI_CSI_SINGLE_SHOT          0x004
 #define VI_CSI_SINGLE_SHOT_STATE_UPDATE 0x008   /* the stock writes 1 once per session */
 #define TEGRA_VI_CFG_DVFS           0x0F0   /* the stock writes 0x10100010; reset value 0x4040007f */
+/* VI's bandwidth ioctl (include/linux/nvhost_vi_ioctl.h): a KB/s figure
+ * the driver turns into the VI write client's latency allowance. */
+#ifndef NVHOST_VI_IOCTL_SET_EMC_INFO
+#define NVHOST_VI_IOCTL_SET_EMC_INFO _IOW('V', 2, unsigned int)
+#endif
+/* The ISP's counterpart (include/linux/nvhost_isp_ioctl.h). The driver
+ * derives a bandwidth, isp_clk[kHz]/1000 * bpp_output / 8 MB/s, and sets
+ * the latency allowance and PTSA of the ISP write client with it -- memory
+ * controller state that outlives the VE power-gating and is cleared only
+ * by a reboot. The stock sends clk 81600, bpp_out 16 (162 MB/s, HARD) at
+ * every opening; the trace shows it at 2592 and at 1280 alike. */
+struct isp_emc_info {
+    unsigned int isp_bw;
+    unsigned int isp_clk;
+    unsigned int bpp_input;
+    unsigned int bpp_output;
+};
+#ifndef NVHOST_ISP_IOCTL_SET_EMC
+#define NVHOST_ISP_IOCTL_SET_EMC _IOW('I', 1, struct isp_emc_info)
+#endif
 #define VI_CSI_IMAGE_DEF            0x00c
 /* The two between IMAGE_DEF and IMAGE_SIZE, which we had never written.
  * The stock camera sets them in one run of six with the rest of the group,
@@ -2115,14 +2135,31 @@ int main(int argc, char **argv)
         errno = 0;
         int crc0 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
         int cerr0 = errno;
-        ic.moduleid = 1; ic.rate = 768000000;
+        /* Memory bandwidth, the way the stock asks for it: moduleid is the
+         * clock's id from the module's pdata in bits 15..0 -- 0x4b is the
+         * EMC entry -- and the attribute in bits 31..24, where 1 means the
+         * rate is a bandwidth in bytes per second, which the kernel turns
+         * into an EMC floor. The "moduleid = 1" this used to send matches
+         * no pdata entry, and the kernel then falls back to clock zero:
+         * the ISP clock was being set twice and the memory never asked
+         * for. The stock's figure, 163.2 MB/s, at 2592 and at 1280. */
+        ic.moduleid = (1u << 24) | 0x4b; ic.rate = 163200000;
         errno = 0;
         int crc1 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
         /* This kernel has no GET_CLK_RATE (it logs "unrecognized ioctl"), so
          * the rate actually granted is only visible in
          * /sys/kernel/debug/clock/ispb/rate while the channel is busy. */
-        printf("ISP clock request: %u Hz -> rc=%d (%s); memory 768 MHz -> rc=%d\n",
+        printf("ISP clock request: %u Hz -> rc=%d (%s); EMC bandwidth 163.2 MB/s -> rc=%d\n",
                isp_clk, crc0, crc0 ? strerror(cerr0) : "ok", crc1);
+        /* The ISP write client's latency allowance, as the stock sets it
+         * at every opening. Without it, on a fresh boot, the ISP never
+         * finished even an 8x8 warm-up; after one run of the stock camera
+         * -- whose setting outlives everything but a reboot -- it did. */
+        struct isp_emc_info ei = { 0, 81600, 0, 16 };
+        errno = 0;
+        int lrc = ioctl(isp_fd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
+        printf("ISP latency allowance (clk 81600 kHz, 16 bpp out, 162 MB/s HARD) -> rc=%d%s%s\n",
+               lrc, lrc ? " " : "", lrc ? strerror(errno) : "");
 
         /* Two register writes before anything else, both of which stock
          * makes when it opens the ISP. 0xFC is the block's own enable. 0x54
@@ -2592,9 +2629,15 @@ int main(int argc, char **argv)
          * streaming. We had been asking for 408. */
         c.moduleid = 0; c.rate = 600000000;
         int a1 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
-        c.moduleid = 1; c.rate = emc_rate;        /* memory */
-        int a2 = ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &c);
-        printf("clock/bandwidth request: module rc=%d, memory rc=%d\n", a1, a2);
+        /* VI's memory side goes through its own ioctl: a bandwidth in
+         * KB/s that the driver turns into the latency allowance for the
+         * VI write client (and an isomgr reservation). The stock's trace
+         * shows it at 162 MB/s. The "moduleid = 1" clock request this
+         * replaced matched no pdata entry and set the VI clock again. */
+        unsigned vi_bw_kbps = (unsigned)(emc_rate / 1000);
+        int a2 = ioctl(vi_fd, NVHOST_VI_IOCTL_SET_EMC_INFO, &vi_bw_kbps);
+        printf("clock/bandwidth request: module rc=%d, VI bandwidth %u KB/s rc=%d\n",
+               a1, vi_bw_kbps, a2);
     }
 
     /* The syncpoint control register, which we had never written at all --

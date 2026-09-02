@@ -1571,12 +1571,15 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * side had nothing to wait on before its single-shot. */
     g[n++] = OP_IMM(0, sp);
     {
-        uint32_t want_mem = syncpt_read(sp_mem) + 1;
+        /* hold_at is the queue depth: 0 when this job is the only one in
+         * flight, 1 when it is queued behind a frame still running and
+         * must park on the frame after that one. */
+        uint32_t want_mem = syncpt_read(sp_mem) + 1 + hold_at;
         g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
         g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
         g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
         if (sp_stats) {
-            uint32_t want_stats = syncpt_read(sp_stats) + 1;
+            uint32_t want_stats = syncpt_read(sp_stats) + 1 + hold_at;
             g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
             g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
             g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
@@ -1649,12 +1652,12 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base, int front,
                       uint32_t iova, uint32_t stride, uint32_t out_bytes,
                       int n_frames)
 {
-    uint32_t vcmd_h = nvmap_create(4096);
-    if (!vcmd_h || nvmap_alloc(vcmd_h) != 0 || !nvmap_pin(vcmd_h)) {
-        printf("stream: no command buffer for the VI channel\n");
-        return -1;
-    }
-    /* The VI surface, once: the ISP takes the frame, VI writes nothing. */
+    /* A gather on the VI channel (class 0x30 through host1x) hung the
+     * device outright on its first try, so the VI is armed through its
+     * registers here, as in the single-shot loop. What is kept of the
+     * stock's protocol is the queue: the next ISP job is submitted while
+     * the current frame is still running, parked on the frame after it. */
+    (void)vi_fd;
     vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
     vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
     vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
@@ -1668,86 +1671,63 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base, int front,
     uint8_t *img = malloc(out_bytes);
     int whole = 0;
 
+    /* Job 0 alone in the queue: it parks on the next frame. */
+    int rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+                       isp_trigger, u_off, v_off,
+                       sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                       isp_in_fmt, work_iova, per_frame_cal, proc_flags);
+    printf("  stream: job 0 armed, rc=%d\n", rc);
+
     for (int k = 0; k < n_frames; k++) {
         uint32_t base36 = syncpt_read(sp_mem);
         uint32_t base_fs = syncpt_read(sp_id);
-        struct timespec t0, t1, t2;
+        struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        /* 1. The ISP job. isp_frame returns once the channel counter has
-         * moved, i.e. config and trigger are in; the job then parks on
-         * this frame's 36/37. */
-        int rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+        /* Shoot frame k: job k is armed (its counter moved before we got
+         * here), so the frame lands in a waiting ISP. */
+        vi_wr(pp_reg, pp_cmd);
+        vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (fs_cond << 8) | sp_id);
+        vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+        vi_flush(0);
+
+        /* Queue job k+1 right behind, parked on frame k+1 (depth 1). Its
+         * own counter moves only once frame k is done and it is armed, and
+         * isp_frame waits for that -- so when the call returns frame k is
+         * complete without a single CPU poll on 36. */
+        int w_out = 0;
+        if (k + 1 < n_frames) {
+            rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
                            isp_trigger, u_off, v_off,
-                           sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                           sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
                            isp_in_fmt, work_iova, per_frame_cal, proc_flags);
-        uint32_t armed38 = syncpt_read(isp_sp);
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-
-        /* 2. The VI gather: wait for that counter, then shoot. */
-        uint32_t g[16]; int n = 0;
-        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-        g[n++] = (isp_sp << 24) | (armed38 & 0xFFFFFF);
-        g[n++] = OP_SETCLASS(VI_CLASS_ID);
-        g[n++] = OP_INCR(pp_reg / 4, 1);
-        g[n++] = pp_cmd;
-        g[n++] = OP_INCR((base + VI_CSI_SINGLE_SHOT) / 4, 1);
-        g[n++] = SINGLE_SHOT_CAPTURE;
-        g[n++] = OP_INCR(TEGRA_VI_CFG_VI_INCR_SYNCPT / 4, 1);
-        g[n++] = (fs_cond << 8) | sp_id;
-        nvmap_rw(vcmd_h, 0, g, (uint32_t)n * 4, 1);
-        struct nvhost_cmdbuf cb = { vcmd_h, 0, (uint32_t)n };
-        struct nvhost_syncpt_incr si = { sp_id, 1 };
-        uint32_t cls = VI_CLASS_ID;
-        struct nvhost_fence fence = { 0, 0 };
-        struct nvhost32_submit_args sa;
-        memset(&sa, 0, sizeof sa);
-        sa.num_syncpt_incrs = 1;
-        sa.num_cmdbufs = 1;
-        sa.timeout = 60000;
-        sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
-        sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-        sa.class_ids = (uint32_t)(uintptr_t)&cls;
-        sa.fences = (uint32_t)(uintptr_t)&fence;
-        errno = 0;
-        int vrc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-        if (vrc) {
-            printf("stream: VI submit failed: %s\n", strerror(errno));
-            break;
         }
-
-        /* 3. The frame. */
-        int w_fs = 0, w_out = 0;
-        while (syncpt_read(sp_id) == base_fs && w_fs < 1000) { usleep(1000); w_fs++; }
         while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) { usleep(1000); w_out++; }
-        clock_gettime(CLOCK_MONOTONIC, &t2);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
         int got = syncpt_read(sp_mem) != base36;
         uint32_t parser = vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
                                       : T124_PP_A_PIXEL_PARSER_STATUS);
-        printf("  stream frame %d: job rc=%d armed in %ld ms, frame start %s%d ms,"
-               " output %s%d ms, parser %08x\n",
-               k, rc, (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
-               syncpt_read(sp_id) != base_fs ? "after " : "NONE in ", w_fs,
-               got ? "after " : "NONE in ", w_out, parser);
-        (void)t2;
-        if (got) {
-            whole++;
-            if (n_frames <= 6 && nvmap_rw(out_h, 0, img, out_bytes, 0) == 0) {
-                char path[64];
-                snprintf(path, sizeof path, "/data/local/tmp/stream_%02d.raw", k);
-                FILE *f = fopen(path, "wb");
-                if (f) { fwrite(img, 1, out_bytes, f); fclose(f); }
-            }
-        } else {
+        printf("  stream frame %d: frame start %s, output %s (%ld ms from the shot),"
+               " parser %08x, next job rc=%d\n",
+               k, syncpt_read(sp_id) != base_fs ? "seen" : "NOT seen",
+               got ? "done" : "NONE",
+               (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
+               parser, rc);
+        if (!got) {
             printf("  stream: no output for frame %d, stopping\n", k);
             break;
+        }
+        whole++;
+        /* Read frame k before frame k+1 is shot into the same buffer. */
+        if (n_frames <= 6 && nvmap_rw(out_h, 0, img, out_bytes, 0) == 0) {
+            char path[64];
+            snprintf(path, sizeof path, "/data/local/tmp/stream_%02d.raw", k);
+            FILE *f = fopen(path, "wb");
+            if (f) { fwrite(img, 1, out_bytes, f); fclose(f); }
         }
     }
     printf("stream: %d of %d frames produced output\n", whole, n_frames);
     free(img);
-    nvmap_unpin(vcmd_h);
-    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)vcmd_h);
     return whole == n_frames ? 0 : -1;
 }
 

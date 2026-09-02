@@ -1405,8 +1405,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     /* Planar YUV takes a byte per luma sample and half-width chroma; the
      * packed forms take four bytes a pixel in one plane. */
     int planar = (fmt & 0xFF) == 0xE6;
-    uint32_t stride_y = planar ? ((W + 63) & ~63u) : W * 4;
-    uint32_t stride_uv = ((W / 2) + 63) & ~63u;
+    /* Strides to 128, not 64: the stock's plane offsets at 2592 (U at
+     * 0x540000, V at 0x6a0000) are 2688 x 2048 and 1408 x 1024 -- widths
+     * rounded up to 128. At 1280 and 640 both roundings coincide, which is
+     * why it went unnoticed; at 2592 with 2624 no frame ever completed. */
+    uint32_t stride_y = planar ? ((W + 127) & ~127u) : W * 4;
+    uint32_t stride_uv = ((W / 2) + 127) & ~127u;
 
     unsigned cal_words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     uint32_t *g = malloc((cal_words + 128) * 4);
@@ -1880,8 +1884,10 @@ int main(int argc, char **argv)
      * rounded up to 64, and the chroma planes are half of everything. */
     unsigned OH = vi_height ? vi_height : H;
     int isp_planar = (isp_fmt & 0xFF) == 0xE6;
-    uint32_t stride_y = isp_planar ? ((W + 63) & ~63u) : W * 4;
-    uint32_t stride_uv = ((W / 2) + 63) & ~63u;
+    /* 128-aligned, as the stock's plane offsets at 2592 imply (see the
+     * frame builder). */
+    uint32_t stride_y = isp_planar ? ((W + 127) & ~127u) : W * 4;
+    uint32_t stride_uv = ((W / 2) + 127) & ~127u;
     /* Stock's own plane offsets for this sensor are 0x540000 and 0x6a0000 --
      * a wider gap than the planes need, and not what rounding the sizes up
      * produces. Overridable for that reason. */

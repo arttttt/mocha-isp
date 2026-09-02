@@ -113,7 +113,9 @@ void mipi_calibrate_csie(void)
     mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
 
     /* 2. Clear the status bits. */
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0xF1F10000, 0);
+    /* The stock (NvViCsiCalibrateT12x in libnvvicsi_v3, decompiled) writes
+     * 0 here; the 24.1 kernel writes 0xF1F10000. We follow the stock. */
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0x00000000, 0);
 
     /* 3. The display lanes are not ours; drop them. */
     mipi_upd(MIPI_CAL_DSIA_CFG, MIPI_CAL_DSI_SEL, 0);
@@ -140,7 +142,12 @@ void mipi_calibrate_csie(void)
     mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
 
     /* 7. Trim and trigger in one word. */
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_CTRL, MIPI_CAL_START, 0);
+    /* The stock waits 10 us after the selects and then sets the start bit
+     * alone, leaving the noise filter and prescale fields as they are;
+     * the 24.1 kernel writes the whole word (0xa<<26 | 2<<24 | CLKEN_OVR
+     * | START). We follow the stock. */
+    usleep(10);
+    mipi_upd(MIPI_CAL_CTRL, 1u, 1u);
 
     /* 8. The driver polls up to five hundred times at a couple of hundred
      * microseconds; a single short sleep was not giving it time. */

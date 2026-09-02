@@ -2646,8 +2646,10 @@ int main(int argc, char **argv)
          * when the number was simply where it already stood. */
         if (isp_fd >= 0 && out_iova && stats_h) {
             isp_base_mem = syncpt_read(sp_mem);
-            isp_base_stats = syncpt_read(sp_stats);
-            isp_base_loadv = syncpt_read(sp_loadv);
+            /* The channel's other two counters by position, armed or not:
+             * what moves on them over the run is what a job may declare. */
+            isp_base_stats = syncpt_read(sp_mem + 1);
+            isp_base_loadv = syncpt_read(sp_mem + 3);
         }
 
         /* Which event numbers does this hardware actually raise? The two we
@@ -3117,7 +3119,15 @@ readback:
          * per-frame gather arms. All still means it never ran. */
         printf("ISP output condition (syncpoint %u) moved by %+d\n",
                sp_mem, (int)(syncpt_read(sp_mem) - isp_base_mem));
-        (void)isp_base_stats; (void)isp_base_loadv;
+        /* And the other two, so a declaration can match what the hardware
+         * actually raises. Declaring an increment that never comes leaves
+         * the kernel's count ahead of the hardware for the rest of the
+         * boot, for every user of that counter -- the stock camera went
+         * black after one such run. */
+        printf("ISP statistics condition (syncpoint %u) moved by %+d, "
+               "loadv (syncpoint %u) moved by %+d\n",
+               sp_mem + 1, (int)(syncpt_read(sp_mem + 1) - isp_base_stats),
+               sp_mem + 3, (int)(syncpt_read(sp_mem + 3) - isp_base_loadv));
 
         /* The stats condition is the one that fires, so this is where to
          * look for proof that pixels reached the ISP at all. Numbers here

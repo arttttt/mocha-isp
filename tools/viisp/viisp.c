@@ -1832,6 +1832,7 @@ int main(int argc, char **argv)
             pre_wait = (unsigned)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--sensor-early") == 0) sensor_late = 0;
         else if (strcmp(a, "--sensor-twice") == 0) sensor_twice = 1;
+        else if (strcmp(a, "--no-cal") == 0)       no_cal = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2566,7 +2567,18 @@ int main(int argc, char **argv)
         }
 
         vi_flush("CSI bring-up");
-        if (!tpg) mipi_calibrate_csie();
+        /* --no-cal: skip our MIPI calibration. The 24.1 kernel driver never
+         * calibrates the one-lane front path at all (its lane mask covers
+         * 2, 4 and 8 lanes only) and enables just the bias pad -- and its
+         * pictures are right. Ours are garbage on a fresh boot and right
+         * after one run of the stock camera, whose own calibration leaves
+         * the pads in a state that outlives everything but a reboot. */
+        if (!tpg && !no_cal) mipi_calibrate_csie();
+        else if (no_cal) {
+            mipi_upd(MIPI_BIAS_PAD_CFG2, BIAS_PDVREG, 0);
+            mipi_upd(MIPI_BIAS_PAD_CFG0, BIAS_E_VCLAMP_REF, 0);
+            printf("  MIPI calibration skipped; bias pad enabled (PDVREG 0, VCLAMP_REF 0)\n");
+        }
         printf("  CILE pad0 after bring-up and calibration: 0x%08x\n",
                vi_rd(T124_CILE_PAD_CONFIG0));
     } else {
@@ -2639,7 +2651,8 @@ int main(int argc, char **argv)
          * VI write client (and an isomgr reservation). The stock's trace
          * shows it at 162 MB/s. The "moduleid = 1" clock request this
          * replaced matched no pdata entry and set the VI clock again. */
-        unsigned vi_bw_kbps = (unsigned)(emc_rate / 1000);
+        /* The stock's figure, 162 MB/s; 528 MB/s came back ENOMEM. */
+        unsigned vi_bw_kbps = 162000;
         /* On the VI control node, not the channel (see the ISP one). */
         int vcfd = open("/dev/nvhost-ctrl-vi.1", O_RDWR);
         errno = 0;

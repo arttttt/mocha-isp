@@ -1830,7 +1830,11 @@ int main(int argc, char **argv)
          * job, real pass). Also drops the live-shadow blocks from the
          * opening rounds, which is where the real coefficients came in. */
         else if (strcmp(a, "--bare-warmup") == 0) { bare_warmup = 1; stock_cfg = 0; }
-        else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 1;
+        else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 7;
+        else if (strncmp(a, "--stock-vi=", 11) == 0)
+            /* bit 0: DVFS + SINGLE_SHOT_STATE_UPDATE; bit 1: the parser
+             * words; bit 2: PHY_CIL_COMMAND E-only and no CILC pad. */
+            stock_vi = (int)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
         else if (strncmp(a, "--attempts=", 11) == 0)
             attempts = (int)strtoul(a + 11, 0, 0);
@@ -2522,7 +2526,7 @@ int main(int argc, char **argv)
         /* The stock camera never writes CILC's pad register for the front
          * sensor: only CILA/CILB (zero) and CILE (zero, then THS 9). The
          * 4x brick mode here is what the R21.5 V4L2 driver did. */
-        if (!stock_vi) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
+        if (!(stock_vi & 4)) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
         vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
         vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
 
@@ -2541,19 +2545,19 @@ int main(int argc, char **argv)
          * where the R21.5 driver has NOPAD, CONTROL1 clear, the packet-skip
          * threshold 0x7f with two extra low bits in INPUT_STREAM_CONTROL.
          * The same words at 2592 and 1280 wide. */
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, stock_vi ? 0x080301f1 : 0x280301f1);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, (stock_vi & 2) ? 0x080301f1 : 0x280301f1);
         vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, stock_vi ? 0 : 0x00000011);
+        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, (stock_vi & 2) ? 0 : 0x00000011);
         vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
         vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, stock_vi ? 0x007f0014 : 0x003f0000);
+        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, (stock_vi & 2) ? 0x007f0014 : 0x003f0000);
 
         /* Only the upper half of the brick command is ours; the lower half
          * belongs to the rear path and has to survive our write. The stock
          * enables brick E alone (0x10000000) and leaves C and D untouched. */
         vi_wr(T124_CSI_PHY_CIL_COMMAND,
               (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) |
-              (stock_vi ? 0x10000000 : phy_cil_cmd));
+              ((stock_vi & 4) ? 0x10000000 : phy_cil_cmd));
         vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
         /* --tpg: let the receiver make its own picture. This splits the
          * problem in half -- if the pattern lands in the buffer then VI,
@@ -2672,7 +2676,7 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_SW_RESET, 0x0);
 
     vi_wr(base + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
-    if (stock_vi) {
+    if (stock_vi & 1) {
         /* Two VI registers the stock writes and no V4L2 driver of ours ever
          * has: the DVFS word, and SINGLE_SHOT_STATE_UPDATE = 1 once per
          * session. Both from the stock's VI gathers, the same at every

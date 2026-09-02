@@ -832,8 +832,8 @@ int main(int argc, char **argv)
     unsigned sp_pre[4];  /* syncpoint values before the submission */
     int st_create = 1, st_sattr = 1, st_stats = 1;
     unsigned inst = 1;    /* inst=<n>: ISP instance; stock opens 1 and 2.
-                             isp.0 (instance 1, rear) is dead on this
-                             kernel; isp.1 (front) works. */
+                             isp.0 (rear) and isp.1 (front)
+                             both work on this kernel. */
     unsigned cfgmode1_arg = 1;  /* cfgmode1=<n>: SetConfiguration mode 1 */
     unsigned cfgmode2_arg = 2;  /* cfgmode2=<n>: SetConfiguration mode 2 */
     unsigned create_size = 0x24;   /* createsize=: HwSettingsCreate size */

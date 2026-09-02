@@ -168,6 +168,16 @@ void mipi_calibrate_csie(void)
     /* 9. Leave the selection as the driver leaves it. */
     mipi_upd(MIPI_CAL_CILE_CFG, MIPI_CAL_CIL_SEL, 0);
     mipi_upd(MIPI_CAL_CSIE_CFG2, MIPI_CAL_CLKSEL, 0);
+    /* The 24.1 kernel's calibration ends by putting the clock-lane select
+     * back to 1 on the pads it is not calibrating -- DSIA, DSIB, CILC,
+     * CILD -- and the stock's register state after a run shows the same
+     * bits set where a fresh boot has them clear. We had cleared them at
+     * the start and never restored them; on a fresh boot the picture was
+     * garbage until the stock camera had run once. */
+    mipi_upd(MIPI_CAL_DSIA_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
+    mipi_upd(MIPI_CAL_DSIB_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
+    mipi_upd(MIPI_CAL_CILC_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
+    mipi_upd(MIPI_CAL_CILD_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
 }
 
 int pmc_dpd_release(uint32_t bit)

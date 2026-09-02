@@ -1600,6 +1600,41 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     return rc;
 }
 
+/* The mode table ends with the streaming bit, so this is the moment the
+ * sensor's clock lane leaves LP-11 for good. The receiver has to be awake
+ * and configured before it: a CIL brought up under a clock lane already in
+ * HS never sees the transition it locks on, and no frame ever starts. That
+ * is exactly what the first run after every boot looked like -- receiver
+ * cold, sensor started first, CIL E status 0x100, twelve single-shots and
+ * not one frame -- while the second run rode on the receiver the first one
+ * had left powered and locked. The stock and the R21.5 driver both bring
+ * the CSI up first and start the sensor after. */
+static void sensor_start_front(int sfd, unsigned W, unsigned H,
+                               uint32_t frame_length, uint32_t coarse_time,
+                               uint32_t gain)
+{
+    /* The driver writes the mode table and then writes exposure from these
+     * fields unconditionally -- passing zeros programs the sensor with no
+     * frame length and no integration time, which is a part that streams
+     * nothing. */
+    struct ov5693_mode m;
+    memset(&m, 0, sizeof m);
+    m.res_x = (int)W;
+    m.res_y = (int)H;
+    m.fps = 30;
+    m.frame_length = frame_length;
+    m.coarse_time = coarse_time;
+    m.gain = (uint16_t)gain;
+    if (ioctl(sfd, OV5693_IOCTL_SET_MODE, &m) < 0)
+        printf("sensor mode: %s\n", strerror(errno));
+    else
+        printf("sensor streaming at %ux%u\n", W, H);
+    if (pre_wait) {
+        printf("  waiting %u ms after the mode set\n", pre_wait);
+        usleep(pre_wait * 1000);
+    }
+}
+
 int main(int argc, char **argv)
 {
     /* Through adb the output is a pipe and fully buffered, so a crash takes
@@ -1775,6 +1810,7 @@ int main(int argc, char **argv)
             attempts = (int)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--pre-wait=", 11) == 0)
             pre_wait = (unsigned)strtoul(a + 11, 0, 0);
+        else if (strcmp(a, "--sensor-early") == 0) sensor_late = 0;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2276,30 +2312,12 @@ int main(int argc, char **argv)
              * driver's power-on does not wait for the sensor to come out of
              * reset, so the wait has to be here. */
             usleep(50000);
-            /* The driver writes the mode table and then writes exposure
-             * from these fields unconditionally -- passing zeros programs
-             * the sensor with no frame length and no integration time,
-             * which is a part that streams nothing. */
-            struct ov5693_mode m;
-            memset(&m, 0, sizeof m);
-            m.res_x = (int)W;
-            m.res_y = (int)H;
-            m.fps = 30;
-            m.frame_length = frame_length;
-            m.coarse_time = coarse_time;
-            m.gain = (uint16_t)gain;
-            if (ioctl(sfd, OV5693_IOCTL_SET_MODE, &m) < 0)
-                printf("sensor mode: %s\n", strerror(errno));
+            /* The stream itself starts after the receiver is up (see
+             * sensor_start_front); --sensor-early keeps the old order. */
+            if (!sensor_late)
+                sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
             else
-                printf("sensor streaming at %ux%u\n", W, H);
-            /* --pre-wait: the first run after a boot never sees a frame
-             * start, the second always does. Whether the sensor merely
-             * needs longer from a cold power-on is the cheapest question
-             * to ask. */
-            if (pre_wait) {
-                printf("  waiting %u ms after the mode set\n", pre_wait);
-                usleep(pre_wait * 1000);
-            }
+                printf("sensor powered; streaming deferred until the receiver is up\n");
         } else {
             uint32_t on = 1;
             if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
@@ -2624,6 +2642,11 @@ int main(int argc, char **argv)
     vi_wr(base + 0x5c, 0x00000484);
     vi_wr(base + 0x60, 0x00000001);
     vi_wr(base + 0x64, 0x00000003);
+
+    /* Receiver and VI are configured: now the sensor may start streaming
+     * (see sensor_start_front for why not earlier). */
+    if (sensor_late && sfd >= 0 && front && use_sensor)
+        sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
 
     /* Pixel parser: single shot, armed for one frame. */
     uint32_t pp = (port == 0) ? PP_A_PIXEL_STREAM_PP_COMMAND

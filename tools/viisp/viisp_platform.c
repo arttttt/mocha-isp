@@ -26,6 +26,7 @@ int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instea
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
 int attempts = 2;   /* --attempts: how many single-shot arms before a frame is given up on */
 unsigned pre_wait;  /* --pre-wait: milliseconds to sleep after the sensor mode set */
+int sensor_late = 1; /* the sensor streams only once the receiver is up; --sensor-early for the old order */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

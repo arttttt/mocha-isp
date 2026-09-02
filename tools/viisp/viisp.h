@@ -327,7 +327,7 @@ extern uint32_t alloc_heap;
 extern int plane_rev, dm_sent, dm_after, real_sent, use_real_pass;
 extern int arm_stats, own_scratch, do_warmup, enable_late;
 extern int per_frame_cal, geo_blocks, ccm, stream_xfer, bare_warmup;
-extern int stock_vi, no_isp, attempts;
+extern int stock_vi, no_isp, attempts, sensor_late;
 extern unsigned pre_wait;
 extern uint32_t wb_r, wb_b;
 extern unsigned stats_kb, work_kb;

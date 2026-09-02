@@ -1563,6 +1563,13 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * frame, so +1 is unambiguous. If the sensor never delivers, the job
      * sits until its timeout and the channel dies -- the same price every
      * wedged run paid. */
+    /* The channel's own counter goes up HERE, right after the trigger and
+     * before the parking waits: the stock's frame job carries no waits at
+     * all and its increment means "config loaded, trigger given", while a
+     * separate two-word gather behind it parks the channel on 36/37. With
+     * the increment after the waits it meant "frame finished", and the VI
+     * side had nothing to wait on before its single-shot. */
+    g[n++] = OP_IMM(0, sp);
     {
         uint32_t want_mem = syncpt_read(sp_mem) + 1;
         g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
@@ -1575,8 +1582,6 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
             g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
         }
     }
-
-    g[n++] = OP_IMM(0, sp);
     (void)hold_sp; (void)hold_at;
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
@@ -2983,6 +2988,11 @@ int main(int argc, char **argv)
              * took the parked job past the timeout the kernel allows. */
             while (attempt < attempts && !done) {
                 uint32_t fs0 = syncpt_read(sp_id);
+                /* The ISP channel's own counter (38): every job of ours ends
+                 * with an immediate increment on it, so it tells whether the
+                 * job has actually executed -- config loaded, trigger 0x05
+                 * given -- as opposed to merely being queued. */
+                uint32_t isp_fence0 = isp_fd >= 0 ? syncpt_read(isp_sp) : 0;
                 attempt++;
 
                 /* Wiping is a diagnostic, not part of a capture: it is ten
@@ -3059,6 +3069,22 @@ int main(int argc, char **argv)
                               proc_flags);
                 }
 
+                /* The stock's order, in its VI gathers: WAIT on the ISP
+                 * channel's counter for the job just submitted, and only
+                 * then the single-shot. Arming the VI before the ISP job has
+                 * executed lets the frame arrive at an ISP that is not yet
+                 * taking lines; at 2592 wide that showed as parser overflow
+                 * (0x34/0xb4) and bands of the picture shifted sideways by
+                 * the pixels lost. */
+                if (isp_fd >= 0 && (warm_h || (out_iova && stats_h))) {
+                    int wj = 0;
+                    while (syncpt_read(isp_sp) == isp_fence0 && wj < 500) {
+                        usleep(1000);
+                        wj++;
+                    }
+                    if (wj >= 500)
+                        printf("  ISP job not executed within 500 ms (38 unchanged)\n");
+                }
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
                 vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);

@@ -28,6 +28,7 @@ int attempts = 2;   /* --attempts: how many single-shot arms before a frame is g
 unsigned pre_wait;  /* --pre-wait: milliseconds to sleep after the sensor mode set */
 int sensor_late = 1; /* the sensor streams only once the receiver is up; --sensor-early for the old order */
 int sensor_twice;    /* --sensor-twice: power the sensor on, off and on again before the mode set */
+int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;

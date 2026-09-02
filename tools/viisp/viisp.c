@@ -3003,19 +3003,24 @@ int main(int argc, char **argv)
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
                 vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
-                if (front) {
-                    /* The stock re-writes the CILE pads right before every
-                     * single-shot (its VI gather 0x282/3: pad0 0, pad1 0,
-                     * THS 9), not only at bring-up. After the failed first
-                     * run of every boot this pad register read 0x00200001
-                     * where we had written 0; after a working run, 0. So
-                     * something between our bring-up and the shot rewrites
-                     * it, and we write it back the way the stock does. */
-                    printf("  CILE pad0 before the shot: 0x%08x\n",
+                if (front && !cile_rewritten) {
+                    /* The stock re-writes the CILE pads right before its
+                     * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
+                     * THS 9) and never again -- the later per-frame VI
+                     * gathers carry only the wait and the shot. After the
+                     * failed first run of every boot this pad register read
+                     * 0x00200001 where the bring-up had written 0; after a
+                     * working run, 0. Something between the sensor start
+                     * and the shot rewrites it, and this writes it back.
+                     * Once only: doing it before every shot, on a lane
+                     * already in HS, broke every frame after the first
+                     * (parser 0x1b4). */
+                    printf("  CILE pad0 before the first shot: 0x%08x\n",
                            vi_rd(T124_CILE_PAD_CONFIG0));
                     vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
                     vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
                     vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+                    cile_rewritten = 1;
                 }
                 vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                           CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);

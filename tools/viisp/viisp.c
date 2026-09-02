@@ -1136,7 +1136,12 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     g[n++] = OP_INCR(0x500, 6);
     g[n++] = 0x00000003;                                /* the flags word */
     g[n++] = (1u << 23) / W;
-    g[n++] = (W / 128) << 24;
+    /* W/128 in 8.8 fixed point in the upper half: the capture has
+     * 0x14400000 at 2592 wide -- 20.25, not 20 -- and 0x0a000000 at 1280,
+     * where the division is exact and hid the format. Truncating it left
+     * the decimator with the wrong width at 2592, and no warm-up frame
+     * ever completed there. */
+    g[n++] = (W << 17);
     g[n++] = (H / 8) << 20;
     g[n++] = 0x00000000;
     g[n++] = 0x00080008;                                /* eight by eight */

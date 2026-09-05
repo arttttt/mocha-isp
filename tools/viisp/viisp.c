@@ -1272,10 +1272,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
     sa.num_relocs = 4;
-    /* This job is parked on a counter we raise after the whole capture, so
-     * three seconds -- the default -- is shorter than its own life. It ran
-     * out and host1x killed the ISP channel, which costs a reboot. */
-    sa.timeout = 60000;
+    /* The single capture job is parked on a counter that moves only when
+     * the whole capture is done, so it outlives the default three seconds;
+     * a stream job parks on the next frame, at most two periods away, and
+     * a wedged stream should die in seconds rather than hold the channel
+     * for a minute after the tool has exited. */
+    sa.timeout = (uint32_t)isp_job_timeout_ms;
     sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
     sa.relocs = (uint32_t)(uintptr_t)rel;
@@ -1338,6 +1340,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
     uint8_t *img = malloc(out_bytes);
     int whole = 0;
 
+    isp_job_timeout_ms = 3000;
     /* Job 0 alone in the queue: it parks on the next frame. */
     int rc = isp_frame(isp_fd, outs[0], stats[0], W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
@@ -1392,6 +1395,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         }
     }
     printf("stream: %d of %d frames produced output\n", whole, n_frames);
+    isp_job_timeout_ms = 60000;
     /* The last frame into outs[0], where the run's dump and readback look. */
     if (whole > 0 && ((whole - 1) & 1) && outs[1] != outs[0]
         && nvmap_rw(outs[1], 0, img, out_bytes, 0) == 0)
@@ -2215,8 +2219,12 @@ int main(int argc, char **argv)
         struct timespec t0, t;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         for (int r = 0; r < 3; r++) prev[r] = vi_rd(regs[r]);
-        printf("live trace %d ms: CIL_E 0x%08x CILE 0x%08x PP_B 0x%08x",
-               pp_trace_ms, prev[0], prev[1], prev[2]);
+        /* And the frame-start condition, re-armed after every increment: if
+         * it ticks at the frame period with no shot armed, it is a clock. */
+        uint32_t fs_prev = syncpt_read(sp_id);
+        long fs_last = 0; int fs_ticks = 0;
+        printf("live trace %d ms: CIL_E 0x%08x CILE 0x%08x PP_B 0x%08x, FS syncpt %u = %u",
+               pp_trace_ms, prev[0], prev[1], prev[2], sp_id, fs_prev);
         int changes = 0;
         for (;;) {
             clock_gettime(CLOCK_MONOTONIC, &t);
@@ -2231,9 +2239,19 @@ int main(int argc, char **argv)
                     changes++; prev[r] = v;
                 }
             }
+            uint32_t fs = syncpt_read(sp_id);
+            if (fs != fs_prev) {
+                if (fs_ticks < 40)
+                    printf("%s%ld.%03ld FS+%u (%ld us)", fs_ticks % 4 ? "  " : "\n  ",
+                           us / 1000, us % 1000, fs - fs_prev, us - fs_last);
+                fs_ticks++; fs_last = us; fs_prev = fs;
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
+                vi_flush(0);
+            }
             usleep(300);
         }
-        printf("\n  %d changes in %d ms\n", changes, pp_trace_ms);
+        printf("\n  %d register changes, %d frame-start ticks in %d ms\n",
+               changes, fs_ticks, pp_trace_ms);
     }
 
     /* When the frame goes to the ISP there is no surface for VI to write and

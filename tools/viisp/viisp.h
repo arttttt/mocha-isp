@@ -209,6 +209,7 @@ struct nvhost32_submit_args {
 #define ISP_CLASS_A                 0x32
 #define ISP_CLASS_B                 0x34
 #define ISP_TRIGGER_SENSOR          0x05
+#define VI1_ISPB_SYNCPT             46      /* the stock arms VI condition 0xf onto it with every shot */
 #define ISP_ENABLE_WORD             0x04040007  /* method 0x015, once per session */
 #define ISP_TRIGGER_MEMORY          0x0B
 

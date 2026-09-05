@@ -1356,6 +1356,11 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
      * start38 + k + 1. A shot before that hands the frame to an ISP that
      * is not yet taking lines; that was the miss behind every "2 shots". */
     uint32_t start38 = syncpt_read(isp_sp);
+    /* The stock arms VI condition 0xf onto syncpoint 46 (vi1_ispb) with
+     * every shot and waits on it before the next: one increment per frame,
+     * at the parser's frame end (impl-2's reading). Armed here to measure
+     * where that edge falls against the ISP's output-done and the shot. */
+    uint32_t start46 = syncpt_read(VI1_ISPB_SYNCPT);
     /* Job 0 alone in the queue: it parks on the next frame. */
     int rc = isp_frame(isp_fd, outs[0], stats[0], W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
@@ -1383,8 +1388,10 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         }
         vi_wr(pp_reg, pp_cmd);
         vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (fs_cond << 8) | sp_id);
+        vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
         vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
         vi_flush(0);
+        long fe_us = -1;                     /* when 46 moved, from the shot */
 
         /* Queue job k+1 right behind, parked on frame k+1 (depth 1). Its
          * own counter moves only once frame k is done and it is armed, and
@@ -1410,6 +1417,10 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         int shots = 1;
         while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) {
             usleep(1000); w_out++;
+            if (fe_us < 0 && syncpt_read(VI1_ISPB_SYNCPT) != start46 + (uint32_t)k) {
+                struct timespec tf; clock_gettime(CLOCK_MONOTONIC, &tf);
+                fe_us = (tf.tv_sec - t0.tv_sec) * 1000000L + (tf.tv_nsec - t0.tv_nsec) / 1000;
+            }
             /* No output two periods after the shot: the shot fell inside a
              * frame, the parser handed the ISP a partial one and the ISP is
              * holding it. Fire again -- the job stays parked -- so the next,
@@ -1428,11 +1439,15 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         int got = syncpt_read(sp_mem) != base36;
         uint32_t parser = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
         printf("  stream frame %d: frame start %s, output %s (%ld ms, %d shot%s),"
+               " frame end (46) %s%ld ms 46=%u/%u,"
                " parser %08x, 36=%u/%u 37=%u/%u 38=%u, next job rc=%d\n",
                k, syncpt_read(sp_id) != base_fs ? "seen" : "NOT seen",
                got ? "done" : "NONE",
                (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
-               shots, shots == 1 ? "" : "s", parser,
+               shots, shots == 1 ? "" : "s",
+               fe_us < 0 ? "not seen " : "at ", fe_us < 0 ? 0L : fe_us / 1000,
+               syncpt_read(VI1_ISPB_SYNCPT) - start46, (unsigned)k + 1,
+               parser,
                syncpt_read(sp_mem) - start36, (unsigned)k + 1,
                syncpt_read(sp_stats) - start37, (unsigned)k + 1,
                syncpt_read(isp_sp), rc);

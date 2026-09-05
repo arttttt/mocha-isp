@@ -2807,9 +2807,6 @@ shutdown:
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);
     close(nvmap_fd);
-    /* Sensor down, channels closed: the receiver's clocks go back to how we
-     * found them, before nvhost gates the domain behind us. */
-    car_restore_csi_clocks();
     printf("=== done ===\n");
     return 0;
 }

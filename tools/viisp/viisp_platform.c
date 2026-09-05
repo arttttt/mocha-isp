@@ -66,13 +66,9 @@ int mem_rd(unsigned long addr, uint32_t *out)
     return 0;
 }
 
-/* What the enable registers held before we touched them, so the exit can
- * switch off exactly the clocks we switched on and no others. */
-static uint32_t car_before_l, car_before_h, car_before_w, car_before_x;
-
 void car_enable_csi_clocks(void)
 {
-    uint32_t b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+    uint32_t b1 = 0, b2 = 0, b3 = 0;
     /* csi and cile for the receiver; mipi-cal and clk72mhz for the
      * calibration block, which cannot finish without them -- it reported
      * "not done" while both of those were switched off. */
@@ -80,7 +76,7 @@ void car_enable_csi_clocks(void)
      * the L group. Registers answer regardless, because nvhost powers the
      * module for the length of an ioctl -- but the parser and the write
      * engine need the clock to actually run. */
-    mem_wr(CAR_BASE + CAR_ENB_SET_L, CAR_VI_BIT_L, &b0);
+    mem_wr(CAR_BASE + CAR_ENB_SET_L, CAR_VI_BIT_L, 0);
     mem_wr(CAR_BASE + CAR_RST_CLR_L, CAR_VI_BIT_L, 0);
 
     mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
@@ -99,26 +95,6 @@ void car_enable_csi_clocks(void)
 
     printf("  receiver clocks on and out of reset: H 0x%08x, W 0x%08x, X 0x%08x\n",
            b1, b2, b3);
-    car_before_l = b0; car_before_h = b1; car_before_w = b2; car_before_x = b3;
-}
-
-/* The exit's half of the above: every clock that was off when we came in
- * goes off again. The kernel's clock framework never saw our enables, so
- * nvhost gates the VE domain later believing these are off -- leaving them
- * running across that is a state nothing else on the device produces. The
- * resets stay released; the powergate sequence asserts them itself. */
-void car_restore_csi_clocks(void)
-{
-    uint32_t l = CAR_VI_BIT_L & ~car_before_l;
-    uint32_t h = (CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H) & ~car_before_h;
-    uint32_t w = (CAR_CILE_BIT_W | CAR_CILCD_BIT_W) & ~car_before_w;
-    uint32_t x = CAR_CLK72M_BIT_X & ~car_before_x;
-    if (l) mem_wr(CAR_BASE + CAR_ENB_CLR_L, l, 0);
-    if (h) mem_wr(CAR_BASE + CAR_ENB_CLR_H, h, 0);
-    if (w) mem_wr(CAR_BASE + CAR_ENB_CLR_W, w, 0);
-    if (x) mem_wr(CAR_BASE + CAR_ENB_CLR_X, x, 0);
-    printf("  receiver clocks restored: L 0x%08x H 0x%08x W 0x%08x X 0x%08x off\n",
-           l, h, w, x);
 }
 
 /* Read-modify-write, because most of the sequence touches one bit of a

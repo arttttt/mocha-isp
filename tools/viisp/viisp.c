@@ -2177,6 +2177,32 @@ int main(int argc, char **argv)
     printf("  CILE pad0 after the sensor start: 0x%08x\n",
            vi_rd(T124_CILE_PAD_CONFIG0));
 
+    /* Pixel parser: single shot, armed for one frame. */
+    uint32_t pp = PP_B_PIXEL_STREAM_PP_COMMAND;
+    vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+
+    /* Arm the syncpoint conditions before the shot. VI_INCR_SYNCPT is a
+     * command register -- it takes a condition and a syncpoint id and arms
+     * one increment -- so it reads back as zero and never showed up in the
+     * comparison against stock. The memory-write acknowledge is the one
+     * that has to be armed before the DMA starts. */
+    /* Two different syncpoints, as the driver uses: one for the frame
+     * start and a separate one for the memory-write acknowledge. We had
+     * been arming both conditions against the same id. */
+    /* Both acknowledge conditions. The header says outright that these
+     * event numbers were found by trial rather than derived, so which of
+     * the two belongs to this port is worth not assuming. */
+    /* Only the frame start is armed here. The driver arms the memory-write
+     * acknowledge only after the frame start has fired -- once the DMA is
+     * already running -- so arming it up front was our invention. */
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
+
+    /* And the trigger goes in the same batch: the receiver has to still be
+     * powered and configured when the shot is fired, which is the whole
+     * reason for doing this in one call. */
+    vi_flush("setup");
+
     if (pp_trace_ms > 0) {
         /* Calibration of the parser status bit 5 ("active receive"): poll it
          * with nothing armed and print every edge with its time, to learn
@@ -2211,32 +2237,6 @@ int main(int argc, char **argv)
                lo_n ? lo_sum / lo_n : 0, lo_n, vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
     }
 
-    /* Pixel parser: single shot, armed for one frame. */
-    uint32_t pp = PP_B_PIXEL_STREAM_PP_COMMAND;
-    vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-              CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-
-    /* Arm the syncpoint conditions before the shot. VI_INCR_SYNCPT is a
-     * command register -- it takes a condition and a syncpoint id and arms
-     * one increment -- so it reads back as zero and never showed up in the
-     * comparison against stock. The memory-write acknowledge is the one
-     * that has to be armed before the DMA starts. */
-    /* Two different syncpoints, as the driver uses: one for the frame
-     * start and a separate one for the memory-write acknowledge. We had
-     * been arming both conditions against the same id. */
-    /* Both acknowledge conditions. The header says outright that these
-     * event numbers were found by trial rather than derived, so which of
-     * the two belongs to this port is worth not assuming. */
-    /* Only the frame start is armed here. The driver arms the memory-write
-     * acknowledge only after the frame start has fired -- once the DMA is
-     * already running -- so arming it up front was our invention. */
-    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
-
-    /* And the trigger goes in the same batch: the receiver has to still be
-     * powered and configured when the shot is fired, which is the whole
-     * reason for doing this in one call. */
-    vi_flush("setup");
-
     /* When the frame goes to the ISP there is no surface for VI to write and
      * so nothing to keep mapped -- which is just as well, because the job we
      * used to park for that purpose is what killed the VI channel twice: the
@@ -2270,14 +2270,14 @@ int main(int argc, char **argv)
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1);
         g[n++] = SINGLE_SHOT_CAPTURE;
 
-        /* Park the job so the mapping outlives the submit. Without this the
-         * memory controller faults on the buffer's own base part way
-         * through the capture and the picture stops there. */
-        hold_thresh = syncpt_read(sp_mw) + 1;
-        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-        g[n++] = (sp_mw << 24) | (hold_thresh & 0xFFFFFF);
-        g[n++] = OP_SETCLASS(VI_CLASS_ID);
+        /* No parking. This job used to wait on the memory-write condition
+         * (41), which never fires on this path -- the kernel refused our
+         * CPU increment of it ("beyond max") -- so the job sat until its
+         * timeout, ten seconds after every --no-isp run: cdma_timeout 42,
+         * the VI channel dead, and the device unstable in idle afterwards.
+         * Our own pin keeps the surface mapped for the whole run, and the
+         * address is written to the registers as well, so the job may
+         * retire at once. */
         /* Retire the command buffer on a syncpoint of its own. It used to
          * share one with the frame-start condition, so that counter moved
          * once per submit whether or not a frame ever started -- which is

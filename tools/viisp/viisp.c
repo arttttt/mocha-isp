@@ -2955,6 +2955,12 @@ int main(int argc, char **argv)
     goto shutdown;
 
 shutdown:
+    /* --no-isp: the frame's memory write has no completion signal we can
+     * wait on yet (the memory-write-ack condition never fires here), and
+     * the VI was still writing when the buffer was unpinned -- "mc-err:
+     * (vi) csw_viw" at the frame buffer's address. Two frame periods of
+     * settle cover the write until the right condition is found. */
+    if (no_isp) usleep(150000);
     nvmap_unpin(buf_h);
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);

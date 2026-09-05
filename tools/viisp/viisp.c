@@ -1286,11 +1286,16 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
  *      status, and reads the frame out.
  * In the single-shot loop the output of a job at 2592 wide arrived only when
  * the next job was submitted; here the next job is always queued right
- * behind, parked on the previous frame's completion. */
+ * behind, parked on the previous frame's completion.
+ * Two buffer sets: job k writes outs[k & 1] / stats[k & 1], so the job
+ * queued behind it never writes into memory the running one still owns and
+ * the CPU reads frame k while frame k+1 lands elsewhere. The last frame is
+ * copied into outs[0] at the end so the ordinary dump sees it. */
 static int stream_run(int isp_fd, int vi_fd, uint32_t base,
                       uint32_t sp_id, uint32_t sp_mem, uint32_t sp_stats,
                       uint32_t sp_loadv, uint32_t isp_sp,
-                      uint32_t out_h, uint32_t stats_h, unsigned W, unsigned OH,
+                      const uint32_t outs[2], const uint32_t stats[2],
+                      unsigned W, unsigned OH,
                       uint32_t isp_fmt, uint32_t u_off, uint32_t v_off,
                       uint32_t work_iova,
                       uint32_t iova, uint32_t stride, uint32_t out_bytes,
@@ -1315,7 +1320,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
     int whole = 0;
 
     /* Job 0 alone in the queue: it parks on the next frame. */
-    int rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
+    int rc = isp_frame(isp_fd, outs[0], stats[0], W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
                        work_iova, per_frame_cal);
     printf("  stream: job 0 armed, rc=%d\n", rc);
@@ -1339,7 +1344,8 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
          * complete without a single CPU poll on 36. */
         int w_out = 0;
         if (k + 1 < n_frames) {
-            rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
+            rc = isp_frame(isp_fd, outs[(k + 1) & 1], stats[(k + 1) & 1],
+                           W, OH, isp_fmt, u_off, v_off,
                            sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
                            work_iova, per_frame_cal);
         }
@@ -1358,8 +1364,8 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
             break;
         }
         whole++;
-        /* Read frame k before frame k+1 is shot into the same buffer. */
-        if (n_frames <= 6 && nvmap_rw(out_h, 0, img, out_bytes, 0) == 0) {
+        /* Frame k, out of its own buffer, while frame k+1 lands in the other. */
+        if (n_frames <= 6 && nvmap_rw(outs[k & 1], 0, img, out_bytes, 0) == 0) {
             char path[64];
             snprintf(path, sizeof path, "/data/local/tmp/stream_%02d.raw", k);
             FILE *f = fopen(path, "wb");
@@ -1367,6 +1373,10 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         }
     }
     printf("stream: %d of %d frames produced output\n", whole, n_frames);
+    /* The last frame into outs[0], where the run's dump and readback look. */
+    if (whole > 0 && ((whole - 1) & 1) && outs[1] != outs[0]
+        && nvmap_rw(outs[1], 0, img, out_bytes, 0) == 0)
+        nvmap_rw(outs[0], 0, img, out_bytes, 1);
     free(img);
     return whole == n_frames ? 0 : -1;
 }
@@ -1646,6 +1656,7 @@ int main(int argc, char **argv)
      * lines. */
     int isp_fd = no_isp ? -1 : open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
+    uint32_t out_h2 = 0, stats_h2 = 0;   /* --stream: the second buffer set */
     uint32_t work_iova = 0, stats_iova = 0;
     uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
     uint32_t isp_base_mem = 0, isp_base_stats = 0, isp_base_loadv = 0;
@@ -1826,6 +1837,25 @@ int main(int argc, char **argv)
         if (out_h) {
             if (nvmap_alloc(out_h) == 0) out_iova = nvmap_pin(out_h);
         }
+        /* --stream: a second output and statistics set. Job k+1 is queued
+         * while frame k is still being written, and the CPU reads frame k
+         * out while frame k+1 runs -- one buffer for both is a write into
+         * memory another job still owns, which is what the SMMU fault on
+         * the U plane looked like. The jobs alternate between the two. */
+        if (stream_n > 0) {
+            out_h2 = nvmap_create(out_bytes);
+            if (!out_h2 || nvmap_alloc(out_h2) || !nvmap_pin(out_h2)) out_h2 = 0;
+            stats_h2 = nvmap_create(stats_kb * 1024);
+            if (!stats_h2 || nvmap_alloc(stats_h2) || !nvmap_pin(stats_h2)) stats_h2 = 0;
+            if (stats_h2) {
+                void *p = malloc(64 * 1024);
+                memset(p, 0x3C, 64 * 1024);
+                nvmap_rw(stats_h2, 0, p, 64 * 1024, 1);
+                free(p);
+            }
+            printf("stream: second buffer set %s\n",
+                   out_h2 && stats_h2 ? "allocated" : "NOT allocated -- single-buffered");
+        }
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
@@ -1835,9 +1865,11 @@ int main(int argc, char **argv)
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
             memset(p, 0x5A, chunk);
-            for (uint32_t o = 0; o < out_bytes; o += chunk)
-                nvmap_rw(out_h, o, p,
-                         out_bytes - o < chunk ? out_bytes - o : chunk, 1);
+            for (uint32_t o = 0; o < out_bytes; o += chunk) {
+                uint32_t len = out_bytes - o < chunk ? out_bytes - o : chunk;
+                nvmap_rw(out_h, o, p, len, 1);
+                if (out_h2) nvmap_rw(out_h2, o, p, len, 1);
+            }
             free(p);
         }
     }
@@ -2381,8 +2413,10 @@ int main(int argc, char **argv)
             else if (isp_fd >= 0 && out_iova && stats_h && stream_n > 0) {
                 /* The real frames go out by the stock's protocol instead
                  * of this single-shot machinery. */
+                uint32_t outs[2] = { out_h, out_h2 ? out_h2 : out_h };
+                uint32_t stats2[2] = { stats_h, stats_h2 ? stats_h2 : stats_h };
                 stream_run(isp_fd, vi_fd, base, sp_id, sp_mem,
-                           sp_stats, sp_loadv, isp_sp, out_h, stats_h,
+                           sp_stats, sp_loadv, isp_sp, outs, stats2,
                            W, OH, isp_fmt, u_off, v_off, work_iova,
                            iova, stride, out_bytes, stream_n);
                 goto after_shots;

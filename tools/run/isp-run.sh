@@ -72,12 +72,12 @@ wait_ready() {
             # probes the sensors and touches VI and the ISP for a while after
             # it, and a run of ours in that window hung the device outright
             # with nothing printed. Every run that worked came minutes after
-            # boot. So: at least 30 s of uptime before touching anything (the owner's call).
+            # boot. So: at least 90 s of uptime before touching anything -- a run at 40 s killed the ISP channel (2026-09-05).
             up=$(adb shell "cut -d. -f1 /proc/uptime" 2>/dev/null | tr -d '\r')
             up=${up:-0}
-            if [ "$up" -lt 30 ]; then
-                echo "booted ${up}s ago -- waiting until 30 s so the camera stack settles"
-                sleep $((30 - up))
+            if [ "$up" -lt 90 ]; then
+                echo "booted ${up}s ago -- waiting until 90 s so the camera stack settles"
+                sleep $((90 - up))
             fi
             return 0
         fi

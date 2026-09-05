@@ -1595,6 +1595,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
+        else if (strcmp(a, "--no-emc-bw") == 0) no_emc_bw = 1;
+        else if (strcmp(a, "--no-set-emc") == 0) no_set_emc = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 32) {
@@ -1858,7 +1860,11 @@ int main(int argc, char **argv)
          * for. The stock's figure, 163.2 MB/s, at 2592 and at 1280. */
         ic.moduleid = (1u << 24) | 0x4b; ic.rate = (uint32_t)emc_bw;
         errno = 0;
-        int crc1 = ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
+        /* --no-emc-bw leaves this lever out, for attributing the EMC rise
+         * between it and the SET_EMC reservation below: by the kernel's
+         * arithmetic neither asks for more than ~10 MHz, yet with both sent
+         * EMC sits on PLLM while the ISP is busy (impl-1, §2.2). */
+        int crc1 = no_emc_bw ? 0 : ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ic);
         /* This kernel has no GET_CLK_RATE (it logs "unrecognized ioctl"), so
          * the rate actually granted is only visible in
          * /sys/kernel/debug/clock/ispb/rate while the channel is busy. */
@@ -1884,7 +1890,7 @@ int main(int argc, char **argv)
         struct isp_emc_info ei = { 0, isp_emc_clk, 0, 16 };
         int lfd = open("/dev/nvhost-ctrl-isp.1", O_RDWR);
         errno = 0;
-        int lrc = lfd < 0 ? -1 : ioctl(lfd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
+        int lrc = no_set_emc ? 0 : lfd < 0 ? -1 : ioctl(lfd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
         printf("ISP latency allowance (clk %u kHz, 16 bpp out, %u MB/s HARD) -> rc=%d%s%s\n",
                isp_emc_clk, isp_emc_clk / 1000 * 16 / 8, lrc,
                lrc ? " " : "", lrc ? strerror(errno) : "");

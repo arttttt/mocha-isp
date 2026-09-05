@@ -437,13 +437,12 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
         g[n++] = 0x00020000; g[n++] = 0x00000000;
     }
 
-    /* The stock has 0x85001000 in the first word here from the opening
-     * to the last frame -- a constant, not an address. Ours put the
-     * statistics buffer's address there, which 1280 wide tolerated. */
+    /* The stock has the constant 0x85001000 in the first word here; the
+     * statistics buffer's address in its place works at both widths. */
     g[n++] = OP_INCR(0x800, 3);
-    g[n++] = bare_warmup ? 0x85001000 : stats_iova; g[n++] = 0; g[n++] = 0;
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
     g[n++] = OP_INCR(0x820, 3);
-    g[n++] = bare_warmup ? 0x85001000 : stats_iova; g[n++] = 0; g[n++] = 0;
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
 
     /* The 720 capture's real histogram windows: word 0 is 0x1d and the
      * four window words describe the 1280x720 frame -- the zeros-and-
@@ -457,16 +456,8 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x78787800; g[n++] = 0x00000078;
     g[n++] = 0x88888888; g[n++] = 0x78787800;
     g[n++] = 0x00000078; g[n++] = 0x3fc00000;
-    if (bare_warmup) {
-        /* The warm-up form of the windows, which is what the stock has in
-         * place while its 8x8 frames run; the working windows follow in
-         * the colour job. */
-        g[n++] = 0x00000000; g[n++] = 0x00070000;
-        g[n++] = 0x00000000; g[n++] = 0x00070000;
-    } else {
-        g[n++] = 0x00220000; g[n++] = 0x0004003f;
-        g[n++] = 0x00120000; g[n++] = 0x0003003f;
-    }
+    g[n++] = 0x00220000; g[n++] = 0x0004003f;
+    g[n++] = 0x00120000; g[n++] = 0x0003003f;
 
     g[n++] = OP_INCR(0xC00, 3);
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
@@ -541,8 +532,8 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * 137.9 against 124.6 by measurement, and visibly so -- which is what
      * one extra step of scaling does to every demosaic coefficient. */
     g[n++] = OP_INCR(0x904, 2);
-    g[n++] = bare_warmup ? 0x00005555 : 0x00004444; g[n++] = 0x00000001;
-    g[n++] = OP_INCR(0x908, 1); g[n++] = bare_warmup ? 0x00005555 : 0x00004334;
+    g[n++] = 0x00004444; g[n++] = 0x00000001;
+    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00004334;
 
     /* Three of these words are addresses, not settings: a base and two
      * windows a fixed distance into it. We had been sending the stock
@@ -638,7 +629,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * and writing coefficients into a stage set up differently from the way
      * their owner set it up is a fair account of a block that stalls
      * part-way through the stream rather than faulting on anything. */
-    g[n++] = OP_INCR(0x650, 1); g[n++] = bare_warmup ? 0x00000003 : 0x00000001;
+    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
     }   /* end of the reconstructed streaming init */
@@ -662,17 +653,12 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * there. A pipeline handed a null scratch buffer has every reason to
      * fall back to the least it can do, which is what we see. */
     g[n - 2] = 0x00000001;                /* 0x053 */
-    g[n - 1] = bare_warmup ? 0 : work_iova;   /* 0x054: the stock has 0 until the real pass */
+    g[n - 1] = work_iova;                 /* 0x054 */
 
     /* And then the real thing, last, so it stands over everything above:
      * the configuration read out of the stock camera while it was running.
      * The demosaic coefficients live here and nowhere else we could reach. */
     if (stock_cfg) n = isp_stock_emit(g, n, work_iova, stock_cfg);
-
-    /* Shading off until the real pass, as the stock has it during the
-     * warm-ups; whatever the blob above loaded into 0xd00 is overridden
-     * here, the table itself is harmless while the stage is off. */
-    if (bare_warmup) { g[n++] = OP_INCR(0xd00, 1); g[n++] = 0x00000000; }
 
     /* Unless the enable belongs later: stock writes it exactly once for a
      * whole session, and not here -- it goes inside the first warm-up
@@ -1334,22 +1320,6 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = 0x00000800; g[n++] = 0x00000000;
     g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
     g[n++] = 0x3fff0000; g[n++] = 0x10001000;
-    if (bare_warmup) {
-        /* What the opening held back for the warm-ups: the working
-         * statistics windows and the lookup-table enable at its running
-         * value. */
-        g[n++] = OP_INCR(0x930, 18);
-        g[n++] = 0x0000001d; g[n++] = 0x88888888;
-        g[n++] = 0x78787800; g[n++] = 0x00000078;
-        g[n++] = 0x88888888; g[n++] = 0x78787800;
-        g[n++] = 0x00000078; g[n++] = 0x88888888;
-        g[n++] = 0x78787800; g[n++] = 0x00000078;
-        g[n++] = 0x88888888; g[n++] = 0x78787800;
-        g[n++] = 0x00000078; g[n++] = 0x3fc00000;
-        g[n++] = 0x00220000; g[n++] = 0x0004003f;
-        g[n++] = 0x00120000; g[n++] = 0x0003003f;
-        g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
-    }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
@@ -1749,10 +1719,6 @@ static void sensor_start_front(int sfd, unsigned W, unsigned H,
         printf("sensor mode: %s\n", strerror(errno));
     else
         printf("sensor streaming at %ux%u\n", W, H);
-    if (pre_wait) {
-        printf("  waiting %u ms after the mode set\n", pre_wait);
-        usleep(pre_wait * 1000);
-    }
 }
 
 int main(int argc, char **argv)
@@ -1897,11 +1863,11 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
-            if (shots > 2) {
-                printf("shots: asked for %d, taking 2 -- more than that"
+            if (shots > 32) {
+                printf("shots: asked for %d, taking 32 -- more than that"
                        " queues jobs behind a block that may already be"
                        " stuck, and that costs a reboot\n", shots);
-                shots = 2;
+                shots = 32;
             }
             if (shots < 1) shots = 1;
         }
@@ -1912,27 +1878,12 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--isp-wait=", 11) == 0) isp_wait_ms = (int)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--stream=", 9) == 0) stream_n = (int)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--isp-emc-clk=", 14) == 0) isp_emc_clk = (unsigned)strtoul(a + 14, 0, 0);
-        /* The stock's per-frame gather is some forty words; ours carried the
-         * whole calibration (lookup tables, shading) with every frame. */
-        /* The stock's order: warm-ups on the opening's placeholders -- no
-         * shading, warm-up windows, zero coefficients, 0x5555 shifts,
-         * 0x650 = 3, the constant in 0x800/0x820, no work pointer -- and
-         * the working values only afterwards (coefficient job, colour
-         * job, real pass). Also drops the live-shadow blocks from the
-         * opening rounds, which is where the real coefficients came in. */
-        else if (strcmp(a, "--bare-warmup") == 0) { bare_warmup = 1; stock_cfg = 0; }
         else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 7;
         else if (strncmp(a, "--stock-vi=", 11) == 0)
             /* bit 0: DVFS + SINGLE_SHOT_STATE_UPDATE; bit 1: the parser
              * words; bit 2: PHY_CIL_COMMAND E-only and no CILC pad. */
             stock_vi = (int)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
-        else if (strncmp(a, "--attempts=", 11) == 0)
-            attempts = (int)strtoul(a + 11, 0, 0);
-        else if (strncmp(a, "--pre-wait=", 11) == 0)
-            pre_wait = (unsigned)strtoul(a + 11, 0, 0);
-        else if (strcmp(a, "--sensor-twice") == 0) sensor_twice = 1;
-        else if (strcmp(a, "--no-cal") == 0)       no_cal = 1;
         else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
@@ -2445,21 +2396,6 @@ int main(int argc, char **argv)
         snprintf(sn, sizeof sn, "/dev/%s", sensor);
         sfd = open(sn, O_RDWR);
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
-        /* --sensor-twice: power the sensor on, off, and on again before the
-         * mode set. The board's power-on releases the reset two
-         * microseconds after enabling the core rail; from cold (a minute or
-         * more since the last power-off) the rail is still ramping and the
-         * part comes up answering on I2C but never streaming, which is
-         * what the first run after every boot looked like. A second
-         * power-on within a second of the first is a warm one. */
-        if (sensor_twice) {
-            usleep(50000);
-            close(sfd);
-            usleep(100000);
-            sfd = open(sn, O_RDWR);
-            if (sfd < 0) { printf("reopen %s: %s\n", sn, strerror(errno)); return 1; }
-            printf("sensor power-cycled once before the mode set\n");
-        }
         if (front) {
             /* Opening the node already powered it -- but only just. The log
              * puts the mode ioctl twenty-five microseconds after the power
@@ -2942,192 +2878,182 @@ int main(int argc, char **argv)
         }
 
         for (int shot = 0; shot < shots; shot++) {
-            int attempt = 0, done = 0, started = 0, waited = 0, mwaited = 0;
+            int started = 0, waited = 0;
 
-            /* Two at most. The first trigger aligns, the second captures;
-             * more than that only stretches the run, and a long run is what
-             * took the parked job past the timeout the kernel allows. */
-            while (attempt < attempts && !done) {
-                uint32_t fs0 = syncpt_read(sp_id);
-                /* The ISP channel's own counter (38): every job of ours ends
-                 * with an immediate increment on it, so it tells whether the
-                 * job has actually executed -- config loaded, trigger 0x05
-                 * given -- as opposed to merely being queued. */
-                uint32_t isp_fence0 = isp_fd >= 0 ? syncpt_read(isp_sp) : 0;
-                attempt++;
+            uint32_t fs0 = syncpt_read(sp_id);
+            /* The ISP channel's own counter (38): every job of ours ends
+             * with an immediate increment on it, so it tells whether the
+             * job has actually executed -- config loaded, trigger 0x05
+             * given -- as opposed to merely being queued. */
+            uint32_t isp_fence0 = isp_fd >= 0 ? syncpt_read(isp_sp) : 0;
 
-                /* Wiping is a diagnostic, not part of a capture: it is ten
-                 * megabytes through a hundred and fifty ioctls, it runs
-                 * while the hardware is writing, and the holes it leaves in
-                 * the picture are its own. Off by default for that reason --
-                 * and the row-to-row jumps that looked like tearing were
-                 * those holes, since the fill pattern reads as 42405 against
-                 * a picture whose values sit near 25. */
-                nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
+            /* Wiping is a diagnostic, not part of a capture: it is ten
+             * megabytes through a hundred and fifty ioctls, it runs
+             * while the hardware is writing, and the holes it leaves in
+             * the picture are its own. Off by default for that reason --
+             * and the row-to-row jumps that looked like tearing were
+             * those holes, since the fill pattern reads as 42405 against
+             * a picture whose values sit near 25. */
+            nvmap_rw(buf_h, frame - sizeof fill, fill, sizeof fill, 1);
 
-                /* Reset only on the way in. A reset resynchronises the
-                 * parser to wherever the sensor is right now, so resetting
-                 * before every retry guaranteed every retry started mid
-                 * frame -- eight attempts, eight short frames. Left alone,
-                 * the parser finishes one capture at the end of a frame and
-                 * the next trigger is already on the boundary. */
-                /* The surface goes in again before every frame, exactly as
-                 * the driver's start-thread does it. We had written it once
-                 * through host1x and assumed it stayed -- it reads back
-                 * unchanged, but the driver reprogramming it per frame is
-                 * not decoration, and one capture per programming is what
-                 * the short frames look like. */
-                /* The ISP's per-frame gather goes out just before the
-                 * trigger, the way the driver's start-thread does it: the
-                 * block has to be armed and waiting when the pixels cross,
-                 * because nothing buffers them on the way. */
-                /* After the first frame, in its own job, the way the
-                 * capture shows the stock stack doing it. */
-                if (isp_fd >= 0 && out_iova && shot >= dm_after && !dm_sent) {
+            /* Reset only on the way in. A reset resynchronises the
+             * parser to wherever the sensor is right now, so resetting
+             * before every retry guaranteed every retry started mid
+             * frame -- eight attempts, eight short frames. Left alone,
+             * the parser finishes one capture at the end of a frame and
+             * the next trigger is already on the boundary. */
+            /* The surface goes in again before every frame, exactly as
+             * the driver's start-thread does it. We had written it once
+             * through host1x and assumed it stayed -- it reads back
+             * unchanged, but the driver reprogramming it per frame is
+             * not decoration, and one capture per programming is what
+             * the short frames look like. */
+            /* The ISP's per-frame gather goes out just before the
+             * trigger, the way the driver's start-thread does it: the
+             * block has to be armed and waiting when the pixels cross,
+             * because nothing buffers them on the way. */
+            /* After the first frame, in its own job, the way the
+             * capture shows the stock stack doing it. */
+            if (isp_fd >= 0 && out_iova && shot >= dm_after && !dm_sent) {
+                isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
+                             u_off, v_off, work_iova);
+                dm_sent = 1;
+            }
+            /* And the working configuration after the first frame, in
+             * the place the capture puts it. */
+            if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent
+                && use_real_pass) {
+                isp_real_pass(isp_fd, isp_sp, work_iova);
+                real_sent = 1;
+            }
+
+            /* The warm-up needs pixels, which is what running it before
+             * the capture ever started was missing. So it goes here
+             * instead, in place of a real frame, while the receiver is
+             * armed and the sensor is delivering -- the way stock runs
+             * it, between frames of a live stream. */
+            if (warm_left > 0 && isp_fd >= 0 && warm_h) {
+                isp_base_mem = syncpt_read(sp_mem);
+                isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
+                           warm_left == 2, isp_enable, W, OH);
+                if (warm_left == 2 && !dm_sent) {
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                  u_off, v_off, work_iova);
                     dm_sent = 1;
                 }
-                /* And the working configuration after the first frame, in
-                 * the place the capture puts it. */
-                if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent
-                    && use_real_pass) {
-                    isp_real_pass(isp_fd, isp_sp, work_iova);
-                    real_sent = 1;
-                }
-
-                /* The warm-up needs pixels, which is what running it before
-                 * the capture ever started was missing. So it goes here
-                 * instead, in place of a real frame, while the receiver is
-                 * armed and the sensor is delivering -- the way stock runs
-                 * it, between frames of a live stream. */
-                if (warm_left > 0 && isp_fd >= 0 && warm_h) {
-                    isp_base_mem = syncpt_read(sp_mem);
-                    isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
-                               warm_left == 2, isp_enable, W, OH);
-                    if (warm_left == 2 && !dm_sent) {
-                        isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
-                                     u_off, v_off, work_iova);
-                        dm_sent = 1;
-                    }
-                }
-                else if (isp_fd >= 0 && out_iova && stats_h && stream_n > 0) {
-                    /* The real frames go out by the stock's protocol instead
-                     * of this single-shot machinery. */
-                    stream_run(isp_fd, vi_fd, base, front, sp_id, sp_mem,
-                               sp_stats, sp_loadv, isp_sp, out_h, stats_h,
-                               W, OH, isp_fmt, isp_e03, isp_trigger,
-                               u_off, v_off, isp_in_fmt, work_iova,
-                               proc_flags, iova, stride, out_bytes, stream_n);
-                    goto after_shots;
-                }
-                else if (isp_fd >= 0 && out_iova && stats_h) {
-                    isp_base_mem = syncpt_read(sp_mem);
-                    isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                              isp_trigger, u_off, v_off,
-                              sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                              isp_in_fmt, work_iova, per_frame_cal,
-                              proc_flags);
-                }
-
-                /* The stock's order, in its VI gathers: WAIT on the ISP
-                 * channel's counter for the job just submitted, and only
-                 * then the single-shot. Arming the VI before the ISP job has
-                 * executed lets the frame arrive at an ISP that is not yet
-                 * taking lines; at 2592 wide that showed as parser overflow
-                 * (0x34/0xb4) and bands of the picture shifted sideways by
-                 * the pixels lost. */
-                if (isp_fd >= 0 && (warm_h || (out_iova && stats_h))) {
-                    int wj = 0;
-                    while (syncpt_read(isp_sp) == isp_fence0 && wj < 500) {
-                        usleep(1000);
-                        wj++;
-                    }
-                    if (wj >= 500)
-                        printf("  ISP job not executed within 500 ms (38 unchanged)\n");
-                }
-                vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
-                vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
-                vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
-                if (front && !cile_rewritten) {
-                    /* The stock re-writes the CILE pads right before its
-                     * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
-                     * THS 9) and never again -- the later per-frame VI
-                     * gathers carry only the wait and the shot. After the
-                     * failed first run of every boot this pad register read
-                     * 0x00200001 where the bring-up had written 0; after a
-                     * working run, 0. Something between the sensor start
-                     * and the shot rewrites it, and this writes it back.
-                     * Once only: doing it before every shot, on a lane
-                     * already in HS, broke every frame after the first
-                     * (parser 0x1b4). */
-                    printf("  CILE pad0 before the first shot: 0x%08x\n",
-                           vi_rd(T124_CILE_PAD_CONFIG0));
-                    vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
-                    vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
-                    vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
-                    cile_rewritten = 1;
-                }
-                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-                      (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
-                      << 8 | sp_id);
-                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-                vi_flush(0);
-
-                waited = 0;
-                while (syncpt_read(sp_id) == fs0 && waited < 400) {
-                    usleep(1000);
-                    waited++;
-                }
-                started = syncpt_read(sp_id) != fs0;
-
-                /* Release the ISP's parked job as soon as the block says it
-                 * has written, and give up after a bounded wait either way.
-                 * Holding it until the end of the whole capture is what kept
-                 * running past the job timeout the kernel allows -- and a
-                 * job that overruns takes the ISP channel with it, which
-                 * costs a reboot. Short and self-limiting instead. */
-                /* The parked job now holds the mapping until the frame and
-                 * the statistics are actually done, so the loop here only
-                 * watches -- no more keepalive submits every two
-                 * milliseconds, which was what buried the channel in
-                 * three-second timeouts whenever anything stalled. */
-                if (isp_fd >= 0 && out_iova) {
-                    int w2 = 0;
-                    /* A full-resolution frame writes at roughly three rows a
-                     * millisecond here, so it needs the better part of a
-                     * second -- six hundred milliseconds cut it off at
-                     * seventeen hundred rows of nineteen hundred. */
-                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < isp_wait_ms) {
-                        usleep(2000);
-                        w2 += 2;
-                    }
-                    /* A moment beyond the condition, because the last
-                     * transfer may still be draining when it fires. */
-                    if (!fast_arm) usleep(20000);
-                    printf("  ISP wrote after %dms%s\n", w2,
-                           syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
-                }
-
-                /* One whole frame from the start, plus what the caller asks
-                 * for on top -- unless --fast-arm. The sensor's active part
-                 * is about a third of the 66 ms period; a trigger that
-                 * arrives a quarter of a second after the last frame lands
-                 * at a random phase, and inside the active part it catches
-                 * a frame already under way: the receiver flags it (parser
-                 * 0x34, 0x1b4) and the block never completes. The stock
-                 * camera arms the next frame the moment the previous one is
-                 * done, inside the blanking. */
-                if (!fast_arm) usleep((useconds_t)period * 500 + settle * 1000);
-                mwaited = settle;
-                done = started;
             }
-            printf("  frame %d: %s after %d attempt%s"
-                   " (start %dms, bottom %dms), parser %08x\n",
-                   shot, done ? "whole" : (started ? "SHORT" : "NEVER STARTED"),
-                   attempt, attempt == 1 ? "" : "s", waited, mwaited,
+            else if (isp_fd >= 0 && out_iova && stats_h && stream_n > 0) {
+                /* The real frames go out by the stock's protocol instead
+                 * of this single-shot machinery. */
+                stream_run(isp_fd, vi_fd, base, front, sp_id, sp_mem,
+                           sp_stats, sp_loadv, isp_sp, out_h, stats_h,
+                           W, OH, isp_fmt, isp_e03, isp_trigger,
+                           u_off, v_off, isp_in_fmt, work_iova,
+                           proc_flags, iova, stride, out_bytes, stream_n);
+                goto after_shots;
+            }
+            else if (isp_fd >= 0 && out_iova && stats_h) {
+                isp_base_mem = syncpt_read(sp_mem);
+                isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
+                          isp_trigger, u_off, v_off,
+                          sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                          isp_in_fmt, work_iova, per_frame_cal,
+                          proc_flags);
+            }
+
+            /* The stock's order, in its VI gathers: WAIT on the ISP
+             * channel's counter for the job just submitted, and only
+             * then the single-shot. Arming the VI before the ISP job has
+             * executed lets the frame arrive at an ISP that is not yet
+             * taking lines; at 2592 wide that showed as parser overflow
+             * (0x34/0xb4) and bands of the picture shifted sideways by
+             * the pixels lost. */
+            if (isp_fd >= 0 && (warm_h || (out_iova && stats_h))) {
+                int wj = 0;
+                while (syncpt_read(isp_sp) == isp_fence0 && wj < 500) {
+                    usleep(1000);
+                    wj++;
+                }
+                if (wj >= 500)
+                    printf("  ISP job not executed within 500 ms (38 unchanged)\n");
+            }
+            vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+            vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+            vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+            if (front && !cile_rewritten) {
+                /* The stock re-writes the CILE pads right before its
+                 * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
+                 * THS 9) and never again -- the later per-frame VI
+                 * gathers carry only the wait and the shot. After the
+                 * failed first run of every boot this pad register read
+                 * 0x00200001 where the bring-up had written 0; after a
+                 * working run, 0. Something between the sensor start
+                 * and the shot rewrites it, and this writes it back.
+                 * Once only: doing it before every shot, on a lane
+                 * already in HS, broke every frame after the first
+                 * (parser 0x1b4). */
+                printf("  CILE pad0 before the first shot: 0x%08x\n",
+                       vi_rd(T124_CILE_PAD_CONFIG0));
+                vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
+                vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
+                vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+                cile_rewritten = 1;
+            }
+            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
+                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
+                  << 8 | sp_id);
+            vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+            vi_flush(0);
+
+            waited = 0;
+            while (syncpt_read(sp_id) == fs0 && waited < 400) {
+                usleep(1000);
+                waited++;
+            }
+            started = syncpt_read(sp_id) != fs0;
+
+            /* Release the ISP's parked job as soon as the block says it
+             * has written, and give up after a bounded wait either way.
+             * Holding it until the end of the whole capture is what kept
+             * running past the job timeout the kernel allows -- and a
+             * job that overruns takes the ISP channel with it, which
+             * costs a reboot. Short and self-limiting instead. */
+            /* The parked job now holds the mapping until the frame and
+             * the statistics are actually done, so the loop here only
+             * watches -- no more keepalive submits every two
+             * milliseconds, which was what buried the channel in
+             * three-second timeouts whenever anything stalled. */
+            if (isp_fd >= 0 && out_iova) {
+                int w2 = 0;
+                /* A full-resolution frame writes at roughly three rows a
+                 * millisecond here, so it needs the better part of a
+                 * second -- six hundred milliseconds cut it off at
+                 * seventeen hundred rows of nineteen hundred. */
+                while (syncpt_read(sp_mem) == isp_base_mem && w2 < isp_wait_ms) {
+                    usleep(2000);
+                    w2 += 2;
+                }
+                /* A moment beyond the condition, because the last
+                 * transfer may still be draining when it fires. */
+                if (!fast_arm) usleep(20000);
+                printf("  ISP wrote after %dms%s\n", w2,
+                       syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
+            }
+
+            /* One whole frame from the start, plus what the caller asks
+             * for on top -- unless --fast-arm. The sensor's active part
+             * is about a third of the 66 ms period; a trigger that
+             * arrives a quarter of a second after the last frame lands
+             * at a random phase, and inside the active part it catches
+             * a frame already under way: the receiver flags it (parser
+             * 0x34, 0x1b4) and the block never completes. The stock
+             * camera arms the next frame the moment the previous one is
+             * done, inside the blanking. */
+            if (!fast_arm) usleep((useconds_t)period * 500 + settle * 1000);
+            printf("  frame %d: %s (start %dms, settle %dms), parser %08x\n",
+                   shot, started ? "started" : "NEVER STARTED", waited, settle,
                    vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
                                : T124_PP_A_PIXEL_PARSER_STATUS));
 
@@ -3211,7 +3137,6 @@ after_readback:
            vi_rd(base + VI_CSI_SURFACE0_OFFSET_LSB),
            vi_rd(base + VI_CSI_SURFACE0_STRIDE), vi_rd(pp));
 
-readback:
     /* Ask the hardware whether it saw anything at all. The frame-start and
      * memory-write conditions each increment a syncpoint, so a value that
      * has not moved says plainly that no frame started and nothing was
@@ -3404,8 +3329,6 @@ readback:
     }
     goto shutdown;
 
-done:
-    if (sfd >= 0) close(sfd);
 shutdown:
     nvmap_unpin(buf_h);
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);

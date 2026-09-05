@@ -25,15 +25,10 @@ int enable_late = 1;
 int per_frame_cal = 1;
 int geo_blocks = 1;
 int stream_xfer = 1;
-int bare_warmup;    /* --bare-warmup: the stock's placeholders until the warm-ups are done */
 int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
-int attempts = 2;   /* --attempts: how many single-shot arms before a frame is given up on */
-unsigned pre_wait;  /* --pre-wait: milliseconds to sleep after the sensor mode set */
 int sensor_late;     /* 0: the sensor streams before the receiver comes up (the MIPI calibration needs the clock lane live). The other order is kept as code only. */
-int sensor_twice;    /* --sensor-twice: power the sensor on, off and on again before the mode set */
 int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
-int no_cal;          /* --no-cal: skip our MIPI calibration, enable the bias pad only (as the 24.1 driver does for one lane) */
 unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
 int stream_n;                       /* --stream=N: N frames by the stock's protocol instead of single shots */

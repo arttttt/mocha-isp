@@ -320,6 +320,14 @@ extern uint32_t alloc_heap;
 extern int dm_sent, real_sent, use_real_pass;
 extern int arm_stats, do_warmup;
 extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
+/* Groups of the stock configuration table (isp_stock.h), for --stock-groups. */
+#define STOCK_DEMOSAIC 1    /* 0x900..0x908, 0x506 */
+#define STOCK_COLOUR   2    /* 0x600, 0x650 + the four tone tables, 0xd00.. shading */
+#define STOCK_STATS    4    /* 0x909..0x920 */
+#define STOCK_INPUT    8    /* 0x200, 0x202, 0x205 */
+#define STOCK_CCM      16   /* 0x300, 0x304 */
+#define STOCK_CHAN     32   /* 0x700, 0x750: the stock process's own addresses */
+extern unsigned stock_groups;
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
 extern int isp_wait_ms, stream_n;

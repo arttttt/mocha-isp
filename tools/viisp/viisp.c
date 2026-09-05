@@ -238,16 +238,35 @@ struct isp_emc_info {
  *
  * The work buffer's address is ours, not the one the stock process had.
  */
-/* Only the demosaic group of the table goes out. Sending the whole of it
- * cost a capture and a reboot: the statistics blocks went in with it, ours
- * had been configured differently, and the frame then waited on a
- * statistics syncpoint that never moved. */
-static int stock_demosaic_block(unsigned method)
+/* Which group of the table a block belongs to (--stock-groups=MASK).
+ *
+ * The demosaic group alone is the recipe that gave a picture. Sending the
+ * whole table at once cost a capture and a reboot: the statistics blocks
+ * went in with it, ours had been configured differently, and the frame then
+ * waited on a statistics syncpoint that never moved. The colour group
+ * carries the four 257-entry tone tables (0x651..0x657) and the shading
+ * tables, which nothing of ours writes -- on a fresh boot they hold
+ * whatever reset left, after a stock session they hold the stock's curves.
+ * 0x700/0x750 carry the stock process's own addresses and go out only when
+ * asked for. */
+static unsigned stock_group(unsigned method)
 {
     switch (method) {
     case 0x900: case 0x902: case 0x904: case 0x906: case 0x908:
     case 0x506:
-        return 1;
+        return STOCK_DEMOSAIC;
+    case 0x600: case 0x650: case 0x651: case 0x653: case 0x655:
+    case 0x657: case 0xd00: case 0xd0a: case 0xd0c: case 0xd20:
+        return STOCK_COLOUR;
+    case 0x909: case 0x910: case 0x919: case 0x91b: case 0x91d:
+    case 0x91f: case 0x920:
+        return STOCK_STATS;
+    case 0x200: case 0x202: case 0x205:
+        return STOCK_INPUT;
+    case 0x300: case 0x304:
+        return STOCK_CCM;
+    case 0x700: case 0x750:
+        return STOCK_CHAN;
     default:
         return 0;
     }
@@ -263,7 +282,7 @@ unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
         /* Skipped deliberately: its second word is where the stock process
          * kept its scratch buffer, and that address means nothing here. */
         if (bl->method == 0x053) continue;
-        if (!stock_demosaic_block(bl->method)) continue;
+        if (!(stock_group(bl->method) & stock_groups)) continue;
 
         if (bl->mode == 0) {
             g[n++] = OP_INCR(bl->method, bl->count);
@@ -1508,6 +1527,8 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--stream=", 9) == 0) stream_n = (int)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--isp-emc-clk=", 14) == 0) isp_emc_clk = (unsigned)strtoul(a + 14, 0, 0);
         else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 7;
+        else if (strncmp(a, "--stock-groups=", 15) == 0)
+            stock_groups = (unsigned)strtoul(a + 15, 0, 0);
         else if (strncmp(a, "--stock-vi=", 11) == 0)
             /* bit 0: DVFS + SINGLE_SHOT_STATE_UPDATE; bit 1: the parser
              * words; bit 2: PHY_CIL_COMMAND E-only and no CILC pad. */

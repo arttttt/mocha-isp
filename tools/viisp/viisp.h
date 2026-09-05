@@ -329,8 +329,8 @@ extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
 #define STOCK_CHAN     32   /* 0x700, 0x750: the stock process's own addresses */
 extern unsigned stock_groups;
 /* --work-word=HEX: what goes into 0x054 in the PER-FRAME calibration only,
- * in place of our work buffer's address; the opening and the working
- * configuration keep theirs. The stock's steady-state rounds carry a
+ * in place of the default zero; the opening and the working configuration
+ * keep the work buffer's address. The stock's steady-state rounds carry a
  * constant there per resolution (0x02016b4c at 2592, 0x003e0e8f at 720p --
  * odd, so not an address) and never relocate it, while its opening has
  * {0,0} and its working configuration {1,0}. One variable per cell. */

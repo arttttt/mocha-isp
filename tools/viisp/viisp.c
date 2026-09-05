@@ -1171,16 +1171,16 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
         g[n - 1] = work_iova;
     }
 
-    /* The work buffer, renewed for every frame. Stock's calibration gather
-     * ends with this pair in all eight of its cycles -- enable and a real
-     * pointer -- so the block is handed its scratch memory again before
-     * each capture. We were setting it once at init and never again, and
-     * the clearing pass before that had turned it off. A pipeline running
-     * without scratch memory is a plausible reason for the stages that need
-     * it -- demosaic, statistics -- to stay quiet while tone and gain,
-     * which do not, keep working. */
+    /* 0x053/0x054 every frame, as the stock's rounds carry them -- but the
+     * second word is NOT the work buffer's address. The stock's steady state
+     * has a per-resolution constant there (odd at 720p, so no pointer) and
+     * never relocates it; with our pointer there the 2592 pass stopped at
+     * ~46% of the frame and the channel died, with the stock's own literal
+     * at 31%, and with zero the frame completes and the channel lives.
+     * 720p is indifferent. Zero it is, until the register's meaning is
+     * known; --work-word=HEX puts something else there for experiments. */
     g[n++] = OP_INCR(0x053, 2);
-    g[n++] = 0x00000001; g[n++] = work_word(work_iova);
+    g[n++] = 0x00000001; g[n++] = work_word(0);
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;

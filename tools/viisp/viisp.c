@@ -1475,6 +1475,7 @@ int main(int argc, char **argv)
      * hand, every time. Two is the ceiling; anything larger is clamped. */
     int shots = 1;
     int hold = 0, dump_regs = 0;
+    int pp_trace_ms = 0;    /* --pp-trace=MS: log the parser status bit 5 edges before any shot */
     uint32_t seq_sp = 0;    /* --seq-sp: the syncpoint our own jobs ride on */
     int settle = 200;
     int fast_arm = 1;   /* arm the next ISP frame right after the last completes; --slow-arm paces by the frame period instead */
@@ -1509,6 +1510,7 @@ int main(int argc, char **argv)
             coarse_time = (uint32_t)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
+        else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 32) {
@@ -2174,6 +2176,40 @@ int main(int argc, char **argv)
         sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
     printf("  CILE pad0 after the sensor start: 0x%08x\n",
            vi_rd(T124_CILE_PAD_CONFIG0));
+
+    if (pp_trace_ms > 0) {
+        /* Calibration of the parser status bit 5 ("active receive"): poll it
+         * with nothing armed and print every edge with its time, to learn
+         * whether it follows the sensor's active lines. If it does, its
+         * falling edge is the vertical blanking -- the place to fire a
+         * single-shot from. Bits 2/4 are sticky and masked out. */
+        struct timespec t0, t;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint32_t st = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
+        uint32_t prev = st & 0x20;
+        int edges = 0, hi_n = 0, lo_n = 0;
+        long last_us = 0, hi_sum = 0, lo_sum = 0;
+        printf("parser status 0x%08x; bit 5 trace for %d ms, starts %s:",
+               st, pp_trace_ms, prev ? "high" : "low");
+        for (;;) {
+            clock_gettime(CLOCK_MONOTONIC, &t);
+            long us = (t.tv_sec - t0.tv_sec) * 1000000L + (t.tv_nsec - t0.tv_nsec) / 1000;
+            if (us > pp_trace_ms * 1000L) break;
+            uint32_t b = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS) & 0x20;
+            if (b != prev) {
+                long d = us - last_us;
+                if (prev) { hi_sum += d; hi_n++; } else { lo_sum += d; lo_n++; }
+                if (edges < 48)
+                    printf("%s%c%ld.%03ld", edges % 8 ? " " : "\n  ",
+                           b ? '/' : '\\', us / 1000, us % 1000);
+                edges++; last_us = us; prev = b;
+            }
+            usleep(500);
+        }
+        printf("\n  %d edges; high mean %ld us over %d, low mean %ld us over %d;"
+               " status now 0x%08x\n", edges, hi_n ? hi_sum / hi_n : 0, hi_n,
+               lo_n ? lo_sum / lo_n : 0, lo_n, vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
+    }
 
     /* Pixel parser: single shot, armed for one frame. */
     uint32_t pp = PP_B_PIXEL_STREAM_PP_COMMAND;

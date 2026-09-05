@@ -1386,6 +1386,14 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
             break;
         }
         whole++;
+        if (k == 0) {
+            /* The first shot lands at a random phase of the sensor and the
+             * parser takes a frame without its start; the error bits it
+             * accumulates are sticky. Clear them here, once, so what the
+             * aligned frames that follow add is visible on its own. */
+            vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+            vi_flush(0);
+        }
         /* Frame k, out of its own buffer, while frame k+1 lands in the other. */
         if (n_frames <= 6 && nvmap_rw(outs[k & 1], 0, img, out_bytes, 0) == 0) {
             char path[64];

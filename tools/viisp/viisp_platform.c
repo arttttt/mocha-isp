@@ -28,6 +28,7 @@ int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone 
 int sensor_late;     /* 0: the sensor streams before the receiver comes up (the MIPI calibration needs the clock lane live). The other order is kept as code only. */
 int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
 unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
+int shot_delay_ms;                  /* --shot-delay=MS: --stream waits this long after output-done before the next shot */
 int isp_job_timeout_ms = 60000;     /* host1x timeout of the ISP frame job; stream_run lowers it */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
 int stream_n;                       /* --stream=N: N frames by the stock's protocol instead of single shots */

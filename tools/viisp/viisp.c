@@ -1356,10 +1356,6 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
      * start38 + k + 1. A shot before that hands the frame to an ISP that
      * is not yet taking lines; that was the miss behind every "2 shots". */
     uint32_t start38 = syncpt_read(isp_sp);
-    /* A small buffer for the flush job that follows the last frame. */
-    uint32_t flush_h = nvmap_create(64 * 1024);
-    if (flush_h && nvmap_alloc(flush_h)) flush_h = 0;
-    if (flush_h) nvmap_pin(flush_h);
     /* Job 0 alone in the queue: it parks on the next frame. */
     int rc = isp_frame(isp_fd, outs[0], stats[0], W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
@@ -1373,7 +1369,11 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        /* Shoot frame k only once job k is armed. */
+        /* Shoot frame k only once job k is armed -- and, past the first
+         * frame, only after --shot-delay: the previous output-done falls
+         * while the sensor is already inside the next frame, so a shot
+         * right then takes a partial one (2 shots, 200 ms per frame). */
+        if (k > 0 && shot_delay_ms > 0) usleep((useconds_t)shot_delay_ms * 1000);
         {
             int wa = 0;
             while ((int32_t)(syncpt_read(isp_sp) - (start38 + (uint32_t)k + 1)) < 0 && wa < 500) {
@@ -1397,11 +1397,15 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
                            sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
                            start36 + (uint32_t)k + 2, start37 + (uint32_t)k + 2,
                            work_iova, per_frame_cal);
-        } else if (flush_h) {
+        } else {
             /* The last frame's output lands only with a job queued behind
              * it -- every stream so far died on its last frame and nowhere
-             * else. An 8x8 job with no parking of its own stands behind it. */
-            rc = isp_warmup(isp_fd, isp_sp, flush_h, stats[k & 1], 0, W, OH);
+             * else. An 8x8 job with no parking of its own stands behind it,
+             * writing into the buffer set the last frame does not use: that
+             * set stays mapped until exit, and the job does take a frame if
+             * a retrigger shot follows it (a freed 64 KB buffer here drew a
+             * burst of SMMU faults). */
+            rc = isp_warmup(isp_fd, isp_sp, outs[(k + 1) & 1], stats[(k + 1) & 1], 0, W, OH);
         }
         int shots = 1;
         while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) {
@@ -1412,7 +1416,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
              * whole frame reaches it. The stock never has this problem
              * because its hardware parking fires every shot at a frame
              * boundary. Three extra shots at most. */
-            if (w_out % 150 == 0 && shots < 4) {
+            if (w_out % 100 == 0 && shots < 4) {   /* 1.5 periods at 15 fps: the phase steps by half a frame */
                 vi_wr(pp_reg, pp_cmd);
                 vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (fs_cond << 8) | sp_id);
                 vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
@@ -1455,7 +1459,6 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
     }
     printf("stream: %d of %d frames produced output\n", whole, n_frames);
     isp_job_timeout_ms = 60000;
-    if (flush_h) { nvmap_unpin(flush_h); ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)flush_h); }
     /* The last frame into outs[0], where the run's dump and readback look. */
     if (whole > 0 && ((whole - 1) & 1) && outs[1] != outs[0]
         && nvmap_rw(outs[1], 0, img, out_bytes, 0) == 0)
@@ -1575,6 +1578,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--hold=", 7) == 0)   hold = atoi(a + 7);
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
+        else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 32) {

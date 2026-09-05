@@ -107,16 +107,6 @@ struct nvmap_rw_handle {
 struct nvmap_pin_handle { uint32_t handles; unsigned long addr; uint32_t count; };
 #define NVMAP_IOC_CREATE     _IOWR(NVMAP_IOC_MAGIC, 0, struct nvmap_create_handle)
 #define NVMAP_IOC_ALLOC      _IOW(NVMAP_IOC_MAGIC, 3, struct nvmap_alloc_handle)
-/* Allocation that names the memory's kind. Stock's output format is the
- * block-linear one and it will not complete against an ordinary buffer --
- * the ISP simply never writes. This is how a block-linear surface is asked
- * for; the kind byte is what the format's top byte refers to. */
-struct nvmap_alloc_kind_handle {
-    uint32_t handle, heap_mask, flags, align;
-    uint8_t kind, comp_tags;
-};
-#define NVMAP_IOC_ALLOC_KIND \
-    _IOW(NVMAP_IOC_MAGIC, 100, struct nvmap_alloc_kind_handle)
 #define NVMAP_IOC_FREE       _IO(NVMAP_IOC_MAGIC, 4)
 #define NVMAP_IOC_WRITE      _IOW(NVMAP_IOC_MAGIC, 6, struct nvmap_rw_handle)
 #define NVMAP_IOC_READ       _IOW(NVMAP_IOC_MAGIC, 7, struct nvmap_rw_handle)
@@ -325,8 +315,8 @@ struct nvhost32_submit_args {
 /* ---- shared state ---- */
 extern int nvmap_fd, vi_fd;
 extern uint32_t alloc_heap;
-extern int plane_rev, dm_sent, dm_after, real_sent, use_real_pass;
-extern int arm_stats, own_scratch, do_warmup, enable_late;
+extern int dm_sent, dm_after, real_sent, use_real_pass;
+extern int arm_stats, do_warmup, enable_late;
 extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
@@ -349,7 +339,6 @@ int   vi_flush(const char *what);
 uint32_t vi_rd(uint32_t off);
 uint32_t nvmap_create(uint32_t size);
 int   nvmap_alloc(uint32_t h);
-int   nvmap_alloc_kind(uint32_t h, unsigned kind);
 uint32_t nvmap_pin(uint32_t h);
 void  nvmap_unpin(uint32_t h);
 void  nvmap_invalidate(uint32_t h, uint32_t len);

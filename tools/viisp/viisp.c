@@ -535,20 +535,16 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00004444; g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00004334;
 
-    /* Three of these words are addresses, not settings: a base and two
-     * windows a fixed distance into it. We had been sending the stock
-     * process's base, 0x10000000, which in our address space is nothing --
-     * so the stage that works through them had nowhere to work, and that
-     * is the most likely reason the luma surface came back as zeros while
-     * the third one still received something. Ours goes in instead, with
-     * the same two offsets. */
+    /* Three of these words are addresses in the stock process's space -- a
+     * base at 0x10000000 and two windows into it. They stay verbatim: the
+     * working recipe carries them as the capture had them. */
     g[n++] = OP_INCR(0x920, 10);
     g[n++] = 0x00000002;
-    g[n++] = own_scratch ? work_iova + 0x1660 : 0x10001660;
+    g[n++] = 0x10001660;
     g[n++] = 0x00000000;
-    g[n++] = own_scratch ? work_iova + 0xf4a0 : 0x1000f4a0;
+    g[n++] = 0x1000f4a0;
     g[n++] = 0x0000fa80;
-    g[n++] = own_scratch ? work_iova : 0x10000000;
+    g[n++] = 0x10000000;
     g[n++] = 0x00001c50; g[n++] = 0x30001000;
     g[n++] = 0x30001000; g[n++] = 0x30001000;
 
@@ -1065,23 +1061,6 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
             if (wb_b) g[first + 5] = wb_b;
             if (wb_r) g[first + 11] = wb_r;
         }
-
-        /* Some of what the capture holds is not configuration but the
-         * stock process's own addresses, and those mean nothing here --
-         * loading them verbatim is what pointed the block at memory it
-         * could not reach. Every one of them gets our scratch instead.
-         *
-         * The tile engine takes its working memory through these, which is
-         * why the luma came back as zeros while the third surface still
-         * received something: that path needs no intermediate storage. */
-        if (!own_scratch) continue;
-        if (blk[b].m == 0x400)
-            for (unsigned i = 4; i <= 7; i++)
-                g[first + i] = work_iova + 0x100000 + (i - 4) * 0x40000;
-        else if (blk[b].m == 0x800)
-            g[first] = work_iova + 0x80000;
-        else if (blk[b].m == 0x820)
-            g[first] = work_iova + 0xC0000;
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
@@ -1458,22 +1437,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0xE02, 1); g[n++] = fmt;
     g[n++] = OP_INCR(0xE03, 1); g[n++] = e03;
 
-    /* With one component the block writes to the first of these, at the
-     * start of the buffer, and gets it right. Ask for three and it writes
-     * only to the last -- where we put a chroma-width stride -- and what
-     * lands there is a full-width picture folded into half the row, which
-     * is exactly the striping we see. That is what a reversed plane order
-     * would look like, so it can be tried: give the last triplet the
-     * luma stride and the start of the buffer, and see whether the picture
-     * straightens out. */
-    if (plane_rev) {
-        g[n++] = OP_INCR(0xE04, 3);
-        v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
-        g[n++] = OP_INCR(0xE07, 3);
-        u_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
-        g[n++] = OP_INCR(0xE0A, 3);
-        y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
-    } else {
+    {
         g[n++] = OP_INCR(0xE04, 3);
         y_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_y;
         g[n++] = OP_INCR(0xE07, 3);
@@ -1830,16 +1794,9 @@ int main(int argc, char **argv)
      * took the statistics path down with it; the coefficients are what we
      * came for, so start with those alone and add a group at a time. */
     unsigned stock_cfg = STOCK_DEMOSAIC;
-    uint32_t opt_u_off = 0, opt_v_off = 0;
-    /* The kind to allocate the ISP's output as. Zero means an ordinary
-     * pitch-linear buffer; 0xFE is what the block-linear format wants. */
-    unsigned out_kind = 0;
     /* Configuring the other block the way stock does turns out to stop ours
      * writing at all, so it is off unless asked for. */
     int init_a = 0;
-    /* Send the calibration with every frame rather than once, as stock
-     * does. The init then carries only the clearing pass. */
-    int out_iovmm = 0;
     uint32_t stats_ctrl = 0;
     uint32_t proc_flags = 0;
 
@@ -1884,10 +1841,8 @@ int main(int argc, char **argv)
              * words; bit 2: PHY_CIL_COMMAND E-only and no CILC pad. */
             stock_vi = (int)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
-        else if (strcmp(a, "--plane-rev") == 0)   plane_rev = 1;
         else if (strncmp(a, "--dm-after=", 11) == 0)
             dm_after = atoi(a + 11);
-        else if (strcmp(a, "--own-scratch") == 0) own_scratch = 1;
         else if (strncmp(a, "--seq-sp=", 9) == 0)  seq_sp = (uint32_t)atoi(a + 9);
         else if (strncmp(a, "--wb=", 5) == 0) {     /* --wb=R,B in hex 4.12 */
             wb_r = (uint32_t)strtoul(a + 5, 0, 16);
@@ -1938,19 +1893,11 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-stock-cfg") == 0) stock_cfg = 0;
         else if (strncmp(a, "--stock=", 8) == 0)
             stock_cfg = (unsigned)strtoul(a + 8, 0, 0);
-        else if (strncmp(a, "--u-off=", 8) == 0)
-            opt_u_off = (uint32_t)strtoul(a + 8, 0, 16);
-        else if (strncmp(a, "--v-off=", 8) == 0)
-            opt_v_off = (uint32_t)strtoul(a + 8, 0, 16);
-        else if (strncmp(a, "--out-kind=", 11) == 0)
-            out_kind = (unsigned)strtoul(a + 11, 0, 16);
         else if (strcmp(a, "--init-a") == 0)       init_a = 1;
-        else if (strcmp(a, "--out-iovmm") == 0)    out_iovmm = 1;
         else if (strncmp(a, "--stats-ctrl=", 13) == 0)
             stats_ctrl = (uint32_t)strtoul(a + 13, 0, 16);
         else if (strncmp(a, "--proc-flags=", 13) == 0)
             proc_flags = (uint32_t)strtoul(a + 13, 0, 16);
-        else if (strcmp(a, "--carveout") == 0)    alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
         else if (strncmp(a, "--phy-cil=", 10) == 0)
             phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
@@ -2050,11 +1997,8 @@ int main(int argc, char **argv)
     unsigned rows_y = isp_blocklinear ? ((OH + 127) & ~127u) : OH;
     unsigned rows_uv = isp_blocklinear ? (((OH / 2) + 127) & ~127u) : OH / 2;
 
-    uint32_t u_off = opt_u_off ? opt_u_off
-                               : ((stride_y * rows_y + 0xFFFF) & ~0xFFFFu);
-    uint32_t v_off = opt_v_off ? opt_v_off
-                               : ((u_off + stride_uv * rows_uv + 0xFFFF)
-                                  & ~0xFFFFu);
+    uint32_t u_off = (stride_y * rows_y + 0xFFFF) & ~0xFFFFu;
+    uint32_t v_off = (u_off + stride_uv * rows_uv + 0xFFFF) & ~0xFFFFu;
     uint32_t out_bytes = isp_planar ? v_off + stride_uv * rows_uv
                                     : stride_y * rows_y;
     /* And a block over, because the block height is inferred rather than
@@ -2078,8 +2022,7 @@ int main(int argc, char **argv)
         }
         if (bad) {
             printf("plane layout invalid: Y[0..%u) U@%u+%u V@%u+%u,"
-                   " buffer %u, 4K alignment required --"
-                   " fix --u-off/--v-off\n",
+                   " buffer %u, 4K alignment required\n",
                    yext, u_off, uext, v_off, uext, out_bytes);
             return 1;
         }
@@ -2301,17 +2244,7 @@ int main(int argc, char **argv)
 
         out_h = nvmap_create(out_bytes);
         if (out_h) {
-            /* The contiguous heap is what VI needs, but the ISP's output at
-             * full resolution is twenty megabytes and the write faults part
-             * way through -- five hundred rows in. Whether that heap can
-             * hand out a run that long is a fair question, so the output
-             * can come from the scattered one instead. */
-            uint32_t save = alloc_heap;
-            if (out_iovmm) alloc_heap = NVMAP_HEAP_IOVMM;
-            int ok = out_kind ? nvmap_alloc_kind(out_h, out_kind)
-                              : nvmap_alloc(out_h);
-            alloc_heap = save;
-            if (ok == 0) out_iova = nvmap_pin(out_h);
+            if (nvmap_alloc(out_h) == 0) out_iova = nvmap_pin(out_h);
         }
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,

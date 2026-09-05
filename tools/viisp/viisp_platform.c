@@ -9,7 +9,6 @@ int nvmap_fd = -1, vi_fd = -1;
  * physically contiguous memory, the ISP does not care. */
 uint32_t alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
 
-int plane_rev = 0;
 int dm_sent;
 int dm_after = 1;
 int real_sent;
@@ -19,7 +18,6 @@ int real_sent;
  * transfer block, the calibration with every frame. */
 int use_real_pass = 1;
 int arm_stats = 1;
-int own_scratch;
 int do_warmup = 1;
 int enable_late = 1;
 int per_frame_cal = 1;
@@ -303,24 +301,6 @@ int nvmap_alloc(uint32_t h) {
     struct nvmap_alloc_handle ah = { h, alloc_heap,
                                      NVMAP_HANDLE_WRITE_COMBINE, 4096 };
     if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC, &ah) < 0) { perror("nvmap alloc"); return -1; }
-    return 0;
-}
-
-/* The same, but naming the memory's kind. Stock's output format is
- * block-linear and the ISP never writes a byte against a surface that is
- * not, which is why that format has always come back untouched here. */
-int nvmap_alloc_kind(uint32_t h, unsigned kind) {
-    struct nvmap_alloc_kind_handle ak;
-    memset(&ak, 0, sizeof ak);
-    ak.handle = h;
-    ak.heap_mask = alloc_heap;
-    ak.flags = NVMAP_HANDLE_WRITE_COMBINE;
-    ak.align = 4096;
-    ak.kind = (uint8_t)kind;
-    if (ioctl(nvmap_fd, NVMAP_IOC_ALLOC_KIND, &ak) < 0) {
-        printf("nvmap alloc kind 0x%02x: %s\n", kind, strerror(errno));
-        return -1;
-    }
     return 0;
 }
 

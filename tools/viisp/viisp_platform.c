@@ -30,6 +30,7 @@ int cile_rewritten;  /* the CILE pad re-write before the first shot has been don
 unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
 int emc_pin;                        /* --emc-pin: the old stopgap -- pin the CPU governor to performance. Off: the ISP channel's own "emc" request (SET_CLK_RATE, ispb.emc) puts EMC on PLLM while the module is busy, measured */
 int no_emc_bw, no_set_emc;          /* --no-emc-bw / --no-set-emc: leave one EMC lever out (attribution) */
+int blc_tail = -1;                  /* --blc-tail=HEX: low halves of 0x400 words 9/11 (stock 0x3f) */
 int shot_delay_ms = 20;             /* --shot-delay=MS: --stream waits this long after output-done before the next shot; 20 lands every shot in the blanking at 15 fps (measured: 1 shot, 66 ms, parser 0 per frame) */
 int isp_job_timeout_ms = 60000;     /* host1x timeout of the ISP frame job; stream_run lowers it */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */

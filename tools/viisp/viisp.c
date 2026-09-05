@@ -812,6 +812,14 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
             if (wb_b) g[first + 5] = wb_b;
             if (wb_r) g[first + 11] = wb_r;
         }
+        /* --blc-tail: the low halves of words 9 and 11 of 0x400 -- 0x3f in
+         * every stock capture, the only subtract-shaped constants in the
+         * set (63 = 64 - 1) while the sensor's pedestal measures ~16. A
+         * sweep on a dark scene says whether they are the black level. */
+        if (blk[b].m == 0x400 && blc_tail >= 0) {
+            g[first + 9]  = (g[first + 9]  & 0xffff0000u) | (uint32_t)blc_tail;
+            g[first + 11] = (g[first + 11] & 0xffff0000u) | (uint32_t)blc_tail;
+        }
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
@@ -1037,9 +1045,9 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
      * numbers here, and sending the large frame's was another way of
      * describing the wrong picture. */
     g[n++] = geo->p400_w8;
-    g[n++] = geo->p400_w9;
+    g[n++] = blc_tail >= 0 ? (geo->p400_w9 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w9;
     g[n++] = geo->p400_w10;
-    g[n++] = geo->p400_w11;
+    g[n++] = blc_tail >= 0 ? (geo->p400_w11 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w11;
 
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
@@ -1595,6 +1603,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
+        else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
         else if (strcmp(a, "--no-emc-bw") == 0) no_emc_bw = 1;
         else if (strcmp(a, "--no-set-emc") == 0) no_set_emc = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {

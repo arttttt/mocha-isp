@@ -820,6 +820,11 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
             g[first + 9]  = (g[first + 9]  & 0xffff0000u) | (uint32_t)blc_tail;
             g[first + 11] = (g[first + 11] & 0xffff0000u) | (uint32_t)blc_tail;
         }
+        /* --x400-word=IDX,HEX: one whole word of the 0x400 block replaced,
+         * for sweeping the other subtract-shaped constants there (word 8
+         * low half 0x10 = the sensor's pedestal, word 10 low half 0x2c). */
+        if (blk[b].m == 0x400 && x400_idx >= 0 && x400_idx < 12)
+            g[first + x400_idx] = x400_val;
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
@@ -1044,10 +1049,14 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     /* And this tail is per-resolution too: the small capture has different
      * numbers here, and sending the large frame's was another way of
      * describing the wrong picture. */
-    g[n++] = geo->p400_w8;
-    g[n++] = blc_tail >= 0 ? (geo->p400_w9 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w9;
-    g[n++] = geo->p400_w10;
-    g[n++] = blc_tail >= 0 ? (geo->p400_w11 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w11;
+    {
+        unsigned w8 = n;
+        g[n++] = geo->p400_w8;
+        g[n++] = blc_tail >= 0 ? (geo->p400_w9 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w9;
+        g[n++] = geo->p400_w10;
+        g[n++] = blc_tail >= 0 ? (geo->p400_w11 & 0xffff0000u) | (uint32_t)blc_tail : geo->p400_w11;
+        if (x400_idx >= 8 && x400_idx < 12) g[w8 + x400_idx - 8] = x400_val;
+    }
 
     g[n++] = OP_INCR(0x600, 16);
     g[n++] = 0x00000005; g[n++] = 0x00000000;
@@ -1604,6 +1613,11 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
         else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
+        else if (strncmp(a, "--x400-word=", 12) == 0) {
+            x400_idx = atoi(a + 12);
+            const char *comma = strchr(a + 12, ',');
+            x400_val = comma ? (uint32_t)strtoul(comma + 1, 0, 16) : 0;
+        }
         else if (strcmp(a, "--no-emc-bw") == 0) no_emc_bw = 1;
         else if (strcmp(a, "--no-set-emc") == 0) no_set_emc = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {

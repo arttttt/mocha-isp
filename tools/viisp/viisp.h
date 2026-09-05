@@ -44,6 +44,10 @@
 #define CAR_VI_BIT_L        (1u << 20)
 #define CAR_RST_CLR_H       0x30C
 #define CAR_RST_CLR_W       0x43C
+#define CAR_ENB_CLR_L       0x324
+#define CAR_ENB_CLR_H       0x32C
+#define CAR_ENB_CLR_W       0x44C
+#define CAR_ENB_CLR_X       0x288
 
 /* MIPI calibration: five lane interfaces, a bias pad, and the command word
  * that starts a calibration cycle. */
@@ -339,6 +343,7 @@ extern unsigned stats_kb, work_kb;
 int   mem_wr(unsigned long addr, uint32_t val, uint32_t *before);
 int   mem_rd(unsigned long addr, uint32_t *out);
 void  car_enable_csi_clocks(void);
+void  car_restore_csi_clocks(void);
 void  mipi_upd(unsigned off, uint32_t mask, uint32_t val);
 void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);

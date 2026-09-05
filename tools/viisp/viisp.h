@@ -336,7 +336,7 @@ extern unsigned stock_groups;
  * odd, so not an address) and never relocate it, while its opening has
  * {0,0} and its working configuration {1,0}. One variable per cell. */
 extern uint32_t work_word_override;
-extern int work_word_set;
+extern int work_word_set, work_word_iova;
 static inline uint32_t work_word(uint32_t iova) { return work_word_set ? work_word_override : iova; }
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;

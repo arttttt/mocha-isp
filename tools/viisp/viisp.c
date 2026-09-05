@@ -1181,7 +1181,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * 720p is indifferent. Zero it is, until the register's meaning is
      * known; --work-word=HEX puts something else there for experiments. */
     g[n++] = OP_INCR(0x053, 2);
-    g[n++] = 0x00000001; g[n++] = work_word(0);
+    g[n++] = 0x00000001; g[n++] = work_word_iova ? work_iova : work_word(0);
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
@@ -1615,6 +1615,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--stream=", 9) == 0) stream_n = (int)strtoul(a + 9, 0, 0);
         else if (strncmp(a, "--isp-emc-clk=", 14) == 0) isp_emc_clk = (unsigned)strtoul(a + 14, 0, 0);
         else if (strcmp(a, "--stock-vi") == 0)    stock_vi = 7;
+        else if (strcmp(a, "--work-word=iova") == 0) work_word_iova = 1;   /* the old behaviour: our work buffer's address per frame */
         else if (strncmp(a, "--work-word=", 12) == 0)
             { work_word_override = (uint32_t)strtoul(a + 12, 0, 16); work_word_set = 1; }
         else if (strncmp(a, "--stock-groups=", 15) == 0)

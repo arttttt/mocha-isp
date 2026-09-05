@@ -1594,6 +1594,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
+        else if (strcmp(a, "--no-emc-pin") == 0) no_emc_pin = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 32) {
@@ -2080,7 +2081,7 @@ int main(int argc, char **argv)
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
-    emc_pin_high();
+    if (!no_emc_pin) emc_pin_high();
     car_enable_csi_clocks();
 
     /* The driver writes this the moment VI comes up and we never wrote it at
@@ -2560,6 +2561,15 @@ int main(int argc, char **argv)
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
                            warm_left == 2, W, OH);
+                if (warm_left == 2) {
+                    /* The ISP module is busy from here: its "emc" shared-bus
+                     * user counts only while the module's clocks are on, so
+                     * this is where the bandwidth request shows in the CAR. */
+                    uint32_t src = 0;
+                    mem_rd(CAR_BASE + 0x19c, &src);
+                    printf("  EMC source with the ISP busy: 0x%08x%s\n", src,
+                           (src >> 29) == 4 ? " (PLLM)" : (src >> 29) == 2 ? " (PLLP)" : "");
+                }
                 if (warm_left == 2 && !dm_sent) {
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                  u_off, v_off, work_iova);

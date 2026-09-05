@@ -1694,7 +1694,7 @@ int main(int argc, char **argv)
     uint32_t sp_id = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0)
         sp_id = gp.value;
-    uint32_t sp_mw = sp_id;
+    uint32_t sp_mw = sp_id, mw_base = 0;
     gp.param = 1; gp.value = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0 && gp.value)
         sp_mw = gp.value;
@@ -2518,6 +2518,7 @@ int main(int argc, char **argv)
             }
         }
 
+        mw_base = syncpt_read(sp_mw);
         for (int shot = 0; shot < shots; shot++) {
             int started = 0, waited = 0;
 
@@ -2651,6 +2652,13 @@ int main(int argc, char **argv)
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
+            /* --no-isp: the frame goes to memory, and the write's completion
+             * is the memory-write-ack condition of port B on the channel's
+             * second syncpoint -- armed here, one arm per shot, the way the
+             * stock's done-thread arms it. It used to be waited on without
+             * ever being armed. */
+            if (no_isp)
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
             vi_flush(0);
 
@@ -2964,12 +2972,17 @@ int main(int argc, char **argv)
     goto shutdown;
 
 shutdown:
-    /* --no-isp: the frame's memory write has no completion signal we can
-     * wait on yet (the memory-write-ack condition never fires here), and
-     * the VI was still writing when the buffer was unpinned -- "mc-err:
-     * (vi) csw_viw" at the frame buffer's address. Two frame periods of
-     * settle cover the write until the right condition is found. */
-    if (no_isp) usleep(150000);
+    /* --no-isp: the last frame's write must have landed before the buffer
+     * is unpinned -- it had not, once ("mc-err: (vi) csw_viw" at the
+     * frame buffer's address). The memory-write-ack condition armed with
+     * each shot moves the channel's second syncpoint when the write is
+     * done; wait for that, with the stock's bound, then unpin. */
+    if (no_isp) {
+        int wmw = 0;
+        while (syncpt_read(sp_mw) == mw_base && wmw < 200) { usleep(1000); wmw++; }
+        printf("memory-write ack %s after %d ms\n",
+               syncpt_read(sp_mw) != mw_base ? "seen" : "NOT seen", wmw);
+    }
     nvmap_unpin(buf_h);
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);

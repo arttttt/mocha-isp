@@ -1138,6 +1138,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
                      uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
                      uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
+                     uint32_t park_mem, uint32_t park_stats,
                      uint32_t work_iova, int per_frame_cal)
 {
     /* Room for the calibration too, now that it rides with every frame. */
@@ -1238,12 +1239,18 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
         /* hold_at is the queue depth: 0 when this job is the only one in
          * flight, 1 when it is queued behind a frame still running and
          * must park on the frame after that one. */
-        uint32_t want_mem = syncpt_read(sp_mem) + 1 + hold_at;
+        /* park_mem/park_stats, when given, are absolute: the stream keeps
+         * its own count of frames, because a threshold taken from a read of
+         * the counter at submit time races the previous frame's completion
+         * -- the output runs a job behind at 2592 -- and one off-by-one per
+         * frame drifts the queue until a job parks on a value that never
+         * comes. */
+        uint32_t want_mem = park_mem ? park_mem : syncpt_read(sp_mem) + 1 + hold_at;
         g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
         g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
         g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
         if (sp_stats) {
-            uint32_t want_stats = syncpt_read(sp_stats) + 1 + hold_at;
+            uint32_t want_stats = park_stats ? park_stats : syncpt_read(sp_stats) + 1 + hold_at;
             g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
             g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
             g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
@@ -1341,9 +1348,13 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
     int whole = 0;
 
     isp_job_timeout_ms = 3000;
+    /* Every frame moves 36 and 37 by exactly one, so job k parks on
+     * start + k + 1 -- counted, not read back, see isp_frame. */
+    uint32_t start36 = syncpt_read(sp_mem), start37 = syncpt_read(sp_stats);
     /* Job 0 alone in the queue: it parks on the next frame. */
     int rc = isp_frame(isp_fd, outs[0], stats[0], W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                       start36 + 1, start37 + 1,
                        work_iova, per_frame_cal);
     printf("  stream: job 0 armed, rc=%d\n", rc);
 
@@ -1369,6 +1380,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
             rc = isp_frame(isp_fd, outs[(k + 1) & 1], stats[(k + 1) & 1],
                            W, OH, isp_fmt, u_off, v_off,
                            sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
+                           start36 + (uint32_t)k + 2, start37 + (uint32_t)k + 2,
                            work_iova, per_frame_cal);
         }
         int shots = 1;
@@ -2525,7 +2537,7 @@ int main(int argc, char **argv)
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
-                          sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
+                          sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0, 0, 0,
                           work_iova, per_frame_cal);
             }
 

@@ -399,6 +399,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
               uint32_t u_off, uint32_t v_off,
               uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
               uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
+              uint32_t park_mem, uint32_t park_stats,
               uint32_t work_iova, int per_frame_cal);
 
 #endif /* VIISP_H */

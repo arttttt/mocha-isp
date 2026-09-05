@@ -1266,12 +1266,13 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
         g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
         g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
         g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
-        if (sp_stats) {
-            uint32_t want_stats = park_stats ? park_stats : syncpt_read(sp_stats) + 1 + hold_at;
-            g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-            g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-            g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
-        }
+        /* No wait on the statistics counter (37). It stays armed, as the
+         * stock arms it, but the stock's frame job waits on nothing at all
+         * and the 24.1 driver waits on the output counter only; a scene
+         * that leaves the statistics condition unmet -- a black room did --
+         * must not park the job until the channel dies. The output counter
+         * is all the buffer rotation needs. */
+        (void)park_stats;
     }
     (void)hold_sp; (void)hold_at;
 

@@ -1371,16 +1371,32 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
                            sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
                            work_iova, per_frame_cal);
         }
-        while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) { usleep(1000); w_out++; }
+        int shots = 1;
+        while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) {
+            usleep(1000); w_out++;
+            /* No output two periods after the shot: the shot fell inside a
+             * frame, the parser handed the ISP a partial one and the ISP is
+             * holding it. Fire again -- the job stays parked -- so the next,
+             * whole frame reaches it. The stock never has this problem
+             * because its hardware parking fires every shot at a frame
+             * boundary. Three extra shots at most. */
+            if (w_out % 150 == 0 && shots < 4) {
+                vi_wr(pp_reg, pp_cmd);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (fs_cond << 8) | sp_id);
+                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+                vi_flush(0);
+                shots++;
+            }
+        }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         int got = syncpt_read(sp_mem) != base36;
         uint32_t parser = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
-        printf("  stream frame %d: frame start %s, output %s (%ld ms from the shot),"
+        printf("  stream frame %d: frame start %s, output %s (%ld ms, %d shot%s),"
                " parser %08x, next job rc=%d\n",
                k, syncpt_read(sp_id) != base_fs ? "seen" : "NOT seen",
                got ? "done" : "NONE",
                (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
-               parser, rc);
+               shots, shots == 1 ? "" : "s", parser, rc);
         if (!got) {
             printf("  stream: no output for frame %d, stopping\n", k);
             break;

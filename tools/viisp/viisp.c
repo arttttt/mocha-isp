@@ -2204,37 +2204,36 @@ int main(int argc, char **argv)
     vi_flush("setup");
 
     if (pp_trace_ms > 0) {
-        /* Calibration of the parser status bit 5 ("active receive"): poll it
-         * with nothing armed and print every edge with its time, to learn
-         * whether it follows the sensor's active lines. If it does, its
-         * falling edge is the vertical blanking -- the place to fire a
-         * single-shot from. Bits 2/4 are sticky and masked out. */
+        /* Looking for a live sign of the sensor's frame timing before any
+         * shot: the parser status only moves once a single-shot is armed,
+         * so sample the CIL E status words too -- between frames the lanes
+         * drop to LP-11, and the lane interface may show it. Every change
+         * of any of the three words is printed with its time. */
+        static const uint32_t regs[3] = { 0xA18, 0xA1C, T124_PP_B_PIXEL_PARSER_STATUS };
+        static const char *names[3] = { "CIL_E", "CILE", "PP_B" };
+        uint32_t prev[3];
         struct timespec t0, t;
         clock_gettime(CLOCK_MONOTONIC, &t0);
-        uint32_t st = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
-        uint32_t prev = st & 0x20;
-        int edges = 0, hi_n = 0, lo_n = 0;
-        long last_us = 0, hi_sum = 0, lo_sum = 0;
-        printf("parser status 0x%08x; bit 5 trace for %d ms, starts %s:",
-               st, pp_trace_ms, prev ? "high" : "low");
+        for (int r = 0; r < 3; r++) prev[r] = vi_rd(regs[r]);
+        printf("live trace %d ms: CIL_E 0x%08x CILE 0x%08x PP_B 0x%08x",
+               pp_trace_ms, prev[0], prev[1], prev[2]);
+        int changes = 0;
         for (;;) {
             clock_gettime(CLOCK_MONOTONIC, &t);
             long us = (t.tv_sec - t0.tv_sec) * 1000000L + (t.tv_nsec - t0.tv_nsec) / 1000;
             if (us > pp_trace_ms * 1000L) break;
-            uint32_t b = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS) & 0x20;
-            if (b != prev) {
-                long d = us - last_us;
-                if (prev) { hi_sum += d; hi_n++; } else { lo_sum += d; lo_n++; }
-                if (edges < 48)
-                    printf("%s%c%ld.%03ld", edges % 8 ? " " : "\n  ",
-                           b ? '/' : '\\', us / 1000, us % 1000);
-                edges++; last_us = us; prev = b;
+            for (int r = 0; r < 3; r++) {
+                uint32_t v = vi_rd(regs[r]);
+                if (v != prev[r]) {
+                    if (changes < 60)
+                        printf("%s%ld.%03ld %s %08x>%08x", changes % 3 ? "  " : "\n  ",
+                               us / 1000, us % 1000, names[r], prev[r], v);
+                    changes++; prev[r] = v;
+                }
             }
-            usleep(500);
+            usleep(300);
         }
-        printf("\n  %d edges; high mean %ld us over %d, low mean %ld us over %d;"
-               " status now 0x%08x\n", edges, hi_n ? hi_sum / hi_n : 0, hi_n,
-               lo_n ? lo_sum / lo_n : 0, lo_n, vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
+        printf("\n  %d changes in %d ms\n", changes, pp_trace_ms);
     }
 
     /* When the frame goes to the ISP there is no surface for VI to write and

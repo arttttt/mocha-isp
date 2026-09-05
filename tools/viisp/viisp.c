@@ -296,7 +296,7 @@ unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
             for (unsigned i = 1; i < bl->count; i++) g[n++] = d[i];
         }
     }
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_word(work_iova);
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     return n;
 }
 
@@ -612,7 +612,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
      * there. A pipeline handed a null scratch buffer has every reason to
      * fall back to the least it can do, which is what we see. */
     g[n - 2] = 0x00000001;                /* 0x053 */
-    g[n - 1] = work_word(work_iova);      /* 0x054 */
+    g[n - 1] = work_iova;                 /* 0x054 */
 
     /* And then the real thing, last, so it stands over everything above:
      * the configuration read out of the stock camera while it was running.
@@ -730,7 +730,7 @@ int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
      * up elsewhere in its session and ours is not: handing the block a null
      * pointer while it is live is the one place where copying the trace
      * literally puts it in a position it was never in. Ours goes here. */
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_word(work_iova);
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -813,7 +813,7 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
             if (wb_r) g[first + 11] = wb_r;
         }
     }
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_word(work_iova);
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -1050,7 +1050,7 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = 0x00000800; g[n++] = 0x00000000;
     g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
     g[n++] = 0x3fff0000; g[n++] = 0x10001000;
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_word(work_iova);
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);

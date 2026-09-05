@@ -1594,7 +1594,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--dump-regs") == 0)   dump_regs = 1;
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
-        else if (strcmp(a, "--no-emc-pin") == 0) no_emc_pin = 1;
+        else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
             if (shots > 32) {
@@ -2081,7 +2081,7 @@ int main(int argc, char **argv)
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
-    if (!no_emc_pin) emc_pin_high();
+    if (emc_pin) emc_pin_high();
     car_enable_csi_clocks();
 
     /* The driver writes this the moment VI comes up and we never wrote it at

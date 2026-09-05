@@ -328,6 +328,13 @@ extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
 #define STOCK_CCM      16   /* 0x300, 0x304 */
 #define STOCK_CHAN     32   /* 0x700, 0x750: the stock process's own addresses */
 extern unsigned stock_groups;
+/* --work-word=HEX: what goes into 0x054 wherever the 0x053/0x054 pair is
+ * emitted, in place of our work buffer's address. The stock's steady state
+ * has a constant there per resolution (0x02016b4c at 2592, 0x003e0e8f at
+ * 720p -- odd, so not an address) and never relocates it. */
+extern uint32_t work_word_override;
+extern int work_word_set;
+static inline uint32_t work_word(uint32_t iova) { return work_word_set ? work_word_override : iova; }
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
 extern int isp_wait_ms, stream_n;

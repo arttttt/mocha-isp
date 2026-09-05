@@ -21,6 +21,7 @@ int do_warmup = 1;
 int per_frame_cal = 1;
 int geo_blocks = 1;
 int stream_xfer = 1;
+uint32_t work_word_override; int work_word_set;   /* --work-word=HEX */
 unsigned stock_groups = STOCK_DEMOSAIC;  /* --stock-groups=MASK: which groups of the stock table isp_init sends */
 int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */

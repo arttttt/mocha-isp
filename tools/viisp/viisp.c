@@ -302,7 +302,7 @@ unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
 
 int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
              uint32_t work_iova, uint32_t stats_iova,
-             unsigned W, unsigned H, const struct geom_cfg *geo)
+             const struct geom_cfg *geo)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
@@ -424,19 +424,12 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
     g[n++] = 0x00030000; g[n++] = 0x00000000;
     g[n++] = 0x00020000; g[n++] = 0x00000000;
 
-    /* The tile engine's spill memory: the stock points these at its OWN
-     * work buffer -- the same one 0x053/0x054 name -- with the frame less
-     * thirty-two on each side as the third word, and re-arms them every
-     * round. 0x85001000 in the captures is that buffer's address in the
-     * stock's space. Ours goes here, and the same pointer goes into 0x054,
-     * so the block has one scratch memory, not two that disagree. At 720p
-     * nothing ever spills, which is why the split went unnoticed; at 2592
-     * the first spill hit a foreign address and the pass never finished. */
+    /* The stock has the constant 0x85001000 in the first word here; the
+     * statistics buffer's address in its place works at both widths. */
     g[n++] = OP_INCR(0x800, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = ((H - 32) << 16) | (W - 32);
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
     g[n++] = OP_INCR(0x820, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = ((H - 32) << 16) | (W - 32);
-    (void)stats_iova;
+    g[n++] = stats_iova; g[n++] = 0; g[n++] = 0;
 
     /* The 720 capture's real histogram windows: word 0 is 0x1d and the
      * four window words describe the 1280x720 frame -- the zeros-and-
@@ -785,8 +778,7 @@ int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
  * These carry the stock camera's geometry, so they belong with its
  * resolution and not with a smaller one.
  */
-int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova,
-                  unsigned W, unsigned H)
+int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
 {
     uint32_t cmd_h = nvmap_create(4096 * 2);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -819,13 +811,6 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova,
         if (blk[b].m == 0x700) {
             if (wb_b) g[first + 5] = wb_b;
             if (wb_r) g[first + 11] = wb_r;
-        }
-        /* The capture's first word here is the stock's own work buffer;
-         * ours goes in its place (the same buffer 0x054 gets below), and
-         * the geometry word follows the frame rather than the capture's. */
-        if (blk[b].m == 0x800 || blk[b].m == 0x820) {
-            g[first] = work_iova;
-            g[first + 2] = ((H - 32) << 16) | (W - 32);
         }
     }
     g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
@@ -1170,7 +1155,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     uint32_t stride_uv = ((W / 2) + 63) & ~63u;
 
     unsigned cal_words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
-    uint32_t *g = malloc((cal_words + 160) * 4);
+    uint32_t *g = malloc((cal_words + 128) * 4);
     int n = 0, y_word, u_word, v_word, stats_word;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
 
@@ -1196,12 +1181,6 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * which do not, keep working. */
     g[n++] = OP_INCR(0x053, 2);
     g[n++] = 0x00000001; g[n++] = work_iova;
-    /* And the spill pointers with it, every round, as the stock re-arms
-     * them: the same buffer, the frame less thirty-two on each side. */
-    g[n++] = OP_INCR(0x800, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = ((H - 32) << 16) | (W - 32);
-    g[n++] = OP_INCR(0x820, 3);
-    g[n++] = work_iova; g[n++] = 0x00100010; g[n++] = ((H - 32) << 16) | (W - 32);
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
@@ -1902,7 +1881,7 @@ int main(int argc, char **argv)
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
-            isp_init(isp_fd, work_h, isp_sp, work_iova, stats_iova, W, OH, geo);
+            isp_init(isp_fd, work_h, isp_sp, work_iova, stats_iova, geo);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
@@ -2434,7 +2413,7 @@ int main(int argc, char **argv)
              * the place the capture puts it. */
             if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent
                 && use_real_pass) {
-                isp_real_pass(isp_fd, isp_sp, work_iova, W, OH);
+                isp_real_pass(isp_fd, isp_sp, work_iova);
                 real_sent = 1;
             }
 
@@ -2574,7 +2553,7 @@ int main(int argc, char **argv)
                      * coefficients, once, and never in the opening round. */
                     if (ccm) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
                     if (use_real_pass && !real_sent) {
-                        isp_real_pass(isp_fd, isp_sp, work_iova, W, OH);
+                        isp_real_pass(isp_fd, isp_sp, work_iova);
                         real_sent = 1;
                     }
                 }

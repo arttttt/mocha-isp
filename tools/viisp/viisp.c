@@ -1404,11 +1404,14 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         int got = syncpt_read(sp_mem) != base36;
         uint32_t parser = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
         printf("  stream frame %d: frame start %s, output %s (%ld ms, %d shot%s),"
-               " parser %08x, next job rc=%d\n",
+               " parser %08x, 36=%u/%u 37=%u/%u 38=%u, next job rc=%d\n",
                k, syncpt_read(sp_id) != base_fs ? "seen" : "NOT seen",
                got ? "done" : "NONE",
                (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000,
-               shots, shots == 1 ? "" : "s", parser, rc);
+               shots, shots == 1 ? "" : "s", parser,
+               syncpt_read(sp_mem) - start36, (unsigned)k + 1,
+               syncpt_read(sp_stats) - start37, (unsigned)k + 1,
+               syncpt_read(isp_sp), rc);
         if (!got) {
             printf("  stream: no output for frame %d, stopping\n", k);
             break;

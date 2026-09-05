@@ -66,6 +66,45 @@ int mem_rd(unsigned long addr, uint32_t *out)
     return 0;
 }
 
+/* Memory bandwidth. On a fresh boot EMC sits at the DVFS floor (PLLP/2,
+ * ~204 MHz) and the ISP starves on it: noise-like output, writes that land
+ * late, memory faults after unmap. The stock camera's session lifts EMC
+ * onto PLLM and it stays there a while, which is the whole of "it works
+ * after the stock camera". The one knob that moves EMC here is the CPU
+ * governor -- cpu.emc follows the CPU rate -- so the run pins it to
+ * performance and puts the old governor back at exit. */
+#define CPU0_GOVERNOR "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+static char saved_governor[32];
+
+void emc_pin_high(void)
+{
+    FILE *f = fopen(CPU0_GOVERNOR, "r");
+    if (!f) { printf("  EMC: no cpufreq governor node\n"); return; }
+    if (!fgets(saved_governor, sizeof saved_governor, f)) saved_governor[0] = 0;
+    fclose(f);
+    char *nl = strchr(saved_governor, '\n'); if (nl) *nl = 0;
+    if (strcmp(saved_governor, "performance") == 0) { saved_governor[0] = 0; printf("  EMC: governor already performance\n"); return; }
+    f = fopen(CPU0_GOVERNOR, "w");
+    if (!f) { printf("  EMC: cannot set governor: %s\n", strerror(errno)); saved_governor[0] = 0; return; }
+    fputs("performance\n", f);
+    fclose(f);
+    usleep(200000);   /* the shared bus follows within a DVFS tick */
+    uint32_t src = 0;
+    mem_rd(CAR_BASE + 0x19c, &src);
+    printf("  EMC: governor %s -> performance, EMC source 0x%08x%s\n", saved_governor, src,
+           (src >> 29) == 4 ? " (PLLM)" : " (NOT PLLM -- the ISP will starve)");
+}
+
+void emc_unpin(void)
+{
+    if (!saved_governor[0]) return;
+    FILE *f = fopen(CPU0_GOVERNOR, "w");
+    if (!f) return;
+    fputs(saved_governor, f); fputs("\n", f);
+    fclose(f);
+    printf("  EMC: governor back to %s\n", saved_governor);
+}
+
 void car_enable_csi_clocks(void)
 {
     uint32_t b1 = 0, b2 = 0, b3 = 0;

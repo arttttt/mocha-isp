@@ -339,6 +339,8 @@ extern unsigned stats_kb, work_kb;
 int   mem_wr(unsigned long addr, uint32_t val, uint32_t *before);
 int   mem_rd(unsigned long addr, uint32_t *out);
 void  car_enable_csi_clocks(void);
+void  emc_pin_high(void);
+void  emc_unpin(void);
 void  mipi_upd(unsigned off, uint32_t mask, uint32_t val);
 void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);

@@ -1993,6 +1993,7 @@ int main(int argc, char **argv)
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
+    emc_pin_high();
     car_enable_csi_clocks();
 
     /* The driver writes this the moment VI comes up and we never wrote it at
@@ -2807,6 +2808,7 @@ shutdown:
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);
     close(nvmap_fd);
+    emc_unpin();
     printf("=== done ===\n");
     return 0;
 }

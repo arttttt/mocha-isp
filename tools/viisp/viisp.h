@@ -374,11 +374,12 @@ const struct geom_cfg *geom_for(unsigned W, unsigned H);
 unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova);
 int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
              uint32_t work_iova, uint32_t stats_iova,
-             const struct geom_cfg *geo);
+             unsigned W, unsigned H, const struct geom_cfg *geo);
 int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
                  uint32_t stats_h, uint32_t u_off, uint32_t v_off,
                  uint32_t work_iova);
-int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova);
+int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova,
+                  unsigned W, unsigned H);
 int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
                uint32_t stats_h, int write_enable,
                unsigned W, unsigned H);

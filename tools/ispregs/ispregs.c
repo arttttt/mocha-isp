@@ -32,7 +32,7 @@ struct regrdwr_args {
     uint32_t values;
     uint32_t write;
 };
-#define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR _IOWR(NVHOST_IOCTL_MAGIC, 8, struct regrdwr_args)
+#define NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR _IOWR(NVHOST_IOCTL_MAGIC, 14, struct regrdwr_args)
 
 int main(int argc, char **argv)
 {

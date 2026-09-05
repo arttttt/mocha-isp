@@ -10,7 +10,6 @@ int nvmap_fd = -1, vi_fd = -1;
 uint32_t alloc_heap = NVMAP_HEAP_CARVEOUT_GENERIC;
 
 int dm_sent;
-int dm_after = 1;
 int real_sent;
 /* The working recipe, as defaults: two 8x8 warm-ups with the enable inside
  * the first, the statistics conditions armed, the geometry blocks for the
@@ -19,7 +18,6 @@ int real_sent;
 int use_real_pass = 1;
 int arm_stats = 1;
 int do_warmup = 1;
-int enable_late = 1;
 int per_frame_cal = 1;
 int geo_blocks = 1;
 int stream_xfer = 1;
@@ -34,7 +32,6 @@ unsigned isp_emc_clk = 81600;       /* --isp-emc-clk: the isp_clk (kHz) in the I
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
 int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;
-uint32_t rgb2y = 0x001c984c;
 
 int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
 {

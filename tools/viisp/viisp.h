@@ -208,6 +208,7 @@ struct nvhost32_submit_args {
 #define ISP_CLASS_A                 0x32
 #define ISP_CLASS_B                 0x34
 #define ISP_TRIGGER_SENSOR          0x05
+#define ISP_ENABLE_WORD             0x04040007  /* method 0x015, once per session */
 #define ISP_TRIGGER_MEMORY          0x0B
 
 /* Port B's command register is 0x87C -- 0x86C is its INPUT_STREAM_CONTROL. */
@@ -315,8 +316,8 @@ struct nvhost32_submit_args {
 /* ---- shared state ---- */
 extern int nvmap_fd, vi_fd;
 extern uint32_t alloc_heap;
-extern int dm_sent, dm_after, real_sent, use_real_pass;
-extern int arm_stats, do_warmup, enable_late;
+extern int dm_sent, real_sent, use_real_pass;
+extern int arm_stats, do_warmup;
 extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
@@ -324,7 +325,6 @@ extern int isp_wait_ms, stream_n;
 extern unsigned isp_emc_clk;
 extern uint32_t wb_r, wb_b;
 extern unsigned stats_kb, work_kb;
-extern uint32_t rgb2y;
 
 /* ---- platform ---- */
 int   mem_wr(unsigned long addr, uint32_t val, uint32_t *before);
@@ -360,32 +360,25 @@ struct geom_cfg {
 const struct geom_cfg *geom_for(unsigned W, unsigned H);
 
 /* ---- ISP jobs ---- */
-unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
-                        unsigned groups);
-int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
-             uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
-             uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
-             uint32_t gpp_gain, int luma_lo,
-             uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
-             int zero_init, int apply, uint32_t stats_ctrl,
-             int stock_cfg, const struct geom_cfg *geo);
-int isp_init_a(int fd, uint32_t sp);
+unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova);
+int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
+             uint32_t work_iova, uint32_t stats_iova,
+             const struct geom_cfg *geo);
 int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
                  uint32_t stats_h, uint32_t u_off, uint32_t v_off,
                  uint32_t work_iova);
 int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova);
 int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
-               uint32_t stats_h, int write_enable, uint32_t enable,
+               uint32_t stats_h, int write_enable,
                unsigned W, unsigned H);
 int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
                unsigned W, unsigned H);
 void isp_stop(int isp_fd, uint32_t sp);
 int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
-              unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
-              uint32_t trigger, uint32_t u_off, uint32_t v_off,
+              unsigned W, unsigned H, uint32_t fmt,
+              uint32_t u_off, uint32_t v_off,
               uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
               uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-              uint32_t in_fmt, uint32_t work_iova, int per_frame_cal,
-              uint32_t proc_flags);
+              uint32_t work_iova, int per_frame_cal);
 
 #endif /* VIISP_H */

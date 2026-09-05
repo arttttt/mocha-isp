@@ -238,37 +238,22 @@ struct isp_emc_info {
  *
  * The work buffer's address is ours, not the one the stock process had.
  */
-/* Which part of the pipeline a block belongs to.
- *
- * Sending the whole table at once cost a capture and a reboot: the
- * statistics blocks went in with it, ours had been configured differently,
- * and the frame then waited on a statistics syncpoint that never moved.
- * One thing at a time, so a failure says which thing.
- */
-#define STOCK_DEMOSAIC 1
-#define STOCK_COLOUR   2
-#define STOCK_STATS    4
-#define STOCK_INPUT    8
-
-static unsigned stock_group(unsigned method)
+/* Only the demosaic group of the table goes out. Sending the whole of it
+ * cost a capture and a reboot: the statistics blocks went in with it, ours
+ * had been configured differently, and the frame then waited on a
+ * statistics syncpoint that never moved. */
+static int stock_demosaic_block(unsigned method)
 {
     switch (method) {
     case 0x900: case 0x902: case 0x904: case 0x906: case 0x908:
     case 0x506:
-        return STOCK_DEMOSAIC;
-    case 0x600: case 0x650: case 0x651: case 0x653: case 0x655:
-    case 0x657: case 0xd00: case 0xd0a: case 0xd0c: case 0xd20:
-        return STOCK_COLOUR;
-    case 0x909: case 0x910: case 0x919: case 0x91b: case 0x91d:
-    case 0x91f: case 0x920:
-        return STOCK_STATS;
+        return 1;
     default:
-        return STOCK_INPUT;
+        return 0;
     }
 }
 
-unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
-                               unsigned groups)
+unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova)
 {
     unsigned count = sizeof isp_stock_blocks / sizeof isp_stock_blocks[0];
     for (unsigned b = 0; b < count; b++) {
@@ -278,7 +263,7 @@ unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
         /* Skipped deliberately: its second word is where the stock process
          * kept its scratch buffer, and that address means nothing here. */
         if (bl->method == 0x053) continue;
-        if (!(stock_group(bl->method) & groups)) continue;
+        if (!stock_demosaic_block(bl->method)) continue;
 
         if (bl->mode == 0) {
             g[n++] = OP_INCR(bl->method, bl->count);
@@ -292,17 +277,13 @@ unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova,
             for (unsigned i = 1; i < bl->count; i++) g[n++] = d[i];
         }
     }
-    if (groups) { g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova; }
+    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = work_iova;
     return n;
 }
 
-int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
-                    uint32_t work_iova, uint32_t stats_iova, int demosaic_zero,
-                    uint32_t rt_luma, uint32_t ccm_word, unsigned skip,
-                    uint32_t gpp_gain, int luma_lo,
-                    uint32_t in_dims, uint32_t in_mode, uint32_t in_phase,
-                    int zero_init, int apply, uint32_t stats_ctrl,
-                    int stock_cfg, const struct geom_cfg *geo)
+int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
+             uint32_t work_iova, uint32_t stats_iova,
+             const struct geom_cfg *geo)
 {
     unsigned words = sizeof isp_b_cal_data / sizeof isp_b_cal_data[0];
     /* Room for the zero-init as well as the blob: that clearing pass alone
@@ -328,72 +309,70 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * registers alone is not the same as clearing them -- whatever an
      * earlier run left behind stays -- so this clears them the way stock
      * does. */
-    if (zero_init) {
-        /* The clearing pass, and it is longer than what I had: the colour
-         * matrix and the work buffer are cleared with the rest. Stock runs
-         * it, applies, writes the DMA block and the three registers beside
-         * it, then runs the whole pass again and applies again. */
-        static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
-            { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
-            { 0x700, 16, 0 }, { 0x750, 16, 0 },
-            { 0xD00, 10, 0 }, { 0xD0A, 1, 0 }, { 0xD0B, 480, 1 },
-            { 0xD0C, 2, 0 }, { 0xD20, 6, 0 },
-            { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
-            { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
-            { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
-            { 0x910, 9, 0 },
-            { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
-            { 0x91E, 9, 1 },
-            { 0x506, 9, 0 }, { 0x600, 16, 0 },
-            { 0x650, 1, 0 },
-            { 0x651, 1, 0 }, { 0x652, 257, 1 },
-            { 0x653, 1, 0 }, { 0x654, 257, 1 },
-            { 0x655, 1, 0 }, { 0x656, 257, 1 },
-            { 0x657, 1, 0 }, { 0x658, 257, 1 },
-            { 0x300, 4, 0 }, { 0x304, 4, 0 }, { 0x053, 2, 0 },
-        };
-        for (int pass = 0; pass < 2; pass++) {
-            for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
-                g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
-                                     : OP_INCR(z[k].m, z[k].n);
-                for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
-            }
-            /* The one block whose tail is not zeros: stock sets the eighth
-             * slot of the 0x91a array port, and the header word with it. */
-            g[n++] = OP_INCR(0x919, 1); g[n++] = 0x00000000;
-            g[n++] = OP_NONINCR(0x91A, 9);
-            for (int i = 0; i < 8; i++) g[n++] = 0;
-            g[n++] = 0x00000200;
-            g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
+    /* The clearing pass, and it is longer than what I had: the colour
+     * matrix and the work buffer are cleared with the rest. Stock runs
+     * it, applies, writes the DMA block and the three registers beside
+     * it, then runs the whole pass again and applies again. */
+    static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
+        { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
+        { 0x700, 16, 0 }, { 0x750, 16, 0 },
+        { 0xD00, 10, 0 }, { 0xD0A, 1, 0 }, { 0xD0B, 480, 1 },
+        { 0xD0C, 2, 0 }, { 0xD20, 6, 0 },
+        { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
+        { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
+        { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
+        { 0x910, 9, 0 },
+        { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
+        { 0x91E, 9, 1 },
+        { 0x506, 9, 0 }, { 0x600, 16, 0 },
+        { 0x650, 1, 0 },
+        { 0x651, 1, 0 }, { 0x652, 257, 1 },
+        { 0x653, 1, 0 }, { 0x654, 257, 1 },
+        { 0x655, 1, 0 }, { 0x656, 257, 1 },
+        { 0x657, 1, 0 }, { 0x658, 257, 1 },
+        { 0x300, 4, 0 }, { 0x304, 4, 0 }, { 0x053, 2, 0 },
+    };
+    for (int pass = 0; pass < 2; pass++) {
+        for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
+            g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
+                                 : OP_INCR(z[k].m, z[k].n);
+            for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
+        }
+        /* The one block whose tail is not zeros: stock sets the eighth
+         * slot of the 0x91a array port, and the header word with it. */
+        g[n++] = OP_INCR(0x919, 1); g[n++] = 0x00000000;
+        g[n++] = OP_NONINCR(0x91A, 9);
+        for (int i = 0; i < 8; i++) g[n++] = 0;
+        g[n++] = 0x00000200;
+        g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
 
-            /* Apply, then the transfer configuration: the memory-path set
-             * on the first pass, the streaming set on the second. */
-            g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
-            g[n++] = OP_INCR(0x018, 5);
-            if (pass && stream_xfer) {
-                /* The second pass carries a different block altogether, not
-                 * the first one with its last word flipped: both captures
-                 * (2592 and 720) send exactly this, and the live camera's
-                 * registers 0x018..0x01C read back exactly this. The
-                 * reconstruction had collapsed the two sets into one.
-                 *
-                 * Behind --stream-xfer: with it the pipeline really streams
-                 * (Y carries the picture) and the hardware drives syncpoint
-                 * 38 itself, which is what took the channel down twice.
-                 * Without it the block runs as before, in bypass. */
-                g[n++] = 0x0a00500a; g[n++] = 0x00008089;
-                g[n++] = 0x013645cb; g[n++] = 0x000001e7;
-                g[n++] = 0x00000001;
-            } else {
-                g[n++] = 0x00000000; g[n++] = 0x00000400;
-                g[n++] = 0x00000000; g[n++] = 0x00000200;
-                g[n++] = pass ? 0x00000001 : 0x00000002;
-            }
-            if (!pass) {
-                g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
-                g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
-                g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
-            }
+        /* Apply, then the transfer configuration: the memory-path set
+         * on the first pass, the streaming set on the second. */
+        g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
+        g[n++] = OP_INCR(0x018, 5);
+        if (pass && stream_xfer) {
+            /* The second pass carries a different block altogether, not
+             * the first one with its last word flipped: both captures
+             * (2592 and 720) send exactly this, and the live camera's
+             * registers 0x018..0x01C read back exactly this. The
+             * reconstruction had collapsed the two sets into one.
+             *
+             * Behind --stream-xfer: with it the pipeline really streams
+             * (Y carries the picture) and the hardware drives syncpoint
+             * 38 itself, which is what took the channel down twice.
+             * Without it the block runs as before, in bypass. */
+            g[n++] = 0x0a00500a; g[n++] = 0x00008089;
+            g[n++] = 0x013645cb; g[n++] = 0x000001e7;
+            g[n++] = 0x00000001;
+        } else {
+            g[n++] = 0x00000000; g[n++] = 0x00000400;
+            g[n++] = 0x00000000; g[n++] = 0x00000200;
+            g[n++] = pass ? 0x00000001 : 0x00000002;
+        }
+        if (!pass) {
+            g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
+            g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
+            g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
         }
     }
 
@@ -413,29 +392,18 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * reference. None of it appears in the stock traces either, those
      * carrying only the per-frame gather. Bit 3 drops the whole of it, so
      * the ISP can be given nothing but what the traces actually show. */
-    if (!(skip & 0x08)) {
-
-    if (!(skip & 0x01)) {
-        /* The three words after the enable are 75, 147 and 34 -- the BT.601
-         * luma weights, which is what folding three channels into one looks
-         * like. */
-        /* 75, 147 and 34 -- the BT.601 luma weights -- and the driver puts
-         * them in the high half of each word. If the hardware reads them
-         * from the low half, the luma comes out zero, and a zero luma is
-         * exactly what the planar output shows: an empty Y plane with the
-         * chroma carrying the picture. In the packed forms that same zero
-         * luma leaves red alive and clamps green and blue to nothing, which
-         * is what we have been calling "only red". Worth trying both. */
-        g[n++] = OP_INCR(0x400, 12);
-        g[n++] = rt_luma;
-        g[n++] = luma_lo ? 0x0000004b : 0x004b0000;
-        g[n++] = luma_lo ? 0x00000093 : 0x00930000;
-        g[n++] = luma_lo ? 0x00000022 : 0x00220000;
-        g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
-        g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
-        g[n++] = 0x00030000; g[n++] = 0x00000000;
-        g[n++] = 0x00020000; g[n++] = 0x00000000;
-    }
+    /* The three words after the enable are 75, 147 and 34 -- the BT.601
+     * luma weights in the high half of each word, which is what folding
+     * three channels into one looks like. */
+    g[n++] = OP_INCR(0x400, 12);
+    g[n++] = 0x00000001;
+    g[n++] = 0x004b0000;
+    g[n++] = 0x00930000;
+    g[n++] = 0x00220000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
+    g[n++] = 0x00030000; g[n++] = 0x00000000;
+    g[n++] = 0x00020000; g[n++] = 0x00000000;
 
     /* The stock has the constant 0x85001000 in the first word here; the
      * statistics buffer's address in its place works at both widths. */
@@ -463,27 +431,25 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
 
     /* The input stage: dimensions, then the enable, then stride and format. */
-    if (!(skip & 0x04)) {
-        /* 0x203 and 0x204 carry 0x00780078 in the driver for this sensor and
-         * 0x02000200 for the other -- a pair of sixteen-bit fields that have
-         * nothing to do with either sensor's dimensions, so what they mean
-         * is a guess. Both they and the pipeline mode in 0x200 are knobs:
-         * the April notes say a non-zero mode is what takes the block out of
-         * minimal processing, and minimal processing is exactly what we
-         * measure -- the mosaic arrives at the output intact. */
-        g[n++] = OP_INCR(0x202, 3);
-        g[n++] = 0x00000001; g[n++] = in_dims; g[n++] = in_dims;
-        g[n++] = OP_INCR(0x200, 2);
-        g[n++] = in_mode; g[n++] = 0x00000000;
-        /* The last word of this block is the one place in the driver where
-         * the two sensors differ in a way that looks like Bayer order:
-         * 0x3333 for the rear camera, zero for this one -- and the two
-         * sensors are RGGB and BGGR. A zero there could as easily mean "no
-         * mosaic", which would explain a demosaic stage that never runs. */
-        g[n++] = OP_INCR(0x205, 4);
-        g[n++] = 0x00000000; g[n++] = 0x000600c8;
-        g[n++] = 0x000f000f; g[n++] = in_phase;
-    }
+    /* 0x203 and 0x204 carry 0x00780078 in the driver for this sensor and
+     * 0x02000200 for the other -- a pair of sixteen-bit fields that have
+     * nothing to do with either sensor's dimensions, so what they mean
+     * is a guess. Both they and the pipeline mode in 0x200 are knobs:
+     * the April notes say a non-zero mode is what takes the block out of
+     * minimal processing, and minimal processing is exactly what we
+     * measure -- the mosaic arrives at the output intact. */
+    g[n++] = OP_INCR(0x202, 3);
+    g[n++] = 0x00000001; g[n++] = geo->in_dims; g[n++] = geo->in_dims;
+    g[n++] = OP_INCR(0x200, 2);
+    g[n++] = 0x00000001; g[n++] = 0x00000000;
+    /* The last word of this block is the one place in the driver where
+     * the two sensors differ in a way that looks like Bayer order:
+     * 0x3333 for the rear camera, zero for this one -- and the two
+     * sensors are RGGB and BGGR. A zero there could as easily mean "no
+     * mosaic", which would explain a demosaic stage that never runs. */
+    g[n++] = OP_INCR(0x205, 4);
+    g[n++] = 0x00000000; g[n++] = 0x000600c8;
+    g[n++] = 0x000f000f; g[n++] = geo->in_phase;
 
     /* Straight out of the stock trace, where this block turns up inside two
      * of the eight calibration gathers. Every value differs from the
@@ -526,7 +492,6 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     /* The statistics control word. It has a name in the headers and nobody
      * writes it -- not stock, not us, we only clear it -- and the stage it
      * belongs to is silent here alongside the demosaic. Worth one value. */
-    if (stats_ctrl) { g[n++] = OP_INCR(0x902, 1); g[n++] = stats_ctrl; }
     /* The shift fields, and ours were a step too high. Injected into the
      * stock camera in place of its own they made its picture brighter --
      * 137.9 against 124.6 by measurement, and visibly so -- which is what
@@ -573,23 +538,15 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = 0; g[n++] = 0x00000780; g[n++] = 0x00000200;
     g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000032;
 
-    /* Demosaic. Only red comes out of the pipeline -- green and blue are
-     * exactly zero in every packed format -- and the reprocess notes say
-     * stock sends nine zeros here and lets the hardware use its own
-     * defaults, while these coefficients are the tool's own. Selectable
-     * because that is the difference worth testing. */
+    /* Demosaic: the tool's own coefficients; the stock's follow in the
+     * table below and stand over these. */
     g[n++] = OP_INCR(0x506, 9);
-    if (demosaic_zero) {
-        for (int i = 0; i < 9; i++) g[n++] = 0;
-    } else {
-        g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
-        g[n++] = 0x04c1304c; g[n++] = 0x08220882;
-        g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
-        g[n++] = 0x08621886; g[n++] = 0x01204812;
-        g[n++] = 0x06e1b86e;
-    }
+    g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
+    g[n++] = 0x04c1304c; g[n++] = 0x08220882;
+    g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
+    g[n++] = 0x08621886; g[n++] = 0x01204812;
+    g[n++] = 0x06e1b86e;
 
-    if (!(skip & 0x02)) {
     /* The colour conversion, and we had been sending it empty.
      *
      * Every coefficient here was zero, which is why the luma plane came
@@ -617,9 +574,8 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * one value both paths share and both paths fail on. The output is also
      * attenuated some sixty-fold against the raw capture, which is what a
      * gain in the wrong fixed-point format would do. */
-    g[n++] = gpp_gain; g[n++] = gpp_gain;
-    g[n++] = gpp_gain; g[n++] = 0x10001000;
-    }
+    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
+    g[n++] = 0x3fff0000; g[n++] = 0x10001000;
 
     /* One, which is what the stock camera has here. We were sending three,
      * and writing coefficients into a stage set up differently from the way
@@ -628,18 +584,6 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000001;
     g[n++] = OP_INCR(0x651, 1); g[n++] = 0x00000000;
 
-    }   /* end of the reconstructed streaming init */
-
-    /* The colour matrix. Neither we nor that init write it, so whatever it
-     * holds after reset is what the pipeline uses. This does not try to
-     * guess the right coefficients; it establishes whether these registers
-     * are the gate at all. */
-    if (ccm_word) {
-        g[n++] = OP_INCR(0x300, 4);
-        for (int i = 0; i < 4; i++) g[n++] = ccm_word;
-        g[n++] = OP_INCR(0x304, 4);
-        for (int i = 0; i < 4; i++) g[n++] = ccm_word;
-    }
 
     memcpy(&g[n], isp_b_cal_data, words * 4);
     n += words;
@@ -654,12 +598,10 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
     /* And then the real thing, last, so it stands over everything above:
      * the configuration read out of the stock camera while it was running.
      * The demosaic coefficients live here and nowhere else we could reach. */
-    if (stock_cfg) n = isp_stock_emit(g, n, work_iova, stock_cfg);
+    n = isp_stock_emit(g, n, work_iova);
 
-    /* Unless the enable belongs later: stock writes it exactly once for a
-     * whole session, and not here -- it goes inside the first warm-up
-     * frame, after everything else has been configured. */
-    if (!enable_late) { g[n++] = OP_INCR(0x015, 1); g[n++] = enable; }
+    /* No enable here: stock writes it exactly once for a whole session,
+     * inside the first warm-up frame, after everything else is configured. */
 
     /* Commit. Everything above this is written into shadow state and takes
      * effect only when the block is told to apply it -- the April notes
@@ -672,7 +614,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
      * clearing pass into shadow state and never applies it, then the
      * hardware defaults are what stay in force, demosaic included. Applying
      * ours would then be the very thing that destroys them. */
-    if (apply) { g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F; }
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -694,220 +636,10 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t enable, uint32_t sp,
 
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("ISP calibration: %u words, enable 0x%08x, rc=%d (%s)\n",
-           n, enable, rc, rc == 0 ? "ok" : strerror(errno));
+    printf("ISP calibration: %u words, rc=%d (%s)\n",
+           n, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     (void)work_h;
-    return rc;
-}
-
-/* The other block's runtime configuration, as the stock camera sends it.
- *
- * Stock sets ISP-A up in full -- submits of 3654, 1817, 1817 and 1238 words
- * -- before ISP-B, which is the one the front sensor feeds, ever gets more
- * than a clearing pass. If the two share anything that has to be configured
- * once, this is where it happens, and we have never done it.
- *
- * Values decoded from a live session on this device. The sensor-specific
- * words are the rear camera's, because that is whose block this is. */
-int isp_init_a(int fd, uint32_t sp)
-{
-    uint32_t cmd_h = nvmap_create(32768);
-    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-
-    uint32_t *g = malloc(8192 * 4);
-    unsigned n = 0;
-    g[n++] = OP_SETCLASS(ISP_CLASS_A);
-
-    /* The clearing pass first, twice, exactly as this block gets it -- our
-     * earlier version jumped straight to the runtime values and sent a
-     * couple of hundred words where stock sends thousands. */
-    {
-        static const struct { uint16_t m; uint16_t n; uint8_t noninc; } z[] = {
-            { 0x202, 3, 0 }, { 0x200, 2, 0 }, { 0x205, 4, 0 },
-            { 0x700, 16, 0 }, { 0x750, 16, 0 },
-            { 0xD00, 10, 0 }, { 0xD0A, 1, 0 }, { 0xD0B, 480, 1 },
-            { 0xD0C, 2, 0 }, { 0xD20, 6, 0 },
-            { 0x900, 2, 0 }, { 0x902, 1, 0 }, { 0x903, 64, 1 },
-            { 0x904, 2, 0 }, { 0x906, 1, 0 }, { 0x907, 36, 1 },
-            { 0x908, 1, 0 }, { 0x920, 10, 0 }, { 0x909, 7, 0 },
-            { 0x910, 9, 0 }, { 0x919, 1, 0 },
-            { 0x91B, 1, 0 }, { 0x91C, 9, 1 }, { 0x91D, 1, 0 },
-            { 0x91E, 9, 1 },
-            { 0x506, 9, 0 }, { 0x600, 16, 0 },
-            { 0x650, 1, 0 },
-            { 0x651, 1, 0 }, { 0x652, 257, 1 },
-            { 0x653, 1, 0 }, { 0x654, 257, 1 },
-            { 0x655, 1, 0 }, { 0x656, 257, 1 },
-            { 0x657, 1, 0 }, { 0x658, 257, 1 },
-            { 0x300, 4, 0 }, { 0x304, 4, 0 }, { 0x053, 2, 0 },
-        };
-        for (int pass = 0; pass < 2; pass++) {
-            for (unsigned k = 0; k < sizeof z / sizeof z[0]; k++) {
-                g[n++] = z[k].noninc ? OP_NONINCR(z[k].m, z[k].n)
-                                     : OP_INCR(z[k].m, z[k].n);
-                for (unsigned i = 0; i < z[k].n; i++) g[n++] = 0;
-            }
-            g[n++] = OP_NONINCR(0x91A, 9);
-            for (int i = 0; i < 8; i++) g[n++] = 0;
-            g[n++] = 0x00000200;
-            g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000002;
-            g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x0F;
-            g[n++] = OP_INCR(0x018, 5);
-            if (pass && stream_xfer) {
-                /* The second pass carries a different block altogether, not
-                 * the first one with its last word flipped: both captures
-                 * (2592 and 720) send exactly this, and the live camera's
-                 * registers 0x018..0x01C read back exactly this. The
-                 * reconstruction had collapsed the two sets into one.
-                 *
-                 * Behind --stream-xfer: with it the pipeline really streams
-                 * (Y carries the picture) and the hardware drives syncpoint
-                 * 38 itself, which is what took the channel down twice.
-                 * Without it the block runs as before, in bypass. */
-                g[n++] = 0x0a00500a; g[n++] = 0x00008089;
-                g[n++] = 0x013645cb; g[n++] = 0x000001e7;
-                g[n++] = 0x00000001;
-            } else {
-                g[n++] = 0x00000000; g[n++] = 0x00000400;
-                g[n++] = 0x00000000; g[n++] = 0x00000200;
-                g[n++] = pass ? 0x00000001 : 0x00000002;
-            }
-            if (!pass) {
-                g[n++] = OP_INCR(0x01E, 1); g[n++] = 0x00000000;
-                g[n++] = OP_INCR(0x01F, 1); g[n++] = 0x00000001;
-                g[n++] = OP_INCR(0x05F, 1); g[n++] = 0x00000010;
-            }
-        }
-    }
-
-    g[n++] = OP_INCR(0x400, 12);
-    g[n++] = 0x00000001; g[n++] = 0x004b0000;
-    g[n++] = 0x00930000; g[n++] = 0x00220000;
-    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
-    g[n++] = 0x2ff01000; g[n++] = 0x2ff01000;
-    g[n++] = 0x00030000; g[n++] = 0x00000000;
-    g[n++] = 0x00020000; g[n++] = 0x00000000;
-
-    g[n++] = OP_INCR(0x800, 3);
-    g[n++] = 0x85001000; g[n++] = 0; g[n++] = 0;
-    g[n++] = OP_INCR(0x820, 3);
-    g[n++] = 0x85001000; g[n++] = 0; g[n++] = 0;
-
-    g[n++] = OP_INCR(0x930, 18);
-    g[n++] = 0x0000001c; g[n++] = 0x88888888;
-    g[n++] = 0x78787800; g[n++] = 0x00000078;
-    g[n++] = 0x88888888; g[n++] = 0x78787800;
-    g[n++] = 0x00000078; g[n++] = 0x88888888;
-    g[n++] = 0x78787800; g[n++] = 0x00000078;
-    g[n++] = 0x88888888; g[n++] = 0x78787800;
-    g[n++] = 0x00000078; g[n++] = 0x3fc00000;
-    g[n++] = 0x00000000; g[n++] = 0x00070000;
-    g[n++] = 0x00000000; g[n++] = 0x00070000;
-
-    g[n++] = OP_INCR(0xC00, 3);
-    g[n++] = 0x00000101; g[n++] = 0; g[n++] = 0x00100000;
-
-    g[n++] = OP_INCR(0x202, 3);
-    g[n++] = 0x00000001; g[n++] = 0x02000200; g[n++] = 0x02000200;
-    g[n++] = OP_INCR(0x200, 2);
-    g[n++] = 0x00000001; g[n++] = 0x00000000;
-    g[n++] = OP_INCR(0x205, 4);
-    g[n++] = 0x00000000; g[n++] = 0x000600c8;
-    g[n++] = 0x000f000f; g[n++] = 0x00003333;
-
-    g[n++] = OP_INCR(0x700, 16);
-    g[n++] = 0x00000001; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = 0; g[n++] = 0x00001dc0;
-    g[n++] = 0; g[n++] = 0x10000000;
-    g[n++] = 0; g[n++] = 0;
-    g[n++] = 0x00001000; g[n++] = 0x00001c50;
-    g[n++] = 0x30001000; g[n++] = 0x30001000;
-    g[n++] = 0x30001000; g[n++] = 0x30001000;
-
-    g[n++] = OP_INCR(0x750, 16);
-    g[n++] = 0x00000003;
-    for (int i = 0; i < 11; i++) g[n++] = 0;
-    g[n++] = 0x30001000; g[n++] = 0x30001000;
-    g[n++] = 0x30001000; g[n++] = 0x30001000;
-
-    g[n++] = OP_INCR(0xD20, 6);
-    g[n++] = 0x00003101; g[n++] = 0;
-    g[n++] = 0x01ec0000; g[n++] = 0x01ec0000;
-    g[n++] = 0x01ec0000; g[n++] = 0x01ec0000;
-
-    g[n++] = OP_INCR(0x900, 2); g[n++] = 1; g[n++] = 1;
-    g[n++] = OP_INCR(0x904, 2); g[n++] = 0x00005555; g[n++] = 1;
-    g[n++] = OP_INCR(0x908, 1); g[n++] = 0x00005555;
-
-    g[n++] = OP_INCR(0x920, 10);
-    g[n++] = 0x00000002; g[n++] = 0x10001660;
-    g[n++] = 0x00000000; g[n++] = 0x1000f4a0;
-    g[n++] = 0x0000fa80; g[n++] = 0x10000000;
-    g[n++] = 0x00001c50; g[n++] = 0x30001000;
-    g[n++] = 0x30001000; g[n++] = 0x30001000;
-
-    g[n++] = OP_INCR(0x909, 7);
-    g[n++] = 0x00000001; g[n++] = 0xfc000f00;
-    g[n++] = 0xf680f320; g[n++] = 0x0d80fde0;
-    g[n++] = 0x00000000; g[n++] = 0x1400002a;
-    g[n++] = 0x3c00002b;
-
-    g[n++] = OP_INCR(0x910, 9);
-    g[n++] = 0x00000003; g[n++] = 0x00000028;
-    g[n++] = 0x01480029; g[n++] = 0x00177e0b;
-    g[n++] = 0x00990030; g[n++] = 0x00000800;
-    g[n++] = 0x007b0666; g[n++] = 0x00000039;
-    g[n++] = 0x00000000;
-
-    g[n++] = OP_NONINCR(0x91C, 9);
-    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = 0x00000001; g[n++] = 0x00000026;
-    g[n++] = 0; g[n++] = 0x00000026; g[n++] = 0x00000361;
-    g[n++] = OP_NONINCR(0x91E, 9);
-    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
-    g[n++] = 0; g[n++] = 0x00000780;
-    g[n++] = 0; g[n++] = 0x00000780; g[n++] = 0x00000200;
-    g[n++] = OP_INCR(0x91F, 1); g[n++] = 0x00000032;
-
-    g[n++] = OP_INCR(0x506, 9);
-    g[n++] = 0x3f3fcff3; g[n++] = 0x00000000;
-    g[n++] = 0x04c1304c; g[n++] = 0x08220882;
-    g[n++] = 0x00000000; g[n++] = 0x03d0f43d;
-    g[n++] = 0x08621886; g[n++] = 0x01204812;
-    g[n++] = 0x06e1b86e;
-
-    g[n++] = OP_INCR(0x600, 16);
-    g[n++] = 0x00000005;
-    for (int i = 0; i < 11; i++) g[n++] = 0;
-    g[n++] = 0x3fff0000; g[n++] = 0x3fff0000;
-    g[n++] = 0x3fff0000; g[n++] = 0x10001000;
-
-    g[n++] = OP_INCR(0x650, 1); g[n++] = 0x00000003;
-    g[n++] = OP_INCR(0x053, 2); g[n++] = 1; g[n++] = 0;
-    g[n++] = OP_IMM(0, sp);
-
-    nvmap_rw(cmd_h, 0, g, n * 4, 1);
-
-    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
-    struct nvhost_syncpt_incr si = { sp, 1 };
-    uint32_t cls = ISP_CLASS_A;
-    struct nvhost_fence fence = { 0, 0 };
-    struct nvhost32_submit_args sa;
-    memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 1;
-    sa.num_cmdbufs = 1;
-    sa.timeout = 3000;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
-    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-    sa.class_ids = (uint32_t)(uintptr_t)&cls;
-    sa.fences = (uint32_t)(uintptr_t)&fence;
-    errno = 0;
-    int rc = ioctl(fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("ISP-A configured: %u words, rc=%d (%s)\n", n, rc,
-           rc == 0 ? "ok" : strerror(errno));
-    free(g);
-    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }
 
@@ -1103,7 +835,7 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
  * and two scratch pages the processing block wants pointers to.
  */
 int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
-                      uint32_t stats_h, int write_enable, uint32_t enable,
+                      uint32_t stats_h, int write_enable,
                       unsigned W, unsigned H)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -1140,7 +872,7 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
 
     /* Once per session, and inside this frame rather than out in the
      * opening configuration, which is where we had been putting it. */
-    if (write_enable) { g[n++] = OP_INCR(0x015, 1); g[n++] = enable; }
+    if (write_enable) { g[n++] = OP_INCR(0x015, 1); g[n++] = ISP_ENABLE_WORD; }
 
     g[n++] = OP_INCR(0x100, 4);
     stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
@@ -1383,12 +1115,11 @@ void isp_stop(int isp_fd, uint32_t sp)
  * trigger. There are no input registers -- in streaming mode the pixels
  * arrive from VI and there is nothing to describe. */
 int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
-                     unsigned W, unsigned H, uint32_t fmt, uint32_t e03,
-                     uint32_t trigger, uint32_t u_off, uint32_t v_off,
+                     unsigned W, unsigned H, uint32_t fmt,
+                     uint32_t u_off, uint32_t v_off,
                      uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
                      uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-                     uint32_t in_fmt, uint32_t work_iova, int per_frame_cal,
-                     uint32_t proc_flags)
+                     uint32_t work_iova, int per_frame_cal)
 {
     /* Room for the calibration too, now that it rides with every frame. */
     uint32_t cmd_h = nvmap_create(16384);
@@ -1435,7 +1166,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE02, 1); g[n++] = fmt;
-    g[n++] = OP_INCR(0xE03, 1); g[n++] = e03;
+    g[n++] = OP_INCR(0xE03, 1); g[n++] = 0;
 
     {
         g[n++] = OP_INCR(0xE04, 3);
@@ -1446,21 +1177,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
         v_word = n; g[n++] = 0; g[n++] = 0; g[n++] = stride_uv;
     }
 
-    /* The first word of this block is the only flags field the streaming
-     * path has. The April notes call a non-zero value there fatal, but that
-     * was the reprocess path, and this one behaves differently enough to be
-     * worth its own look. */
+    /* The first word of this block is the streaming path's only flags
+     * field; anything but zero is fatal. */
     g[n++] = OP_INCR(0x500, 6);
-    g[n++] = proc_flags; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
     g[n++] = (H << 16) | W;
 
-    /* Tell the block what is arriving. The input-format register is
-     * documented as belonging to the reprocess path, where it names the
-     * Bayer order and depth -- but nothing in the streaming path names them
-     * either, and a pipeline that does not know it is looking at a mosaic
-     * has no reason to demosaic. Written without arming the memory input
-     * trigger, so the source stays VI. */
-    if (in_fmt) { g[n++] = OP_INCR(0xE33, 1); g[n++] = in_fmt; }
 
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_INCR(0x100, 4);
@@ -1476,7 +1198,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     if (sp_loadv) { g[n++] = OP_NONINCR(0x000, 1); g[n++] = (6u << 8) | sp_loadv; }
 
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
-    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = trigger;
+    g[n++] = OP_NONINCR(0x00C, 1); g[n++] = ISP_TRIGGER_SENSOR;
 
     /* Park the job on the frame's own completion and on statistics, the way
      * stock's post-frame submit does. The relocation pins then last exactly
@@ -1545,8 +1267,8 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
     printf("ISP frame: %d words, %ux%u fmt 0x%08x, strides %u/%u,"
-           " trigger 0x%02x, rc=%d (%s)\n", n, W, H, fmt, stride_y,
-           stride_uv, trigger, rc, rc == 0 ? "ok" : strerror(errno));
+           " rc=%d (%s)\n", n, W, H, fmt, stride_y,
+           stride_uv, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }
@@ -1565,13 +1287,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
  * In the single-shot loop the output of a job at 2592 wide arrived only when
  * the next job was submitted; here the next job is always queued right
  * behind, parked on the previous frame's completion. */
-static int stream_run(int isp_fd, int vi_fd, uint32_t base, int front,
+static int stream_run(int isp_fd, int vi_fd, uint32_t base,
                       uint32_t sp_id, uint32_t sp_mem, uint32_t sp_stats,
                       uint32_t sp_loadv, uint32_t isp_sp,
                       uint32_t out_h, uint32_t stats_h, unsigned W, unsigned OH,
-                      uint32_t isp_fmt, uint32_t isp_e03, uint32_t isp_trigger,
-                      uint32_t u_off, uint32_t v_off, uint32_t isp_in_fmt,
-                      uint32_t work_iova, uint32_t proc_flags,
+                      uint32_t isp_fmt, uint32_t u_off, uint32_t v_off,
+                      uint32_t work_iova,
                       uint32_t iova, uint32_t stride, uint32_t out_bytes,
                       int n_frames)
 {
@@ -1586,19 +1307,17 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base, int front,
     vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
     vi_flush("stream: VI surface");
 
-    uint32_t pp_reg = front ? PP_B_PIXEL_STREAM_PP_COMMAND
-                            : PP_A_PIXEL_STREAM_PP_COMMAND;
+    uint32_t pp_reg = PP_B_PIXEL_STREAM_PP_COMMAND;
     uint32_t pp_cmd = (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE;
-    uint32_t fs_cond = front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START;
+    uint32_t fs_cond = T124_PPB_FRAME_START;
     uint8_t *img = malloc(out_bytes);
     int whole = 0;
 
     /* Job 0 alone in the queue: it parks on the next frame. */
-    int rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                       isp_trigger, u_off, v_off,
+    int rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                        sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                       isp_in_fmt, work_iova, per_frame_cal, proc_flags);
+                       work_iova, per_frame_cal);
     printf("  stream: job 0 armed, rc=%d\n", rc);
 
     for (int k = 0; k < n_frames; k++) {
@@ -1620,16 +1339,14 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base, int front,
          * complete without a single CPU poll on 36. */
         int w_out = 0;
         if (k + 1 < n_frames) {
-            rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                           isp_trigger, u_off, v_off,
+            rc = isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                            sp_mem, sp_stats, sp_loadv, isp_sp, 0, 1,
-                           isp_in_fmt, work_iova, per_frame_cal, proc_flags);
+                           work_iova, per_frame_cal);
         }
         while (syncpt_read(sp_mem) == base36 && w_out < isp_wait_ms) { usleep(1000); w_out++; }
         clock_gettime(CLOCK_MONOTONIC, &t1);
         int got = syncpt_read(sp_mem) != base36;
-        uint32_t parser = vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                                      : T124_PP_A_PIXEL_PARSER_STATUS);
+        uint32_t parser = vi_rd(T124_PP_B_PIXEL_PARSER_STATUS);
         printf("  stream frame %d: frame start %s, output %s (%ld ms from the shot),"
                " parser %08x, next job rc=%d\n",
                k, syncpt_read(sp_id) != base_fs ? "seen" : "NOT seen",
@@ -1700,9 +1417,8 @@ int main(int argc, char **argv)
      * result there impossible to attribute. */
     /* The front sensor's stock session runs at its full 2592x1944, and the
      * image definition it uses on this channel was read off that session. */
-    unsigned W = 2592, H = 1944, port = 1, vi_height = 0;
-    const char *sensor = "ov5693";
-    int use_sensor = 1, dump = 0, front = 1;
+    unsigned W = 2592, H = 1944;
+    int use_sensor = 1, dump = 0;
     /* Destination is in the low bits: 1 memory, 2 ISP-A, 4 ISP-B. Stock
      * reads 0x00200004 because it sends pixels to the ISP, not to memory
      * -- copying its value told our VI to do the same, which is why the
@@ -1724,11 +1440,6 @@ int main(int argc, char **argv)
      * are adjustable now, because judging the pipeline on a black frame
      * tells us nothing about it. */
     uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
-    /* The front sensor is on CIL E. The reference dump that had this word
-     * at zero came from a session driving CIL A and B -- the other brick
-     * entirely -- so it says nothing about ours. Back to the value that
-     * brings E up, which is the one that reads 0x110 back from it. */
-    uint32_t phy_cil_cmd = 0x12020000;   /* brick E, one lane */
     /* One frame. Every extra one queues another job behind a block that may
      * already be stuck, and when it is, the channel dies and only a reboot
      * brings the camera back -- so the cost of asking for more is paid by
@@ -1739,11 +1450,6 @@ int main(int argc, char **argv)
     int settle = 200;
     int fast_arm = 1;   /* arm the next ISP frame right after the last completes; --slow-arm paces by the frame period instead */
     uint32_t isp_clk = 384000000;   /* --isp-clk=HZ */
-    /* The memory-side rate the channel asks for. The driver does not set a
-     * number here at all -- it computes an isochronous bandwidth from the
-     * frame size and sets a latency allowance, neither of which we can reach
-     * from userspace. This is the nearest lever we have. */
-    unsigned long emc_rate = 528000000;
     /* The ISP output: one packed RGB plane by default, no colour config,
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
@@ -1760,56 +1466,12 @@ int main(int argc, char **argv)
      * is why one quarter-size plane came back written and the luma surface
      * stayed empty; and with 0x01FE00E6 the block lays the chroma out from
      * the luma base itself rather than from the addresses we give it. */
-    uint32_t isp_fmt = 0x04FE00E6, isp_e03 = 0;   /* YUV420 planar, block-linear: what the stock writes */
-    uint32_t isp_enable = 0x04040007, isp_trigger = ISP_TRIGGER_SENSOR;
-    /* Which of the two routing writes go through host1x methods rather than
-     * registers: bit 0 the ISP interface, bit 1 the image definition. */
-    unsigned isp_route = 3;
-    int demosaic_zero = 0;
-    uint32_t rt_luma = 1;
-    uint32_t ccm_word = 0;
-    /* Which blocks of the driver's streaming init to leave out. None of
-     * them appear in the stock per-frame trace, and whether every one of
-     * them is right is not settled: bit 0 the luma weights at 0x400, bit 1
-     * the GPP at 0x600, bit 2 the input stage, bit 3 the statistics, bit 4
-     * the second processing channel. */
-    unsigned isp_skip = 0;
-    /* The input pixel format, if we choose to name it. 0x10200024 is Bayer
-     * BGGR at ten bits in a sixteen-bit container, which is what this
-     * sensor sends. */
-    uint32_t isp_in_fmt = 0;
-    uint32_t gpp_gain = 0x3fff0000;
-    int luma_lo = 0;
-    uint32_t in_dims = 0, in_mode = 1, in_phase = 0;
-    int in_dims_set = 0, in_phase_set = 0;
-    /* The channel-to-ISP interface. Three is the only value anything names,
-     * and what the rest of the field means has never been looked at -- it
-     * is the one register on the VI side that describes the handover. */
-    uint32_t ispintf = ISPINTF_CONFIG_ENABLE;
-    /* Clear the block the way stock clears it before anything else. On by
-     * default now: it is what the camera on this device actually does. */
-    int zero_init = 1;
-    int isp_apply = 1;
-    /* The demosaic group only, by default. Sending the whole table at once
-     * took the statistics path down with it; the coefficients are what we
-     * came for, so start with those alone and add a group at a time. */
-    unsigned stock_cfg = STOCK_DEMOSAIC;
-    /* Configuring the other block the way stock does turns out to stop ours
-     * writing at all, so it is off unless asked for. */
-    int init_a = 0;
-    uint32_t stats_ctrl = 0;
-    uint32_t proc_flags = 0;
+    uint32_t isp_fmt = 0x04FE00E6;   /* YUV420 planar, block-linear: what the stock writes */
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strncmp(a, "--width=", 8) == 0)       W = (unsigned)strtoul(a + 8, 0, 0);
         else if (strncmp(a, "--height=", 9) == 0) H = (unsigned)strtoul(a + 9, 0, 0);
-        else if (strncmp(a, "--port=", 7) == 0)   port = (unsigned)strtoul(a + 7, 0, 0);
-        else if (strncmp(a, "--sensor=", 9) == 0) {
-            sensor = a + 9;
-            front = (strcmp(sensor, "ov5693") == 0);
-            if (!front) port = 0;
-        }
         else if (strcmp(a, "--no-sensor") == 0)   use_sensor = 0;
         else if (strcmp(a, "--dump") == 0)        dump = 1;
         else if (strncmp(a, "--frame-length=", 15) == 0)
@@ -1841,8 +1503,6 @@ int main(int argc, char **argv)
              * words; bit 2: PHY_CIL_COMMAND E-only and no CILC pad. */
             stock_vi = (int)strtoul(a + 11, 0, 0);
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
-        else if (strncmp(a, "--dm-after=", 11) == 0)
-            dm_after = atoi(a + 11);
         else if (strncmp(a, "--seq-sp=", 9) == 0)  seq_sp = (uint32_t)atoi(a + 9);
         else if (strncmp(a, "--wb=", 5) == 0) {     /* --wb=R,B in hex 4.12 */
             wb_r = (uint32_t)strtoul(a + 5, 0, 16);
@@ -1850,56 +1510,10 @@ int main(int argc, char **argv)
             if (comma) wb_b = (uint32_t)strtoul(comma + 1, 0, 16);
         }
         else if (strncmp(a, "--ccm=", 6) == 0)    ccm = atoi(a + 6);
-        else if (strncmp(a, "--rgb2y=", 8) == 0)
-            rgb2y = (uint32_t)strtoul(a + 8, 0, 16);
         else if (strncmp(a, "--stats-kb=", 11) == 0)
             stats_kb = (unsigned)strtoul(a + 11, 0, 0);
         else if (strncmp(a, "--work-kb=", 10) == 0)
             work_kb = (unsigned)strtoul(a + 10, 0, 0);
-        else if (strncmp(a, "--vi-height=", 12) == 0)
-            vi_height = (unsigned)strtoul(a + 12, 0, 0);
-        else if (strncmp(a, "--emc=", 6) == 0)
-            emc_rate = strtoul(a + 6, 0, 0);
-        else if (strncmp(a, "--isp-e03=", 10) == 0)
-            isp_e03 = (uint32_t)strtoul(a + 10, 0, 16);
-        else if (strncmp(a, "--isp-enable=", 13) == 0)
-            isp_enable = (uint32_t)strtoul(a + 13, 0, 16);
-        else if (strncmp(a, "--isp-trigger=", 14) == 0)
-            isp_trigger = (uint32_t)strtoul(a + 14, 0, 16);
-        else if (strncmp(a, "--isp-route=", 12) == 0)
-            isp_route = (unsigned)strtoul(a + 12, 0, 0);
-        else if (strcmp(a, "--demosaic-zero") == 0) demosaic_zero = 1;
-        else if (strncmp(a, "--isp-luma=", 11) == 0)
-            rt_luma = (uint32_t)strtoul(a + 11, 0, 0);
-        else if (strncmp(a, "--ccm=", 6) == 0)
-            ccm_word = (uint32_t)strtoul(a + 6, 0, 16);
-        else if (strncmp(a, "--isp-skip=", 11) == 0)
-            isp_skip = (unsigned)strtoul(a + 11, 0, 0);
-        else if (strncmp(a, "--in-fmt=", 9) == 0)
-            isp_in_fmt = (uint32_t)strtoul(a + 9, 0, 16);
-        else if (strncmp(a, "--gpp=", 6) == 0)
-            gpp_gain = (uint32_t)strtoul(a + 6, 0, 16);
-        else if (strcmp(a, "--luma-lo") == 0) luma_lo = 1;
-        else if (strncmp(a, "--in-dims=", 10) == 0)
-            { in_dims = (uint32_t)strtoul(a + 10, 0, 16); in_dims_set = 1; }
-        else if (strncmp(a, "--in-mode=", 10) == 0)
-            in_mode = (uint32_t)strtoul(a + 10, 0, 16);
-        else if (strncmp(a, "--in-phase=", 11) == 0)
-            { in_phase = (uint32_t)strtoul(a + 11, 0, 16); in_phase_set = 1; }
-        else if (strncmp(a, "--ispintf=", 10) == 0)
-            ispintf = (uint32_t)strtoul(a + 10, 0, 16);
-        else if (strcmp(a, "--no-zero-init") == 0) zero_init = 0;
-        else if (strcmp(a, "--no-apply") == 0)     isp_apply = 0;
-        else if (strcmp(a, "--no-stock-cfg") == 0) stock_cfg = 0;
-        else if (strncmp(a, "--stock=", 8) == 0)
-            stock_cfg = (unsigned)strtoul(a + 8, 0, 0);
-        else if (strcmp(a, "--init-a") == 0)       init_a = 1;
-        else if (strncmp(a, "--stats-ctrl=", 13) == 0)
-            stats_ctrl = (uint32_t)strtoul(a + 13, 0, 16);
-        else if (strncmp(a, "--proc-flags=", 13) == 0)
-            proc_flags = (uint32_t)strtoul(a + 13, 0, 16);
-        else if (strncmp(a, "--phy-cil=", 10) == 0)
-            phy_cil_cmd = (uint32_t)strtoul(a + 10, 0, 16);
         else if (strncmp(a, "--gain=", 7) == 0)
             gain = (uint32_t)strtoul(a + 7, 0, 0);
         else { printf("unknown option %s\n", a); return 1; }
@@ -1916,15 +1530,13 @@ int main(int argc, char **argv)
     if (W != 2592 && W != 1280)
         printf("WARNING: no measured geometry for %ux%u -- using the"
                " nearest captured set\n", W, H);
-    if (!in_dims_set) in_dims = geo->in_dims;
-    if (!in_phase_set) in_phase = geo->in_phase;
 
-    uint32_t base = VI_CSI_BASE(port);
+    uint32_t base = VI_CSI_BASE(1);          /* port B: the front sensor */
     uint32_t stride = W * 2;                 /* RAW10 lands in 16-bit words */
     uint32_t frame = stride * H;
     uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
 
-    printf("=== vicap: %s %ux%u, CSI port %u ===\n", sensor, W, H, port);
+    printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
 
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
@@ -1976,7 +1588,7 @@ int main(int argc, char **argv)
     /* Planar YUV, laid out the way stock lays it out: the luma plane first,
      * then the two chroma planes on 64K boundaries. Strides are the width
      * rounded up to 64, and the chroma planes are half of everything. */
-    unsigned OH = vi_height ? vi_height : H;
+    unsigned OH = H;
     int isp_planar = (isp_fmt & 0xFF) == 0xE6;
     /* 64-aligned, as the stock's own frame registers have it (see the
      * frame builder). */
@@ -2169,25 +1781,22 @@ int main(int argc, char **argv)
         {
             /* Stock writes ONE register directly, and it is 0xFC. Its whole
              * PIO trace for a camera session is seven lines and every one of
-             * them is 0xFC=0x20 -- 0x54 never appears. We had been writing
-             * the pipeline mode there on the strength of a driver comment,
-             * so pass --isp-enable=0 to do as stock does and leave it alone. */
-            /* And when the enable is to go where stock puts it -- inside
-             * the first warm-up frame, once -- it does not go here at all. */
-            uint32_t off[2] = { 0xFC, 0x54 };
-            uint32_t val[2] = { 0x20, isp_enable };
+             * them is 0xFC=0x20 -- 0x54 never appears; the enable goes
+             * inside the first warm-up frame instead. */
+            uint32_t off[1] = { 0xFC };
+            uint32_t val[1] = { 0x20 };
             struct regrdwr_args ra;
             memset(&ra, 0, sizeof ra);
             ra.id = 0;
-            ra.num_offsets = (isp_enable && !enable_late) ? 2 : 1;
+            ra.num_offsets = 1;
             ra.block_size = 4;
             ra.offsets = (uint32_t)(uintptr_t)off;
             ra.values = (uint32_t)(uintptr_t)val;
             ra.write = 1;
             errno = 0;
             int rrc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ra);
-            printf("ISP registers: 0xFC=0x20, 0x54=0x%08x, rc=%d (%s)\n",
-                   isp_enable, rrc, rrc == 0 ? "ok" : strerror(errno));
+            printf("ISP register 0xFC=0x20: rc=%d (%s)\n",
+                   rrc, rrc == 0 ? "ok" : strerror(errno));
         }
 
         /* A scratch buffer the ISP wants for its own working state. The
@@ -2196,35 +1805,6 @@ int main(int argc, char **argv)
          * it reaches 0x3f4a0 into this buffer. */
         work_h = nvmap_create(work_kb * 1024);
         if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
-
-        /* Stock configures the other block first and in full. Do the same
-         * before touching ours -- a separate channel, its own wake-up
-         * write and its own syncpoint. */
-        if (init_a) {
-            int afd = open("/dev/nvhost-isp", O_RDWR);
-            if (afd < 0) printf("open /dev/nvhost-isp: %s\n", strerror(errno));
-            else {
-                struct nvhost_set_nvmap_fd_args anf = { (uint32_t)nvmap_fd };
-                ioctl(afd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &anf);
-                struct nvhost_get_param_arg ap = { .param = 0, .value = 0 };
-                uint32_t asp = 0;
-                if (ioctl(afd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &ap) == 0)
-                    asp = ap.value;
-                struct nvhost_clk_rate_args ac;
-                ac.moduleid = 0; ac.rate = 384000000;
-                ioctl(afd, NVHOST_IOCTL_CHANNEL_SET_CLK_RATE, &ac);
-                uint32_t aoff = 0xFC, aval = 0x20;
-                struct regrdwr_args ara;
-                memset(&ara, 0, sizeof ara);
-                ara.id = 0; ara.num_offsets = 1; ara.block_size = 4;
-                ara.offsets = (uint32_t)(uintptr_t)&aoff;
-                ara.values = (uint32_t)(uintptr_t)&aval;
-                ara.write = 1;
-                ioctl(afd, NVHOST32_IOCTL_CHANNEL_MODULE_REGRDWR, &ara);
-                if (asp) isp_init_a(afd, asp);
-                close(afd);
-            }
-        }
 
         /* The stock camera's statistics buffers sit half a megabyte apart,
          * eight of them in rotation, so half a megabyte is what it gives
@@ -2250,11 +1830,7 @@ int main(int argc, char **argv)
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
         if (work_h)
-            isp_init(isp_fd, work_h, isp_enable, isp_sp,
-                     work_iova, stats_iova, demosaic_zero, rt_luma, ccm_word,
-                     isp_skip, gpp_gain, luma_lo, in_dims, in_mode,
-                     in_phase, zero_init, isp_apply, stats_ctrl, stock_cfg,
-                     geo);
+            isp_init(isp_fd, work_h, isp_sp, work_iova, stats_iova, geo);
         if (out_h) {
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
@@ -2289,17 +1865,14 @@ int main(int argc, char **argv)
     /* Route to the ISP whenever the ISP is among the destinations -- the
      * old test asked whether memory was NOT one of them, which meant
      * delivering to both silently dropped the routing. */
-    if (isp_route && (image_def & (IMAGE_DEF_DEST_ISP_A |
-                                   IMAGE_DEF_DEST_ISP_B))) {
+    if (image_def & (IMAGE_DEF_DEST_ISP_A | IMAGE_DEF_DEST_ISP_B)) {
         uint32_t cmd_h = nvmap_create(4096);
         nvmap_alloc(cmd_h);
         uint32_t g[10];
         int n = 0;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
-        if (isp_route & 1) { g[n++] = OP_INCR(0x099, 1);
-                             g[n++] = ispintf; }
-        if (isp_route & 2) { g[n++] = OP_INCR(0x282, 1);
-                             g[n++] = image_def; }
+        g[n++] = OP_INCR(0x099, 1); g[n++] = ISPINTF_CONFIG_ENABLE;
+        g[n++] = OP_INCR(0x282, 1); g[n++] = image_def;
         g[n++] = OP_IMM(0, sp_cmd);
         nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
 
@@ -2318,41 +1891,31 @@ int main(int argc, char **argv)
         sa.fences = (uint32_t)(uintptr_t)&fence;
         errno = 0;
         int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-        printf("VI routing via host1x (mask %u): %d words, rc=%d (%s)\n",
-               isp_route, n, rc, rc == 0 ? "ok" : strerror(errno));
+        printf("VI routing via host1x: %d words, rc=%d (%s)\n",
+               n, rc, rc == 0 ? "ok" : strerror(errno));
         ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     }
 
     int sfd = -1;
     if (use_sensor) {
         char sn[64];
-        snprintf(sn, sizeof sn, "/dev/%s", sensor);
+        snprintf(sn, sizeof sn, "/dev/ov5693");
         sfd = open(sn, O_RDWR);
         if (sfd < 0) { printf("open %s: %s\n", sn, strerror(errno)); return 1; }
-        if (front) {
-            /* Opening the node already powered it -- but only just. The log
-             * puts the mode ioctl twenty-five microseconds after the power
-             * sequence returns, and the part answers neither of the two
-             * writes that follow: "no acknowledge from address 0x36". The
-             * driver's power-on does not wait for the sensor to come out of
-             * reset, so the wait has to be here. */
-            usleep(50000);
-            /* The stream itself starts after the receiver is up (see
-             * sensor_start_front); --sensor-early keeps the old order. */
-            if (!sensor_late)
-                sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
-            else
-                printf("sensor powered; streaming deferred until the receiver is up\n");
-        } else {
-            uint32_t on = 1;
-            if (ioctl(sfd, SENSOR_IOCTL_SET_POWER, &on) < 0)
-                printf("sensor power: %s\n", strerror(errno));
-            struct sensor_mode m = { (int)W, (int)H, 0, 0, 0 };
-            if (ioctl(sfd, SENSOR_IOCTL_SET_MODE, &m) < 0)
-                printf("sensor mode: %s\n", strerror(errno));
-            else
-                printf("sensor streaming at %ux%u\n", W, H);
-        }
+        /* Opening the node already powered it -- but only just. The log
+         * puts the mode ioctl twenty-five microseconds after the power
+         * sequence returns, and the part answers neither of the two
+         * writes that follow: "no acknowledge from address 0x36". The
+         * driver's power-on does not wait for the sensor to come out of
+         * reset, so the wait has to be here. */
+        usleep(50000);
+        /* The stream itself starts here, before the receiver comes up (the
+         * MIPI calibration needs the clock lane live); sensor_late keeps
+         * the other order as code. */
+        if (!sensor_late)
+            sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
+        else
+            printf("sensor powered; streaming deferred until the receiver is up\n");
     }
 
     /* CSI receiver bring-up, in the order csi.c does it for a T124 with the
@@ -2376,7 +1939,7 @@ int main(int argc, char **argv)
      * It also corrects a wrong reading: the frame-start syncpoint counts
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
-    pmc_dpd_release(front ? PMC_DPD_BIT_CSIE : (1u << 0) /* CSIA */);
+    pmc_dpd_release(PMC_DPD_BIT_CSIE);
     car_enable_csi_clocks();
 
     /* The driver writes this the moment VI comes up and we never wrote it at
@@ -2386,124 +1949,79 @@ int main(int argc, char **argv)
     vi_wr(TEGRA_VI_CFG_CG_CTRL, 1);
 
 
-    if (front) {
-        /* Port B, one lane, on CIL E. This whole block is the 24.1 driver's
-         * own port-1 path, value for value and in its order -- that code
-         * captured from this sensor, which is a stronger claim than anything
-         * we have inferred. Everything we had here before came from a dump
-         * taken while the REAR camera streamed, so it described the other
-         * brick and disagreed with this in almost every register. */
-        printf("bringing up the CSI receiver (port B / CIL E, 1 lane)\n");
-        vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
-
-        /* Clear every status, both bricks, as the driver does -- stale bits
-         * on a lane we are not using still gate the parser. */
-        vi_wr(T124_CSI_CIL_A_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CIL_B_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CIL_C_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CIL_D_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CIL_E_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CILA_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CILB_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CILC_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_CSI_CILD_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_PP_A_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
-        vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
-        vi_wr(VI_CSI_BASE(0) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
-        vi_wr(VI_CSI_BASE(1) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
-
-        /* The pads: C carries the clock-and-data back mode, D and E are
-         * left at zero. E being zero is not an omission -- the lane pad
-         * itself takes no configuration on this port. */
-        /* The stock camera never writes CILC's pad register for the front
-         * sensor: only CILA/CILB (zero) and CILE (zero, then THS 9). The
-         * 4x brick mode here is what the R21.5 V4L2 driver did. */
-        if (!(stock_vi & 4)) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
-        vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
-        vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
-
-        vi_wr(T124_CSI_CIL_C_INT_MASK, 0x0);
-        vi_wr(T124_CSI_CIL_D_INT_MASK, 0x0);
-        vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
-        vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
-
-        /* Reset the parser, configure it, then enable -- the command word
-         * is written twice on purpose, and the single-shot bit rides along
-         * both times. */
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
-        /* --stock-vi: the words the stock camera (an R19-era stack) writes
-         * through its VI channel, read out of its gathers -- PAD_FRAME 0
-         * where the R21.5 driver has NOPAD, CONTROL1 clear, the packet-skip
-         * threshold 0x7f with two extra low bits in INPUT_STREAM_CONTROL.
-         * The same words at 2592 and 1280 wide. */
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, (stock_vi & 2) ? 0x080301f1 : 0x280301f1);
-        vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
-        vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, (stock_vi & 2) ? 0 : 0x00000011);
-        vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
-        vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-        vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, (stock_vi & 2) ? 0x007f0014 : 0x003f0000);
-
-        /* Only the upper half of the brick command is ours; the lower half
-         * belongs to the rear path and has to survive our write. The stock
-         * enables brick E alone (0x10000000) and leaves C and D untouched. */
-        vi_wr(T124_CSI_PHY_CIL_COMMAND,
-              (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) |
-              ((stock_vi & 4) ? 0x10000000 : phy_cil_cmd));
-        vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
-        /* --tpg: let the receiver make its own picture. This splits the
-         * problem in half -- if the pattern lands in the buffer then VI,
-         * the parser and the write path are all sound and the fault is on
-         * the wire; if it does not, the fault is in our channel setup and
-         * the sensor was never the question. */
-        vi_flush("CSI bring-up");
-        mipi_calibrate_csie();
-        printf("  CILE pad0 after bring-up and calibration: 0x%08x\n",
-               vi_rd(T124_CILE_PAD_CONFIG0));
-    } else {
-    printf("bringing up the CSI receiver (port A, 4 lanes)\n");
+    /* Port B, one lane, on CIL E. This whole block is the 24.1 driver's
+     * own port-1 path, value for value and in its order -- that code
+     * captured from this sensor, which is a stronger claim than anything
+     * we have inferred. Everything we had here before came from a dump
+     * taken while the REAR camera streamed, so it described the other
+     * brick and disagreed with this in almost every register. */
+    printf("bringing up the CSI receiver (port B / CIL E, 1 lane)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
 
-    vi_wr(T124_PP_A_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+    /* Clear every status, both bricks, as the driver does -- stale bits
+     * on a lane we are not using still gate the parser. */
     vi_wr(T124_CSI_CIL_A_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_B_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_C_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_D_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CIL_E_STATUS, 0xFFFFFFFF);
     vi_wr(T124_CSI_CILA_STATUS, 0xFFFFFFFF);
-    vi_wr(T124_CSI_CIL_A_INT_MASK, 0x0);
-    vi_wr(T124_CSI_CIL_B_INT_MASK, 0x0);
+    vi_wr(T124_CSI_CILB_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CILC_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_CSI_CILD_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_PP_A_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+    vi_wr(T124_PP_B_PIXEL_PARSER_STATUS, 0xFFFFFFFF);
+    vi_wr(VI_CSI_BASE(0) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
+    vi_wr(VI_CSI_BASE(1) + VI_CSI_ERROR_STATUS, 0xFFFFFFFF);
 
-    vi_wr(T124_CILA_PAD_CONFIG0, BRICK_CLOCK_A_4X);
-    vi_wr(T124_CILB_PAD_CONFIG0, 0x0);
-    vi_wr(T124_PHY_CILA_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
-    vi_wr(T124_PHY_CILB_CONTROL0, T124_CIL_PHY_CONTROL_DEFAULT);
+    /* The pads: C carries the clock-and-data back mode, D and E are
+     * left at zero. E being zero is not an omission -- the lane pad
+     * itself takes no configuration on this port. */
+    /* The stock camera never writes CILC's pad register for the front
+     * sensor: only CILA/CILB (zero) and CILE (zero, then THS 9). The
+     * 4x brick mode here is what the R21.5 V4L2 driver did. */
+    if (!(stock_vi & 4)) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
+    vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
+    vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
 
-    /* Enable both halves of the brick, preserving the other brick's bits. */
-    {
-        uint32_t cil = vi_rd(T124_CSI_PHY_CIL_COMMAND);
-        uint32_t val = (cil & T124_CIL_CMD_HI_MASK) | T124_CIL_AB_4LANE;
-        vi_wr(T124_CSI_PHY_CIL_COMMAND, val);
-        printf("  PHY_CIL_COMMAND 0x%08x -> 0x%08x\n", cil, val);
-    }
+    vi_wr(T124_CSI_CIL_C_INT_MASK, 0x0);
+    vi_wr(T124_CSI_CIL_D_INT_MASK, 0x0);
+    vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
+    vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
 
-    /* Pixel parser: reset, then configure, then enable. */
-    vi_wr(T124_PP_A_PIXEL_STREAM_PP_COMMAND,
-          (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_RST);
-    vi_wr(T124_PP_A_PIXEL_STREAM_PP_INT_MASK, 0x0);
-    vi_wr(T124_PP_A_PIXEL_STREAM_CONTROL0,
-          CSI_PP_PACKET_HEADER_SENT | CSI_PP_DATA_IDENTIFIER_ENABLE |
-          CSI_PP_WORD_COUNT_SELECT_HEADER | CSI_PP_CRC_CHECK_ENABLE |
-          CSI_PP_WC_CHECK | CSI_PP_OUTPUT_FORMAT_STORE |
-          CSI_PPA_PAD_LINE_NOPAD | CSI_PP_HEADER_EC_DISABLE |
-          CSI_PPA_PAD_FRAME_NOPAD | 0 /* port A */);
-    vi_wr(T124_PP_A_PIXEL_STREAM_CONTROL1,
-          (0x1u << CSI_PP_TOP_FIELD_FRAME_OFFSET) |
-          (0x1u << CSI_PP_TOP_FIELD_FRAME_MASK_OFFSET));
-    vi_wr(T124_PP_A_PIXEL_STREAM_GAP,
-          T124_PP_FRAME_MIN_GAP << PP_FRAME_MIN_GAP_OFFSET);
-    vi_wr(T124_PP_A_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
-    vi_wr(T124_PP_A_INPUT_STREAM_CONTROL,
-          (0x3fu << CSI_SKIP_PACKET_THRESHOLD_OFFSET) | (4 - 1));
+    /* Reset the parser, configure it, then enable -- the command word
+     * is written twice on purpose, and the single-shot bit rides along
+     * both times. */
+    vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);
+    vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
+    /* --stock-vi: the words the stock camera (an R19-era stack) writes
+     * through its VI channel, read out of its gathers -- PAD_FRAME 0
+     * where the R21.5 driver has NOPAD, CONTROL1 clear, the packet-skip
+     * threshold 0x7f with two extra low bits in INPUT_STREAM_CONTROL.
+     * The same words at 2592 and 1280 wide. */
+    vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, (stock_vi & 2) ? 0x080301f1 : 0x280301f1);
+    vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
+    vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, (stock_vi & 2) ? 0 : 0x00000011);
+    vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
+    vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
+    vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, (stock_vi & 2) ? 0x007f0014 : 0x003f0000);
+
+    /* Only the upper half of the brick command is ours; the lower half
+     * belongs to the rear path and has to survive our write. The stock
+     * enables brick E alone (0x10000000) and leaves C and D untouched. */
+    vi_wr(T124_CSI_PHY_CIL_COMMAND,
+          (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) |
+          ((stock_vi & 4) ? 0x10000000 : 0x12020000 /* brick E, one lane */));
     vi_wr(T124_CSI_DEBUG_CONTROL, T124_CSI_DEBUG_COUNTER_CFG);
-    }
+    /* --tpg: let the receiver make its own picture. This splits the
+     * problem in half -- if the pattern lands in the buffer then VI,
+     * the parser and the write path are all sound and the fault is on
+     * the wire; if it does not, the fault is in our channel setup and
+     * the sensor was never the question. */
+    vi_flush("CSI bring-up");
+    mipi_calibrate_csie();
+    printf("  CILE pad0 after bring-up and calibration: 0x%08x\n",
+           vi_rd(T124_CILE_PAD_CONFIG0));
 
     /* Channel setup, in the order channel.c writes it. bypass_pixel_transform
      * is 1 here: we want the raw bayer in memory, not a converted image. */
@@ -2560,18 +2078,14 @@ int main(int argc, char **argv)
     vi_wr(base + VI_CSI_IMAGE_DEF, image_def);
     /* The interface between the channel and the ISP. Nothing reaches the
      * ISP with this at zero, whatever the destination bits say. */
-    vi_wr(base + VI_CSI_ISPINTF_CONFIG, ispintf);
-    /* What the capture has for this group, and what we were leaving to
-     * chance. */
-    vi_wr(base + VI_CSI_RGB2Y_CTRL, rgb2y);
+    vi_wr(base + VI_CSI_ISPINTF_CONFIG, ISPINTF_CONFIG_ENABLE);
+    /* What the capture has for this group: 0x001c984c, and zero here kills
+     * the path. */
+    vi_wr(base + VI_CSI_RGB2Y_CTRL, 0x001c984c);
     vi_wr(base + VI_CSI_MEM_TILING, 0);
     vi_wr(base + VI_CSI_IMAGE_DT, IMAGE_DT_RAW10);
     vi_wr(base + VI_CSI_IMAGE_SIZE_WC, wc);
-    /* The sensor keeps its own mode; this is only how many of its lines VI
-     * is told to take. Asking for fewer than arrive is how we find out
-     * whether a truncated capture is the link running out or the write. */
-    vi_wr(base + VI_CSI_IMAGE_SIZE,
-          ((vi_height ? vi_height : H) << IMAGE_SIZE_HEIGHT_OFFSET) | W);
+    vi_wr(base + VI_CSI_IMAGE_SIZE, (H << IMAGE_SIZE_HEIGHT_OFFSET) | W);
     /* The address goes in here as well as through the submit. The
      * relocation's pin lasts only as long as the job, and the write
      * happens afterwards, when the frame completes -- by which time that
@@ -2600,15 +2114,13 @@ int main(int argc, char **argv)
 
     /* Receiver and VI are configured: now the sensor may start streaming
      * (see sensor_start_front for why not earlier). */
-    if (sensor_late && sfd >= 0 && front && use_sensor)
+    if (sensor_late && sfd >= 0 && use_sensor)
         sensor_start_front(sfd, W, H, frame_length, coarse_time, gain);
-    if (front)
-        printf("  CILE pad0 after the sensor start: 0x%08x\n",
-               vi_rd(T124_CILE_PAD_CONFIG0));
+    printf("  CILE pad0 after the sensor start: 0x%08x\n",
+           vi_rd(T124_CILE_PAD_CONFIG0));
 
     /* Pixel parser: single shot, armed for one frame. */
-    uint32_t pp = (port == 0) ? PP_A_PIXEL_STREAM_PP_COMMAND
-                             : PP_B_PIXEL_STREAM_PP_COMMAND;
+    uint32_t pp = PP_B_PIXEL_STREAM_PP_COMMAND;
     vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
               CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
 
@@ -2626,8 +2138,7 @@ int main(int argc, char **argv)
     /* Only the frame start is armed here. The driver arms the memory-write
      * acknowledge only after the frame start has fired -- once the DMA is
      * already running -- so arming it up front was our invention. */
-    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-          (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START) << 8 | sp_id);
+    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
 
     /* And the trigger goes in the same batch: the receiver has to still be
      * powered and configured when the shot is fired, which is the whole
@@ -2654,17 +2165,10 @@ int main(int argc, char **argv)
          * the driver's own -- 0x099 for port B's ISP interface and 0x282
          * for its image definition -- and it is not the +0x1FF form the
          * rest of the channel uses. */
-        /* Sent together they reproduce exactly what the driver's note
-         * records: the frame start never arrives. Which of the two does it
-         * is worth knowing, so each is separately selectable. */
-        if (isp_route & 1) {
-            g[n++] = OP_INCR(0x099, 1);
-            g[n++] = ispintf;
-        }
-        if (isp_route & 2) {
-            g[n++] = OP_INCR(0x282, 1);
-            g[n++] = image_def;
-        }
+        g[n++] = OP_INCR(0x099, 1);
+        g[n++] = ISPINTF_CONFIG_ENABLE;
+        g[n++] = OP_INCR(0x282, 1);
+        g[n++] = image_def;
 
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);
         g[n++] = 0;
@@ -2758,8 +2262,7 @@ int main(int argc, char **argv)
         #define WAIT_FRAME_START(limit_ms) ({                                 \
             uint32_t _b = syncpt_read(sp_id);                                 \
             vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,                                \
-                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)       \
-                  << 8 | sp_id);                                              \
+                  T124_PPB_FRAME_START << 8 | sp_id);                         \
             vi_flush(0);                                                      \
             int _w = 0;                                                       \
             while (syncpt_read(sp_id) == _b && _w < (limit_ms)) {             \
@@ -2847,7 +2350,7 @@ int main(int argc, char **argv)
              * because nothing buffers them on the way. */
             /* After the first frame, in its own job, the way the
              * capture shows the stock stack doing it. */
-            if (isp_fd >= 0 && out_iova && shot >= dm_after && !dm_sent) {
+            if (isp_fd >= 0 && out_iova && shot > 0 && !dm_sent) {
                 isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                              u_off, v_off, work_iova);
                 dm_sent = 1;
@@ -2868,7 +2371,7 @@ int main(int argc, char **argv)
             if (warm_left > 0 && isp_fd >= 0 && warm_h) {
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
-                           warm_left == 2, isp_enable, W, OH);
+                           warm_left == 2, W, OH);
                 if (warm_left == 2 && !dm_sent) {
                     isp_demosaic(isp_fd, isp_sp, out_h, stats_h,
                                  u_off, v_off, work_iova);
@@ -2878,20 +2381,17 @@ int main(int argc, char **argv)
             else if (isp_fd >= 0 && out_iova && stats_h && stream_n > 0) {
                 /* The real frames go out by the stock's protocol instead
                  * of this single-shot machinery. */
-                stream_run(isp_fd, vi_fd, base, front, sp_id, sp_mem,
+                stream_run(isp_fd, vi_fd, base, sp_id, sp_mem,
                            sp_stats, sp_loadv, isp_sp, out_h, stats_h,
-                           W, OH, isp_fmt, isp_e03, isp_trigger,
-                           u_off, v_off, isp_in_fmt, work_iova,
-                           proc_flags, iova, stride, out_bytes, stream_n);
+                           W, OH, isp_fmt, u_off, v_off, work_iova,
+                           iova, stride, out_bytes, stream_n);
                 goto after_shots;
             }
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
-                isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, isp_e03,
-                          isp_trigger, u_off, v_off,
+                isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                           sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0,
-                          isp_in_fmt, work_iova, per_frame_cal,
-                          proc_flags);
+                          work_iova, per_frame_cal);
             }
 
             /* The stock's order, in its VI gathers: WAIT on the ISP
@@ -2913,7 +2413,7 @@ int main(int argc, char **argv)
             vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
             vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
             vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
-            if (front && !cile_rewritten) {
+            if (!cile_rewritten) {
                 /* The stock re-writes the CILE pads right before its
                  * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
                  * THS 9) and never again -- the later per-frame VI
@@ -2934,9 +2434,7 @@ int main(int argc, char **argv)
             }
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                       CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,
-                  (front ? T124_PPB_FRAME_START : T124_PPA_FRAME_START)
-                  << 8 | sp_id);
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
             vi_flush(0);
 
@@ -2987,8 +2485,7 @@ int main(int argc, char **argv)
             if (!fast_arm) usleep((useconds_t)period * 500 + settle * 1000);
             printf("  frame %d: %s (start %dms, settle %dms), parser %08x\n",
                    shot, started ? "started" : "NEVER STARTED", waited, settle,
-                   vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                               : T124_PP_A_PIXEL_PARSER_STATUS));
+                   vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
 
             /* A warm-up round is not one of the frames that were asked
              * for, so it does not spend one. */
@@ -3059,9 +2556,6 @@ int main(int argc, char **argv)
         }
     }
     usleep(200000);
-    goto after_readback;
-
-after_readback:
 
     printf("readback: IMAGE_DEF=0x%08x DT=0x%08x SIZE=0x%08x WC=0x%08x\n",
            vi_rd(base + VI_CSI_IMAGE_DEF), vi_rd(base + VI_CSI_IMAGE_DT),
@@ -3089,10 +2583,7 @@ after_readback:
      * session shows 0x110 here; zero means nothing ever arrived on the
      * wire, which points at the sensor rather than the receiver. */
     printf("CIL status: E=0x%08x CILE=0x%08x parser=0x%08x\n",
-           vi_rd(front ? 0xA18 : T124_CSI_CIL_A_STATUS),
-           vi_rd(front ? 0xA1C : T124_CSI_CILA_STATUS),
-           vi_rd(front ? T124_PP_B_PIXEL_PARSER_STATUS
-                       : T124_PP_A_PIXEL_PARSER_STATUS));
+           vi_rd(0xA18), vi_rd(0xA1C), vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
 
     /* The channel is exclusive, so nothing outside this process can read
      * the aperture while we hold it -- and picking ranges by hand is how a
@@ -3249,14 +2740,8 @@ after_readback:
     }
 
     if (sfd >= 0) {
-        /* Only the rear sensor has a power call. The front one powers down
-         * when its node is closed, and asking it for a power write hits a
-         * different command entirely on that driver -- one that writes back
-         * through the pointer we hand it. */
-        if (!front) {
-            uint32_t off = 0;
-            ioctl(sfd, SENSOR_IOCTL_SET_POWER, &off);
-        }
+        /* The front sensor powers down when its node is closed; it has no
+         * power call of its own. */
         close(sfd);
         printf("sensor powered down\n");
     }

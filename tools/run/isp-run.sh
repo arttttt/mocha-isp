@@ -140,9 +140,30 @@ faults_before=${faults_before:-0}
 
 echo "=== run: $BIN ${ARGS[*]:-（defaults）} ==="
 # The whole output is kept: a filtered view on the terminal has already
-# hidden the one line that mattered once.
-mkdir -p "$ROOT/build"
-adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log"
+# hidden the one line that mattered once. And every run is archived with
+# its own fingerprint of the device -- a clean run and a garbage run on
+# the same code have to be diffable after the fact, which they were not.
+mkdir -p "$ROOT/build/runs"
+STAMP=$(date +%Y%m%d-%H%M%S)
+RUNLOG="$ROOT/build/runs/$STAMP.log"
+fingerprint() {
+    echo "--- fingerprint ($1) ---"
+    adb shell 'echo "uptime $(cut -d" " -f1 /proc/uptime) emc_rate $(cat /sys/kernel/tegra_emc/emc_rate) gov $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)";
+      sh /data/local/tmp/carsample.sh 2>&1;
+      echo "PMC IO_DPD_REQ/STATUS DPD2_REQ/STATUS PWRGATE_STATUS:";
+      for a in 0x7000E5B8 0x7000E5BC 0x7000E5C0 0x7000E5C4 0x7000E438; do /data/local/tmp/memprobe --addr=$a --count=1 2>&1 | grep "+0x" | tr -d "\n"; echo -n " "; done; echo;
+      echo "MIPI_CAL 0x700E3000+0x00..0x3c:"; /data/local/tmp/memprobe --addr=0x700E3000 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
+      echo "MIPI_CAL 0x700E3040..0x7c:"; /data/local/tmp/memprobe --addr=0x700E3040 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
+      echo "VI registers (non-zero):"; /data/local/tmp/ispregs --node=/dev/nvhost-vi --end=0x1000 2>&1 | grep "^+" | tr "\n" " "; echo' 2>&1 | tr -d '\r'
+}
+{
+    echo "=== $STAMP: $BIN ${ARGS[*]:-} ==="
+    fingerprint before
+} > "$RUNLOG"
+adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log" | tee -a "$RUNLOG"
+fingerprint after >> "$RUNLOG"
+adb shell 'dmesg | tail -40' 2>/dev/null | tr -d '\r' | sed 's/^/dmesg: /' >> "$RUNLOG"
+echo "run log: $RUNLOG"
 
 # The part that matters and that keeps getting skipped.
 echo

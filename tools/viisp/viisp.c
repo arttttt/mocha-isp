@@ -2260,6 +2260,29 @@ int main(int argc, char **argv)
     printf("bringing up the CSI receiver (port B / CIL E, 1 lane)\n");
     vi_wr(T124_CSI_CLKEN_OVERRIDE, 0);
 
+    /* What the stock camera writes first, at the start of every front
+     * session (impl-1, vi-state-diff-stock-vs-viisp.md): the A and B
+     * bricks' pad and control words to zero -- they belong to the rear
+     * sensor, and a boot leaves 7/2 in them -- and the port-B pattern
+     * generator block to zero, clearing whatever a rear session left. We
+     * had never touched either; every dump of ours carried the leftovers.
+     * Its own batch, so the bring-up below keeps its one call. */
+    if (!kernel_csi) {
+        vi_wr(T124_CILA_PAD_CONFIG0, 0);
+        vi_wr(T124_PHY_CILA_CONTROL0, 0);
+        vi_wr(T124_CILB_PAD_CONFIG0, 0);
+        vi_wr(T124_PHY_CILB_CONTROL0, 0);
+    }
+    {
+        static const uint32_t pg_b[] = {
+            0xA68, 0xA6C, 0xA70, 0xA74, 0xA78, 0xA7C, 0xA80, 0xA84, 0xA88,
+            0xA9C, 0xAA0, 0xAA4, 0xAA8, 0xAAC, 0xAB0, 0xAB4, 0xAB8, 0xABC,
+        };
+        for (unsigned i = 0; i < sizeof pg_b / sizeof pg_b[0]; i++)
+            vi_wr(pg_b[i], 0);
+    }
+    vi_flush("stock session-start zeroing (CILA/CILB, PG_B)");
+
     /* Clear every status, both bricks, as the driver does -- stale bits
      * on a lane we are not using still gate the parser. */
     vi_wr(T124_CSI_CIL_A_STATUS, 0xFFFFFFFF);
@@ -2947,6 +2970,15 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SINGLE_SHOT, 0);
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
+        /* And the stock's own teardown, which ours had left out: the
+         * routing cleared and brick E switched off, so the next session
+         * -- ours or the stock's -- starts from what the stock leaves,
+         * not from our streaming state (impl-1's diff, rows 0x20c and
+         * 0x908). The low half of the brick command belongs to the rear
+         * path and survives. */
+        vi_wr(base + VI_CSI_IMAGE_DEF, 0);
+        vi_wr(T124_CSI_PHY_CIL_COMMAND,
+              (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) | 0x20000000);
         vi_flush("capture stopped");
         }
         if (isp_fd >= 0 && out_iova) isp_stop_acked = isp_stop(isp_fd, isp_sp);

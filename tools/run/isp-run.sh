@@ -108,8 +108,8 @@ fingerprint() {
       sh /data/local/tmp/carsample.sh 2>&1;
       echo "PMC IO_DPD_REQ/STATUS DPD2_REQ/STATUS PWRGATE_STATUS:";
       for a in 0x7000E5B8 0x7000E5BC 0x7000E5C0 0x7000E5C4 0x7000E438; do /data/local/tmp/memprobe --addr=$a --count=1 2>&1 | grep "+0x" | tr -d "\n"; echo -n " "; done; echo;
-      echo "MIPI_CAL 0x700E3000+0x00..0x3c:"; /data/local/tmp/memprobe --addr=0x700E3000 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
-      echo "MIPI_CAL 0x700E3040..0x7c:"; /data/local/tmp/memprobe --addr=0x700E3040 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
+      # No MIPI_CAL reads here: the block's clock is the kernel's now (on only
+      # while /dev/mipi-cal is open) and a read of an unclocked block hangs the bus.
       echo "VI registers (non-zero):"; /data/local/tmp/ispregs --node=/dev/nvhost-vi --end=0x1000 2>&1 | grep "^+" | tr "\n" " "; echo' 2>&1 | tr -d '\r'
 }
 

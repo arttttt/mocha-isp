@@ -373,7 +373,7 @@ int   nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 
 /* ---- ISP jobs ---- */
 int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova,
-                  unsigned W);
+                  unsigned W, unsigned H);
 int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
                uint32_t stats_h, int write_enable,
                unsigned W, unsigned H);

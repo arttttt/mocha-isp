@@ -255,7 +255,7 @@ struct isp_emc_info {
  * resolution and not with a smaller one.
  */
 int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova,
-                  unsigned W)
+                  unsigned W, unsigned H)
 {
     uint32_t cmd_h = nvmap_create(4096 * 2);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -303,6 +303,24 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
          * --stock-stats-addr sends the literal, for the comparison. */
         if ((blk[b].m == 0x800 || blk[b].m == 0x820) && stats_iova)
             g[first] = stats_iova;
+        /* Geometry by formula, not by table: the stock's word 2 here is
+         * ((H-32)<<16)|(W-32) at 720p and at 2592 alike (impl-2,
+         * pp-status-bits.md §3), so it holds for any size. */
+        if (blk[b].m == 0x800 || blk[b].m == 0x820)
+            g[first + 2] = ((H - 32) << 16) | (W - 32);
+        /* The shading grid's reciprocals and pitch, 0xd00 words 1..7,
+         * follow the width exactly in both stock sets: 1, 3 = 2^35/W;
+         * 2 = 2^34/W; 4, 6 = 2^37/(3W); 5 = 2^36/(3W), each with the low
+         * four bits clear; 7 = (W/2)<<16 | W/4. Words 0, 8 and 9 do not
+         * reduce to the width and stay with the nearest table. */
+        if (blk[b].m == 0xd00) {
+            uint64_t k = 1ull << 35;
+            g[first + 1] = g[first + 3] = (uint32_t)(k / W) & ~0xfu;
+            g[first + 2] = (uint32_t)((k >> 1) / W) & ~0xfu;
+            g[first + 4] = g[first + 6] = (uint32_t)((k << 2) / (3ull * W)) & ~0xfu;
+            g[first + 5] = (uint32_t)((k << 1) / (3ull * W)) & ~0xfu;
+            g[first + 7] = ((W / 2) << 16) | (W / 4);
+        }
 
         /* White balance. In 0x700 the stock camera moves exactly two words
          * from frame to frame, 5 and 11, with 7 and 10 fixed: per-channel
@@ -812,6 +830,17 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
  * not one frame -- while the second run rode on the receiver the first one
  * had left powered and locked. The stock and the R21.5 driver both bring
  * the CSI up first and start the sensor after. */
+/* The sensor's own frame length per mode, from the stock driver's mode
+ * tables (ov5693.c, registers 0x380e/0x380f): 2592x1944, 1296x972 and
+ * 1920x1080 all run 2688 x 1984 (30 fps), 1280x720 runs 1752 x 760 (60
+ * fps). The default frame length is twice this -- half the native rate,
+ * which is where 2592 (4128 lines) and 720p (2064) were run by hand. */
+static uint32_t native_vts(unsigned W, unsigned H)
+{
+    if (W == 1280 && H == 720) return 760;
+    return 1984;
+}
+
 static void sensor_start_front(int sfd, unsigned W, unsigned H,
                                uint32_t frame_length, uint32_t coarse_time,
                                uint32_t gain)
@@ -871,7 +900,9 @@ int main(int argc, char **argv)
      * cent of the range -- far too dark to tell a colour from a cast. Both
      * are adjustable now, because judging the pipeline on a black frame
      * tells us nothing about it. */
-    uint32_t frame_length = 2064, coarse_time = 2000, gain = 16;
+    /* frame_length 0 = derived from the mode: twice the sensor's native
+     * frame length (half its native rate), see native_vts(). */
+    uint32_t frame_length = 0, coarse_time = 2000, gain = 16;
     /* One frame. Every extra one queues another job behind a block that may
      * already be stuck, and when it is, the channel dies and only a reboot
      * brings the camera back -- so the cost of asking for more is paid by
@@ -945,6 +976,10 @@ int main(int argc, char **argv)
 
     if (syncpts_only) { syncpt_table(); return 0; }
     stock_open_W = W; stock_open_H = H;
+    if (!frame_length) frame_length = 2 * native_vts(W, H);
+    if (coarse_time >= frame_length) coarse_time = frame_length - 8;
+    printf("sensor timing: frame length %u lines (native %u), coarse %u, gain %u\n",
+           frame_length, native_vts(W, H), coarse_time, gain);
     if (ping_only) printf("=== viisp --ping: is the ISP-B channel taking work? (no sensor, no VI) ===\n");
     else printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
@@ -1805,7 +1840,7 @@ int main(int argc, char **argv)
             /* And the working configuration after the first frame, in
              * the place the capture puts it. */
             if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent) {
-                isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W);
+                isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W, OH);
                 real_sent = 1;
             }
 
@@ -1957,7 +1992,7 @@ int main(int argc, char **argv)
                      * coefficients, once, and never in the opening round. */
                     stock_open_submit(isp_fd, isp_sp, sp_mem, 15, warm_h, stats_h, stats_iova);
                     if (!real_sent) {
-                        isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W);
+                        isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W, OH);
                         real_sent = 1;
                     }
                 }

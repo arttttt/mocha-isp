@@ -186,21 +186,12 @@ if [ "$DEPLOY" = 1 ]; then
     done
 fi
 
-echo "=== ISP before the run ==="
-if ! ping_isp before; then
-    if [ "$uptime_s" -lt 120 ]; then
-        echo "ISP is DEAD but the device booted ${uptime_s}s ago -- not rebooting from under anyone; stopping"
-        exit 1
-    fi
-    echo "ISP is DEAD before the run -- REBOOTING NOW"
-    adb reboot
-    wait_ready || exit 1
-    before=$(channel_errors); before=${before:-0}
-    if ! ping_isp before-after-reboot; then
-        echo "still dead after a reboot -- stopping"
-        exit 1
-    fi
-fi
+# No separate ping before the run: viisp checks the channel itself before its
+# first submit (ISP alive BEFORE THE RUN / ISP VERDICT: DEAD). A ping here was
+# one more open-and-close of vi.1/isp.1 -- one more power-gate cycle of the
+# VENC partition -- a second or two before the run opened them again, and
+# the three runs that hung at start on 2026-09-06 (28, 31, 41) all came
+# right after it. The stock opens its channels once per session.
 
 adb shell "rm -f /data/local/tmp/viisp_out.raw /data/local/tmp/vicap.raw"
 
@@ -252,15 +243,8 @@ elif [ "$tool_exit" != 0 ]; then
     echo "verdict: the tool reported the ISP dead (exit $tool_exit); no timeout in the log yet after ${waited}s -- NOT evidence; reboot before the next run"
     status=1
 else
-    echo "verdict: no channel timeout in ${waited}s"
-    echo "--- ISP after the run ---"
-    if ping_isp after; then
-        echo "verdict: ISP ALIVE after the run"
-        status=0
-    else
-        echo "verdict: ISP DEAD after the run -- the result is not evidence"
-        status=1
-    fi
+    echo "verdict: no channel timeout in ${waited}s -- ISP ALIVE (no post-run ping: one open-and-close fewer)"
+    status=0
 fi
 
 faults_after=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')

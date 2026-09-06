@@ -1099,10 +1099,75 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     return rc;
 }
 
-void isp_stop(int isp_fd, uint32_t sp)
+/* Run-level verdict state: rounds in which the block never wrote, whether
+ * the stop was taken, and where the sequencing counter stood when the run
+ * began. */
+static int isp_nowrite = 0, isp_stop_acked = -1;
+static uint32_t isp_seq_base = 0;
+static int ping_only = 0, syncpts_only = 0;
+
+/* One job that does nothing but raise the sequencing counter. If the
+ * channel retires it, the ISP-B path -- host1x, the channel, the class --
+ * is taking work. If it does not, nothing else this tool could send would
+ * fare better. */
+int isp_ping(int isp_fd, uint32_t sp, int wait_ms)
 {
     uint32_t cmd_h = nvmap_create(4096);
-    if (!cmd_h || nvmap_alloc(cmd_h)) return;
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -2;
+    uint32_t g[2] = { OP_SETCLASS(ISP_CLASS_B), OP_IMM(0, sp) };
+    nvmap_rw(cmd_h, 0, g, sizeof g, 1);
+    struct nvhost_cmdbuf cb = { cmd_h, 0, 2 };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    uint32_t was = syncpt_read(sp);
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    int waited = 0;
+    if (rc == 0)
+        while (syncpt_read(sp) == was && waited < wait_ms) { usleep(2000); waited += 2; }
+    uint32_t now = syncpt_read(sp);
+    printf("ISP ping: submit rc=%d (%s), counter %u %u -> %u after %d ms: %s\n",
+           rc, rc == 0 ? "ok" : strerror(errno), sp, was, now, waited,
+           rc ? "NOT SUBMITTED" : now != was ? "retired" : "NEVER RETIRED");
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc ? -2 : now != was ? 0 : -1;
+}
+
+/* Dead or alive, before a run submits anything: a counter with increments
+ * still promised is a channel that already has a stuck job, and a ping
+ * that never retires is one that will not take another. Prints the
+ * verdict line; returns non-zero when dead. */
+int isp_alive_check(int isp_fd, uint32_t sp, const char *when)
+{
+    uint32_t mn = syncpt_read(sp), mx = syncpt_read_max(sp);
+    if (mx != mn) {
+        printf("ISP VERDICT: DEAD %s -- counter %u value %u promised %u:"
+               " %u job(s) owed by an earlier run; nothing submitted; reboot\n",
+               when, sp, mn, mx, mx - mn);
+        return 1;
+    }
+    if (isp_ping(isp_fd, sp, 500) != 0) {
+        printf("ISP VERDICT: DEAD %s -- the ping job never retired; reboot\n", when);
+        return 1;
+    }
+    printf("ISP alive %s: counter %u at %u, nothing owed, ping retired\n", when, sp, mn);
+    return 0;
+}
+
+int isp_stop(int isp_fd, uint32_t sp)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
     /* No 0x00C=0: the stock camera never writes a zero trigger, and a write
      * the hardware has no meaning for is one more thing to differ on. */
@@ -1149,6 +1214,7 @@ void isp_stop(int isp_fd, uint32_t sp)
            rc == 0 ? "ok" : strerror(errno), waited,
            syncpt_read(sp) == was ? " -- NEVER ACKNOWLEDGED" : "");
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return syncpt_read(sp) != was;
 }
 
 /* The per-frame gather, word for word as the stock camera sends it: output
@@ -1504,7 +1570,7 @@ static int stream_run(int isp_fd, int vi_fd, uint32_t base,
         }
     }
     printf("stream: %d of %d frames produced output\n", whole, n_frames);
-    isp_job_timeout_ms = 60000;
+    isp_job_timeout_ms = 10000;
     /* The last frame into outs[0], where the run's dump and readback look. */
     if (whole > 0 && ((whole - 1) & 1) && outs[1] != outs[0]
         && nvmap_rw(outs[1], 0, img, out_bytes, 0) == 0)
@@ -1628,6 +1694,9 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
         else if (strcmp(a, "--kernel-csi") == 0) kernel_csi = 1;
         else if (strcmp(a, "--no-x930") == 0) no_x930 = 1;
+        else if (strcmp(a, "--release-csib") == 0) release_csib = 1;
+        else if (strcmp(a, "--ping") == 0) ping_only = 1;
+        else if (strcmp(a, "--syncpts") == 0) syncpts_only = 1;
         else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
         else if (strncmp(a, "--x400-word=", 12) == 0) {
             x400_idx = atoi(a + 12);
@@ -1697,6 +1766,7 @@ int main(int argc, char **argv)
     uint32_t frame = stride * H;
     uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
 
+    if (syncpts_only) { syncpt_table(); return 0; }
     printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
 
@@ -1813,6 +1883,7 @@ int main(int argc, char **argv)
     uint32_t isp_base_mem = 0, isp_base_stats = 0, isp_base_loadv = 0;
     if (isp_fd < 0) {
         printf("open /dev/nvhost-isp.1: %s\n", strerror(errno));
+        if (ping_only) { printf("ISP VERDICT: DEAD BEFORE THE RUN -- the channel node did not open\n"); return 3; }
     } else {
         struct nvhost_set_nvmap_fd_args snf = { (uint32_t)nvmap_fd };
         ioctl(isp_fd, NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD, &snf);
@@ -1869,6 +1940,21 @@ int main(int argc, char **argv)
          * declaring them. Declared, 38 holds. --seq-sp still overrides,
          * for experiments. */
         if (seq_sp) isp_sp = seq_sp;
+
+        /* --ping: is the ISP-B channel alive? Counters first -- a job
+         * still owed from an earlier run is a dead channel and gets no
+         * more jobs stacked on it -- then one job that does nothing but
+         * raise the sequencing counter. The sensor is never touched. */
+        if (ping_only) {
+            syncpt_table();
+            int dead = isp_alive_check(isp_fd, isp_sp, "BEFORE THE RUN");
+            nvmap_unpin(buf_h);
+            ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
+            close(isp_fd);
+            close(vi_fd);
+            close(nvmap_fd);
+            return dead ? 3 : 0;
+        }
 
         /* And arm the other two conditions, which stock arms on every real
          * frame: 0x424 is condition four on 36, 0x525 is five on 37, 0x627
@@ -2027,6 +2113,13 @@ int main(int argc, char **argv)
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
+        /* A run on a channel that is already dead measures nothing, and
+         * one was scored as a result on 2026-09-06 (14:30): both warm-ups
+         * timed out, the stop was never acknowledged, the output held its
+         * fill -- and the frame was still discussed. So: no job goes in
+         * until the channel has shown it retires one. */
+        if (isp_alive_check(isp_fd, isp_sp, "BEFORE THE RUN")) return 3;
+        isp_seq_base = syncpt_read(isp_sp);
         if (work_h)
             isp_init(isp_fd, work_h, isp_sp, work_iova, stats_iova, geo);
         if (out_h) {
@@ -2139,11 +2232,14 @@ int main(int argc, char **argv)
      * It also corrects a wrong reading: the frame-start syncpoint counts
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
-    /* The kernel's vi2 path releases the CSIB pad (IO_DPD_REQ bit 1) for
-     * this port before every stream; the DPD2 bit 12 this tool had been
-     * releasing never cleared its status. Both are requested, the status
-     * is read back for each. */
-    pmc_dpd_release_reg(PMC_IO_DPD_REQ, PMC_DPD_BIT_CSIB);
+    /* Deep power down of the pads. The stock kernel's ardbeg_ov5693_power_on
+     * -- which the sensor open above already went through -- takes CSIE
+     * (DPD2 bit 12) out and leaves CSIA/CSIB in; its power_off puts CSIE
+     * back, which is why a fingerprint taken after a run shows bit 12 set
+     * again. So the request here is a repeat of the kernel's and the
+     * status read back is the check that it held; releasing CSIB as well
+     * is a departure from the stock kernel and stays behind a flag. */
+    if (release_csib) pmc_dpd_release_reg(PMC_IO_DPD_REQ, PMC_DPD_BIT_CSIB);
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
     if (emc_pin) emc_pin_high();
     car_enable_csi_clocks();
@@ -2771,6 +2867,7 @@ int main(int argc, char **argv)
                 /* A moment beyond the condition, because the last
                  * transfer may still be draining when it fires. */
                 if (!fast_arm) usleep(20000);
+                if (syncpt_read(sp_mem) == isp_base_mem) isp_nowrite++;
                 printf("  ISP wrote after %dms%s\n", w2,
                        syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
             }
@@ -2852,7 +2949,7 @@ int main(int argc, char **argv)
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
         }
-        if (isp_fd >= 0 && out_iova) isp_stop(isp_fd, isp_sp);
+        if (isp_fd >= 0 && out_iova) isp_stop_acked = isp_stop(isp_fd, isp_sp);
 
         /* Release whichever job is parked -- VI's on the memory path, the
          * ISP's on this one. Both wait on the same counter and neither can
@@ -3078,6 +3175,31 @@ shutdown:
     close(vi_fd);
     close(nvmap_fd);
     emc_unpin();
+    /* The line the wrapper reads. A job still owed on the sequencing
+     * counter, or a stop the block never took, is a dead channel: the
+     * kernel will print its timeout within isp_job_timeout_ms, and nothing
+     * this run produced is evidence of anything. */
+    int rc_final = 0;
+    if (isp_fd >= 0 && isp_sp) {
+        uint32_t mn = syncpt_read(isp_sp), mx = syncpt_read_max(isp_sp);
+        unsigned owed = mx - mn, done = mn - isp_seq_base;
+        if (owed == 0 && isp_stop_acked != 0) {
+            printf("ISP VERDICT: ALIVE -- counter %u: %u job(s) this run, all retired%s%s\n",
+                   isp_sp, done,
+                   isp_stop_acked > 0 ? ", stop acknowledged" : "",
+                   isp_nowrite ? " -- BUT the block produced no write in some round(s), see above" : "");
+        } else {
+            printf("ISP VERDICT: DEAD -- counter %u value %u promised %u: %u job(s) still owed%s;"
+                   " the kernel times the channel out within %d s;"
+                   " THIS RUN IS NOT EVIDENCE -- reboot before the next\n",
+                   isp_sp, mn, mx, owed,
+                   isp_stop_acked == 0 ? ", stop never acknowledged" : "",
+                   isp_job_timeout_ms / 1000 + 1);
+            rc_final = 3;
+        }
+        if (isp_nowrite)
+            printf("ISP NOTE: %d round(s) ended without the ISP's output write\n", isp_nowrite);
+    }
     printf("=== done ===\n");
-    return 0;
+    return rc_final;
 }

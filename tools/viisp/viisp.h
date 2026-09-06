@@ -134,6 +134,10 @@ struct nvhost_clk_rate_args { uint32_t rate, moduleid; };
     _IOWR(NVHOST_IOCTL_MAGIC, 9, struct nvhost_clk_rate_args)
 #define NVHOST_IOCTL_CTRL_SYNCPT_READ \
     _IOWR(NVHOST_IOCTL_MAGIC, 1, struct nvhost_ctrl_syncpt_read_args)
+/* The kernel's own count of increments it has been promised: max ahead of
+ * the hardware's value is a job still owed. */
+#define NVHOST_IOCTL_CTRL_SYNCPT_READ_MAX \
+    _IOWR(NVHOST_IOCTL_MAGIC, 8, struct nvhost_ctrl_syncpt_read_args)
 struct nvhost_ctrl_syncpt_incr_args { uint32_t id; };
 #define NVHOST_IOCTL_CTRL_SYNCPT_INCR \
     _IOW(NVHOST_IOCTL_MAGIC, 2, struct nvhost_ctrl_syncpt_incr_args)
@@ -343,6 +347,7 @@ static inline uint32_t work_word(uint32_t iova) { return work_word_set ? work_wo
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
 extern int isp_wait_ms, stream_n, isp_job_timeout_ms, shot_delay_ms, emc_pin;
+extern int release_csib;
 extern int no_emc_bw, no_set_emc, blc_tail, x400_idx, kernel_csi, no_x930;
 extern uint32_t x400_val;
 extern unsigned isp_emc_clk;
@@ -360,6 +365,8 @@ void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);
 int   pmc_dpd_release_reg(unsigned long req_off, uint32_t bit);
 uint32_t syncpt_read(uint32_t id);
+uint32_t syncpt_read_max(uint32_t id);
+void syncpt_table(void);
 void  vi_wr(uint32_t off, uint32_t val);
 int   vi_flush(const char *what);
 uint32_t vi_rd(uint32_t off);

@@ -33,9 +33,15 @@ int no_emc_bw, no_set_emc;          /* --no-emc-bw / --no-set-emc: leave one EMC
 int x400_idx = -1; uint32_t x400_val;  /* --x400-word=IDX,HEX */
 int no_x930;                        /* --no-x930: leave the 0x930 window words out of the opening */
 int kernel_csi;                     /* --kernel-csi: the kernel's port-B bring-up/teardown registers on top of ours */
+int release_csib;                   /* --release-csib: take the CSIB pad out of deep power down too (the stock kernel leaves it in) */
 int blc_tail = -1;                  /* --blc-tail=HEX: low halves of 0x400 words 9/11 (stock 0x3f) */
 int shot_delay_ms = 20;             /* --shot-delay=MS: --stream waits this long after output-done before the next shot; 20 lands every shot in the blanking at 15 fps (measured: 1 shot, 66 ms, parser 0 per frame) */
-int isp_job_timeout_ms = 60000;     /* host1x timeout of the ISP frame job; stream_run lowers it */
+/* Ten seconds, not sixty: a single-capture job parks on the output
+ * condition, which is at most a few frame periods away, and a job that is
+ * still owed when the tool exits should be timed out -- and show up in the
+ * log -- while the run's verdict is still being read, not a minute later
+ * under "channel survived". */
+int isp_job_timeout_ms = 10000;     /* host1x timeout of the ISP frame job; stream_run lowers it */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
 int stream_n;                       /* --stream=N: N frames by the stock's protocol instead of single shots */
 unsigned isp_emc_clk = 81600;       /* --isp-emc-clk: the isp_clk (kHz) in the ISP SET_EMC ioctl; the stock's 81600 -> 162 MB/s ISO */
@@ -328,6 +334,41 @@ uint32_t syncpt_read(uint32_t id)
     ioctl(fd, NVHOST_IOCTL_CTRL_SYNCPT_READ, &r);
     close(fd);
     return r.value;
+}
+
+/* What the kernel has promised on the counter. Every submit declares its
+ * increments and the kernel advances this by them at once; the hardware's
+ * value catches up when the job actually retires. The difference is the
+ * number of jobs still owed -- the one fact that says whether the channel
+ * is alive without waiting for its timeout to print. */
+uint32_t syncpt_read_max(uint32_t id)
+{
+    struct nvhost_ctrl_syncpt_read_args r = { id, 0 };
+    int fd = open("/dev/nvhost-ctrl", O_RDWR);
+    if (fd < 0) return 0;
+    if (ioctl(fd, NVHOST_IOCTL_CTRL_SYNCPT_READ_MAX, &r) < 0) r.value = syncpt_read(id);
+    close(fd);
+    return r.value;
+}
+
+/* The camera-path counters, value and promise side by side. Passive: only
+ * the control node is touched, no channel is opened and nothing is
+ * submitted, so it belongs in a fingerprint. */
+void syncpt_table(void)
+{
+    static const struct { uint32_t id; const char *name; } t[] = {
+        { 36, "ispb_memory" }, { 37, "ispb_stats" }, { 38, "ispb_stream" },
+        { 39, "ispb_loadv" }, { 40, "vi_frame" }, { 41, "vi_mw" },
+        { 42, "vi_cmd" }, { 46, "vi1_ispb" }, { 47, "vi1_stream" },
+        { 49, "vi1_flash" },
+    };
+    printf("syncpoints value/promised:");
+    for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+        uint32_t mn = syncpt_read(t[i].id), mx = syncpt_read_max(t[i].id);
+        printf(" %u %s %u/%u%s", t[i].id, t[i].name, mn, mx,
+               mx != mn ? " OWED" : "");
+    }
+    printf("\n");
 }
 
 int vi_flush(const char *what)

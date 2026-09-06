@@ -61,15 +61,6 @@ int mem_rd(unsigned long addr, uint32_t *out)
     return 0;
 }
 
-/* Memory bandwidth. On a fresh boot EMC sits at the DVFS floor (PLLP/2,
- * ~204 MHz) and the ISP starves on it: noise-like output, writes that land
- * late, memory faults after unmap. The stock camera's session lifts EMC
- * onto PLLM and it stays there a while, which is the whole of "it works
- * after the stock camera". The one knob that moves EMC here is the CPU
- * governor -- cpu.emc follows the CPU rate -- so the run pins it to
- * performance and puts the old governor back at exit. */
-#define CPU0_GOVERNOR "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
-
 void car_enable_csi_clocks(void)
 {
     uint32_t b1 = 0, b2 = 0, b3 = 0;

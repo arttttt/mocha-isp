@@ -61,37 +61,6 @@ int mem_rd(unsigned long addr, uint32_t *out)
     return 0;
 }
 
-void car_enable_csi_clocks(void)
-{
-    uint32_t b1 = 0, b2 = 0, b3 = 0;
-    /* csi and cile for the receiver; mipi-cal and clk72mhz for the
-     * calibration block, which cannot finish without them -- it reported
-     * "not done" while both of those were switched off. */
-    /* VI itself, which we had never switched on: its clock reads off in
-     * the L group. Registers answer regardless, because nvhost powers the
-     * module for the length of an ioctl -- but the parser and the write
-     * engine need the clock to actually run. */
-    mem_wr(CAR_BASE + CAR_ENB_SET_L, CAR_VI_BIT_L, 0);
-    mem_wr(CAR_BASE + CAR_RST_CLR_L, CAR_VI_BIT_L, 0);
-
-    mem_wr(CAR_BASE + CAR_ENB_SET_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, &b1);
-    /* CILE and the C/D/E brick's shared clock CILCD: the 24.1 driver notes
-     * that CSI-E through CILE needs both, and during the stock's stream
-     * both bits (W 17 and 18) are on where we had only 18. */
-    mem_wr(CAR_BASE + CAR_ENB_SET_W, CAR_CILE_BIT_W | CAR_CILCD_BIT_W, &b2);
-    mem_wr(CAR_BASE + CAR_ENB_SET_X, CAR_CLK72M_BIT_X, &b3);
-
-    /* Enabling a clock is only half of what the kernel's helper does: it
-     * also takes the block out of reset. A module left in reset accepts
-     * register writes and does nothing, without complaining -- which is
-     * what a calibration that starts and never finishes looks like. */
-    mem_wr(CAR_BASE + CAR_RST_CLR_H, CAR_CSI_BIT_H | CAR_MIPICAL_BIT_H, 0);
-    mem_wr(CAR_BASE + CAR_RST_CLR_W, CAR_CILE_BIT_W | CAR_CILCD_BIT_W, 0);
-
-    printf("  receiver clocks on and out of reset: H 0x%08x, W 0x%08x, X 0x%08x\n",
-           b1, b2, b3);
-}
-
 /* Read-modify-write, because most of the sequence touches one bit of a
  * register whose other fields carry production trim we must not lose. */
 void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
@@ -104,6 +73,13 @@ void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
 void mipi_calibrate_csie(void)
 {
     uint32_t st = 0;
+    /* The stock opens /dev/mipi-cal for its calibration: in this kernel
+     * that node's open enables the mipi-cal and clk72mhz clocks and its
+     * release disables them (arch/arm/mach-tegra/mipi-cal.c). So the
+     * clocks come and go with the kernel's own counts, instead of being
+     * switched on in the clock controller by hand and left there. */
+    int cal_fd = open("/dev/mipi-cal", O_RDWR);
+    if (cal_fd < 0) printf("  /dev/mipi-cal: %s -- calibrating without its clocks\n", strerror(errno));
     /* 1. Override the block's own clock gating. */
     mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
 
@@ -181,6 +157,7 @@ void mipi_calibrate_csie(void)
     mipi_upd(MIPI_CAL_DSIB_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
     mipi_upd(MIPI_CAL_CILC_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
     mipi_upd(MIPI_CAL_CILD_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
+    if (cal_fd >= 0) close(cal_fd);
 }
 
 int pmc_dpd_release_reg(unsigned long req_off, uint32_t bit);

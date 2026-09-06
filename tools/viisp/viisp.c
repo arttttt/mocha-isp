@@ -985,7 +985,14 @@ int main(int argc, char **argv)
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
 
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
-    vi_fd = open("/dev/nvhost-vi", O_RDWR);
+    /* The kernel keeps two VI modules on the one aperture: vi (port A:
+     * clocks vi, csi, cilab) and vi.1 (port B: vi, csi, cilcd, cile), both
+     * in the VENC power partition, gated 500 ms after the last use. The
+     * stock opens vi.1 for this sensor, and the kernel then owns every
+     * clock the port needs. Opening vi instead is what made this tool
+     * switch cilcd/cile on through the clock controller by hand -- and
+     * leave them on for the kernel to gate the partition underneath. */
+    vi_fd = open("/dev/nvhost-vi.1", O_RDWR);
     if (nvmap_fd < 0 || vi_fd < 0) {
         printf("open failed: nvmap=%d vi=%d\n", nvmap_fd, vi_fd);
         return 1;
@@ -1434,8 +1441,9 @@ int main(int argc, char **argv)
      * again. So the request here is a repeat of the kernel's and the
      * status read back is the check that it held; releasing CSIB as well
      * is a departure from the stock kernel and stays behind a flag. */
-    pmc_dpd_release(PMC_DPD_BIT_CSIE);
-    car_enable_csi_clocks();
+    /* No clock-controller or PMC writes from here: the sensor open above
+     * took the CSI-E pad out of deep power down in the kernel's own
+     * power-on, and the port's clocks belong to the vi.1 module. */
 
     /* The driver writes this the moment VI comes up and we never wrote it at
      * all. It governs VI's internal clock gating, so with it unset the

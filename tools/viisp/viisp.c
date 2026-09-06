@@ -659,9 +659,16 @@ static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t sp_cmd,
     uint32_t g[12];
     unsigned n = 0;
     g[n++] = OP_SETCLASS(VI_CLASS_ID);
-    g[n++] = OP_NONINCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1); g[n++] = 1;
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0fu << 8) | sp_fe;
+    /* Arms BEFORE the shot. The 24.1 driver's working single-shot path
+     * (t124_capture.c: arm_frame_start, then SINGLE_SHOT) and this tool's
+     * register path both arm first; with the arms after the shot -- the
+     * stock's order -- our single shots produced a frame end and never a
+     * frame start (2026-09-07 00:05, 00:24: 46 +3, 49 +0). The stock gets
+     * away with it because it shoots continuously and an arm written after
+     * one shot is in place for the next; a lone shot has no next. */
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0au << 8) | sp_fs;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0fu << 8) | sp_fe;
+    g[n++] = OP_NONINCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1); g[n++] = 1;
     unsigned n0 = n;
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = sp_cmd;
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
@@ -2041,26 +2048,13 @@ int main(int argc, char **argv)
                  * waits for the ISP job just sent and fires the single-shot
                  * with the frame-end and frame-start arms declared. */
                 /* The ISP job this shot feeds has executed (38 reached its
-                 * fence, waited for above). Now the phase: the stock's shot
-                 * leaves within ~200 us of the previous frame's end -- its
-                 * park on 46 releases, the ISP round goes in, the shot
-                 * follows -- so it always lands in the blanking and the
-                 * capture begins at the next frame start. Ours left at
-                 * whatever phase our waits ended in, and the gathers of
-                 * 2026-09-07 00:05 each produced a frame end (46 +3) and
-                 * never a frame start (49 +0): captures begun mid-frame.
-                 * So: arm one frame end, wait for it, shoot at once. No
-                 * parser command word per shot -- the stock writes it once,
-                 * in its session config. */
-                {
-                    uint32_t fe = syncpt_read(VI1_ISPB_SYNCPT);
-                    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
-                    vi_flush(0);
-                    int wfe = 0;
-                    while (syncpt_read(VI1_ISPB_SYNCPT) == fe && wfe < 300) { usleep(500); wfe++; }
-                    if (syncpt_read(VI1_ISPB_SYNCPT) == fe)
-                        printf("  no frame end seen in 150 ms before the shot\n");
-                }
+                 * fence, waited for above). Shoot: arms then single-shot in
+                 * one gather, the way the 24.1 driver does it register by
+                 * register. No frame-end pre-arm: the frame-end condition
+                 * fires only for a captured frame, so without a capture in
+                 * flight it never comes (00:24: none seen in 150 ms, three
+                 * times). No parser command word per shot: written once at
+                 * the bring-up, as the stock and the 24.1 driver do. */
                 vi_shot_gather(vi_fd, base, sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
 

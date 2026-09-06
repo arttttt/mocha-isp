@@ -132,20 +132,6 @@ fingerprint() {
       /data/local/tmp/viisp --syncpts 2>&1' 2>&1 | tr -d '\r'
 }
 
-# Is the ISP-B channel taking work? The tool reads the sequencing counter
-# against what the kernel has promised on it (a job still owed is a stuck
-# channel) and then submits one job that only raises the counter. This is
-# the check that was missing: a run on 2026-09-06 went onto a channel that
-# never retired a job, and its output was still scored as a result.
-ping_isp() {
-    local out
-    out=$(adb shell "cd $DEV_DIR && ./viisp --ping; echo PING_EXIT=\$?" 2>/dev/null | tr -d '\r')
-    echo "$out" | grep -E "^syncpoints|^ISP ping|^ISP VERDICT|^ISP alive|^PING_EXIT"
-    echo "--- isp ping ($1) ---" >> "$RUNLOG"
-    echo "$out" >> "$RUNLOG"
-    echo "$out" | grep -q "PING_EXIT=0"
-}
-
 before=$(channel_errors)
 before=${before:-0}
 

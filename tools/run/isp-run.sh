@@ -102,20 +102,14 @@ RUNLOG="$ROOT/build/runs/$STAMP.log"
 echo "=== $STAMP: $BIN ${ARGS[*]:-} ===" > "$RUNLOG"
 
 fingerprint() {
+    # Only what needs no hardware access of its own: sysfs and the syncpoint
+    # counters through nvhost-ctrl. Every read through /dev/mem (CAR, PMC,
+    # MIPI_CAL) and the VI aperture dump are gone: three runs on 2026-09-06
+    # (28, 31, 41) hung at start right after this stage, and the stock never
+    # reads hardware from userspace outside its own channels.
     echo "--- fingerprint ($1) ---"
     adb shell 'echo "uptime $(cut -d" " -f1 /proc/uptime) emc_rate $(cat /sys/kernel/tegra_emc/emc_rate) gov $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)";
-      /data/local/tmp/viisp --syncpts 2>&1;
-      sh /data/local/tmp/carsample.sh 2>&1;
-      echo "PMC IO_DPD_REQ/STATUS DPD2_REQ/STATUS PWRGATE_STATUS:";
-      for a in 0x7000E5B8 0x7000E5BC 0x7000E5C0 0x7000E5C4 0x7000E438; do /data/local/tmp/memprobe --addr=$a --count=1 2>&1 | grep "+0x" | tr -d "\n"; echo -n " "; done; echo;
-      # No MIPI_CAL reads here: the block's clock is the kernel's now (on only
-      # while /dev/mipi-cal is open) and a read of an unclocked block hangs the bus.
-      # No VI aperture dump: reading it through /dev/nvhost-vi powers only the
-      # port-A clocks (vi, csi, cilab); the CIL C/D/E registers sit behind cilcd
-      # and cile, which belong to vi.1 and are off between sessions, and a read
-      # of an unclocked block hangs the bus (the archives of runs 28 and 31 end
-      # in the middle of this line). The VI state is in viisp'"'"'s own log.
-      echo' 2>&1 | tr -d '\r'
+      /data/local/tmp/viisp --syncpts 2>&1' 2>&1 | tr -d '\r'
 }
 
 # Is the ISP-B channel taking work? The tool reads the sequencing counter

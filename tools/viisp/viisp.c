@@ -641,6 +641,69 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
  * trigger (impl-2, stock-steady-cycle-720p.md §1, §8). This is the cal
  * round, verbatim; the frame gather is isp_frame with everything else
  * left out. */
+/* The stock's per-frame VI gather, in its form (impl-2, stock-720p-frame-path
+ * §3, 68 words at 60848745): the DVFS word, the state update, the port-B
+ * image block with its routing cleared, the pattern generator cleared, the
+ * ISP interface, the parser words, brick E on, its pads, then a host1x wait
+ * on the ISP channel's counter for the job just sent, the image block again
+ * with the routing set, the pads again, the single-shot, and the two arms
+ * (frame end onto 46, frame start onto 49) -- one gather on vi.1, sequenced
+ * on its command counter 47, all three declared as the stock declares them.
+ * We had been poking the same registers one by one from the CPU. */
+static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
+                          uint32_t size_word, uint32_t wc_word, uint32_t dt,
+                          uint32_t wait_sp, uint32_t wait_thr, uint32_t sp_cmd,
+                          uint32_t sp_fe, uint32_t sp_fs)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+    uint32_t g[96];
+    unsigned n = 0;
+    g[n++] = OP_SETCLASS(VI_CLASS_ID);
+    g[n++] = OP_INCR(VI_METHOD(0x0F0), 1); g[n++] = 0x10100010;
+    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT_STATE_UPDATE), 1); g[n++] = 1;
+    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 6);
+    g[n++] = 0; g[n++] = 0x001c984c; g[n++] = 0; g[n++] = size_word; g[n++] = wc_word; g[n++] = dt;
+    g[n++] = OP_INCR(VI_METHOD(0xA9C), 9);
+    for (int i = 0; i < 9; i++) g[n++] = 0;
+    g[n++] = OP_INCR(VI_METHOD(0x264), 1); g[n++] = 3;
+    g[n++] = OP_INCR(VI_METHOD(0x86C), 6);
+    g[n++] = 0x007f0014; g[n++] = 0x080301f1; g[n++] = 0; g[n++] = 0x00140000; g[n++] = 0x0000f005; g[n++] = 0;
+    g[n++] = OP_INCR(VI_METHOD(0x908), 1); g[n++] = 0x10000000;
+    g[n++] = OP_INCR(VI_METHOD(0xA08), 3); g[n++] = 0; g[n++] = 0; g[n++] = 9;
+    g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+    g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1); g[n++] = (wait_sp << 24) | (wait_thr & 0xFFFFFF);
+    g[n++] = OP_SETCLASS(VI_CLASS_ID);
+    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 6);
+    g[n++] = image_def; g[n++] = 0x001c984c; g[n++] = 0; g[n++] = size_word; g[n++] = wc_word; g[n++] = dt;
+    g[n++] = OP_INCR(VI_METHOD(0xA08), 3); g[n++] = 0; g[n++] = 0; g[n++] = 9;
+    g[n++] = OP_NONINCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1); g[n++] = 1;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0fu << 8) | sp_fe;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0au << 8) | sp_fs;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = sp_cmd;
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("vi-shot", g, n);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si[3] = { { sp_fe, 1 }, { sp_fs, 1 }, { sp_cmd, 1 } };
+    uint32_t cls = VI_CLASS_ID;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 3;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    if (rc) printf("  VI shot gather: rc=%d (%s)\n", rc, strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 static int isp_cal_round(int isp_fd, uint32_t sp)
 {
     static const uint32_t cal[25] = {
@@ -909,7 +972,13 @@ int main(int argc, char **argv)
      * hand, every time. Two is the ceiling; anything larger is clamped. */
     int shots = 1;
     const int settle = 200;
-    const uint32_t isp_clk = 384000000;
+    /* The ISP clock as the stock asks for it: SET_CLK_RATE moduleid 0xb
+     * on isp.1 at 81.6 MHz (stock_front_camera_open_full.txt:9220; 0xb
+     * matches no clock entry, so the kernel takes clock 0, "isp"). We had
+     * asked for 384 MHz and were granted 600: seven times the stock's
+     * write burst rate against a latency allowance computed for 81.6 MHz,
+     * and at 1080/2592 the output write fell behind the frame. */
+    const uint32_t isp_clk = 81600000;
     /* The ISP output: one packed RGB plane by default, no colour config,
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
@@ -1833,7 +1902,8 @@ int main(int argc, char **argv)
         for (int shot = 0; shot < shots; shot++) {
             int started = 0, waited = 0;
 
-            uint32_t fs0 = syncpt_read(sp_id);
+            uint32_t fs_sp = no_isp ? sp_id : VI1_FLASH_SYNCPT;
+            uint32_t fs0 = syncpt_read(fs_sp);
             /* The ISP channel's own counter (38): every job of ours ends
              * with an immediate increment on it, so it tells whether the
              * job has actually executed -- config loaded, trigger 0x05
@@ -1923,51 +1993,60 @@ int main(int argc, char **argv)
                 if (wj >= 500)
                     printf("  ISP job not executed within 500 ms (38 unchanged)\n");
             }
-            vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
-            vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
-            vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
-            if (!cile_rewritten) {
-                /* The stock re-writes the CILE pads right before its
-                 * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
-                 * THS 9) and never again -- the later per-frame VI
-                 * gathers carry only the wait and the shot. After the
-                 * failed first run of every boot this pad register read
-                 * 0x00200001 where the bring-up had written 0; after a
-                 * working run, 0. Something between the sensor start
-                 * and the shot rewrites it, and this writes it back.
-                 * Once only: doing it before every shot, on a lane
-                 * already in HS, broke every frame after the first
-                 * (parser 0x1b4). */
-                printf("  CILE pad0 before the first shot: 0x%08x\n",
-                       vi_rd(T124_CILE_PAD_CONFIG0));
-                vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
-                vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
-                vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
-                cile_rewritten = 1;
+            if (no_isp) {
+                vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
+                vi_wr(base + VI_CSI_SURFACE0_OFFSET_LSB, iova);
+                vi_wr(base + VI_CSI_SURFACE0_STRIDE, stride);
+                if (!cile_rewritten) {
+                    /* The stock re-writes the CILE pads right before its
+                     * FIRST single-shot (VI gather 0x282/3: pad0 0, pad1 0,
+                     * THS 9) and never again -- the later per-frame VI
+                     * gathers carry only the wait and the shot. After the
+                     * failed first run of every boot this pad register read
+                     * 0x00200001 where the bring-up had written 0; after a
+                     * working run, 0. Something between the sensor start
+                     * and the shot rewrites it, and this writes it back.
+                     * Once only: doing it before every shot, on a lane
+                     * already in HS, broke every frame after the first
+                     * (parser 0x1b4). */
+                    printf("  CILE pad0 before the first shot: 0x%08x\n",
+                           vi_rd(T124_CILE_PAD_CONFIG0));
+                    vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
+                    vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
+                    vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+                    cile_rewritten = 1;
+                }
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
+                /* --no-isp: the frame goes to memory, and the write's completion
+                 * is the memory-write-ack condition of port B on the channel's
+                 * second syncpoint -- armed here, one arm per shot, the way the
+                 * stock's done-thread arms it. It used to be waited on without
+                 * ever being armed. */
+                if (no_isp)
+                    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+                /* Frame end of port B onto 46, every shot: whether the parser
+                 * reaches the end of a frame at all is the receiver-side fact
+                 * the run's summary reports. */
+                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
+                vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
+                vi_flush(0);
+            } else {
+                /* The ISP path shoots the stock's way: one VI gather that
+                 * waits for the ISP job just sent and fires the single-shot
+                 * with the frame-end and frame-start arms declared. */
+                vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
+                               isp_sp, syncpt_read_max(isp_sp), sp_cmd,
+                               VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
-            vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                      CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_PPB_FRAME_START << 8 | sp_id);
-            /* --no-isp: the frame goes to memory, and the write's completion
-             * is the memory-write-ack condition of port B on the channel's
-             * second syncpoint -- armed here, one arm per shot, the way the
-             * stock's done-thread arms it. It used to be waited on without
-             * ever being armed. */
-            if (no_isp)
-                vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
-            /* Frame end of port B onto 46, every shot: whether the parser
-             * reaches the end of a frame at all is the receiver-side fact
-             * the run's summary reports. */
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
-            vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
-            vi_flush(0);
 
             waited = 0;
-            while (syncpt_read(sp_id) == fs0 && waited < 400) {
+            while (syncpt_read(fs_sp) == fs0 && waited < 400) {
                 usleep(1000);
                 waited++;
             }
-            started = syncpt_read(sp_id) != fs0;
+            started = syncpt_read(fs_sp) != fs0;
 
             /* Release the ISP's parked job as soon as the block says it
              * has written, and give up after a bounded wait either way.

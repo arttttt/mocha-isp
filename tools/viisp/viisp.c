@@ -254,6 +254,8 @@ struct isp_emc_info {
  * These carry the stock camera's geometry, so they belong with its
  * resolution and not with a smaller one.
  */
+static double sensor_out_scale(unsigned W, unsigned H);
+
 int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova,
                   unsigned W, unsigned H)
 {
@@ -267,6 +269,11 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
      * set (impl-2, pp-status-bits.md: stock_front_720p_full.txt:8823);
      * until 2026-09-06 every 720p run of ours carried the 2592 words. */
     int w720 = (W == 1280);
+    /* The two rasters the stock was measured at. Any other size starts
+     * from the 2592 tables and gets every word we have a formula for
+     * recomputed below; what has no formula yet (0x400 words 8/10/11, the
+     * 0xd0b mesh) stays the 2592 value and is named in the log. */
+    int measured = w720 || W == 2592;
     const struct { uint16_t m; uint16_t n; uint8_t noninc;
                    const uint32_t *d; } blk[] = {
         { 0x400, 12, 0, w720 ? isp_real_400_720 : isp_real_400 },
@@ -320,6 +327,35 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
             g[first + 4] = g[first + 6] = (uint32_t)((k << 2) / (3ull * W)) & ~0xfu;
             g[first + 5] = (uint32_t)((k << 1) / (3ull * W)) & ~0xfu;
             g[first + 7] = ((W / 2) << 16) | (W / 4);
+            /* Word 8 is the vertical pitch: (H43/2)<<16 | H43/4 with H43
+             * the 4:3-equivalent height of the raster (impl-2,
+             * isp-words-1080p.md). Exact at 2592 (972/486); the 720p
+             * table has 478/238 where this gives 480/240, so the measured
+             * sets keep their own word. */
+            if (!measured) {
+                unsigned h43 = W * 3 / 4;
+                g[first + 8] = ((h43 / 2) << 16) | (h43 / 4);
+            }
+        }
+        /* The tile engine's geometry. Word 0 is the tile height in rows:
+         * the raster height over the smallest power of two that brings it
+         * to 128 rows or fewer -- 720/8 = 90 and 1944/16 = 121, the two
+         * measured sets, and the blob computes it as a log2 capped at 7
+         * (impl-2, isp-tile-geometry-formulas.md). Sending the 2592
+         * value at 1920x1080 put a 121-row grid on a 1080-row raster and
+         * showed as a band of +3 luma over rows 363-484, the fourth tile
+         * (runs 012915, 013144). Word 2 has the raster width in its low
+         * half; its high half is the sensor's active array width in
+         * output pixels over ten (2592 -> 259, binned 1296 -> 130), which
+         * for a scaled mode is a derivation, not a measurement. */
+        if (blk[b].m == 0xc00 && !measured) {
+            unsigned rows = H, div = 1;
+            while (rows > 128) { div <<= 1; rows = H / div; }
+            unsigned arr = (unsigned)(2592.0 * sensor_out_scale(W, H) + 0.5);
+            g[first + 0] = (rows << 8) | 0x01;
+            g[first + 2] = (((arr + 5) / 10) << 16) | W;
+            printf("  0xc00 by formula: tile %u rows (H/%u), width %u, array/10 %u\n",
+                   rows, div, W, (arr + 5) / 10);
         }
 
         /* White balance. In 0x700 the stock camera moves exactly two words
@@ -356,8 +392,10 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
     sa.fences = (uint32_t)(uintptr_t)&fence;
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("stock's working configuration (%s geometry words, stats at %s): %u words, rc=%d (%s)\n",
-           w720 ? "720p" : "2592", stats_iova ? "ours" : "the stock's 0x85001000",
+    printf("stock's working configuration (%s, stats at %s): %u words, rc=%d (%s)\n",
+           w720 ? "720p geometry words" : measured ? "2592 geometry words"
+           : "2592 tables; 0x800/0x820/0xc00/0xd00 by formula; 0x400 words 8/10/11 and the mesh still 2592's",
+           stats_iova ? "ours" : "the stock's 0x85001000",
            n, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
@@ -904,6 +942,19 @@ static uint32_t native_vts(unsigned W, unsigned H)
 {
     if (W == 1280 && H == 720) return 760;
     return 1984;
+}
+
+/* How many output pixels the sensor makes of one array pixel in each mode,
+ * from the same mode tables (registers 0x3800-0x380b, 0x3808/0x3809):
+ * 2592x1944 is the array cropped, one to one; 1280x720 is binned two by two
+ * (window 2624 wide -> 1312, cropped to 1280); 1920x1080 is the 2624-wide
+ * window scaled to 1920 with no binning; 1296x972 is binned like 720p. */
+static double sensor_out_scale(unsigned W, unsigned H)
+{
+    if (W == 1280 && H == 720) return 0.5;
+    if (W == 1296 && H == 972) return 0.5;
+    if (W == 1920 && H == 1080) return 1920.0 / 2624.0;
+    return 1.0;
 }
 
 static void sensor_start_front(int sfd, unsigned W, unsigned H,

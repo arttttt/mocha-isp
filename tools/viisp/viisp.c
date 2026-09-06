@@ -1266,15 +1266,22 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
         g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
         g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
         g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
-        /* No wait on the statistics counter (37). It stays armed, as the
-         * stock arms it, but the stock's frame job waits on nothing at all
-         * and the 24.1 driver waits on the output counter only; a scene
-         * that leaves the statistics condition unmet -- a black room did --
-         * must not park the job until the channel dies. The output counter
-         * is all the buffer rotation needs. */
-        (void)park_stats;
+        /* The statistics counter (37): the stream does not park on it -- a
+         * black scene left it unmet once and the parked job took the
+         * channel down -- because a flush job follows every stream frame.
+         * The single capture is different: the stop job (0x015 = 0) comes
+         * right behind it, and with the job retired at the output counter
+         * alone the stop lands while the ISP is still writing chroma and
+         * statistics: half-empty buffers, a memory fault at exit, garbage.
+         * So the single capture keeps the stats wait (hold_sp != 0). */
+        if (sp_stats && hold_sp) {
+            uint32_t want_stats = park_stats ? park_stats : syncpt_read(sp_stats) + 1 + hold_at;
+            g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+            g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+            g[n++] = (sp_stats << 24) | (want_stats & 0xFFFFFF);
+        }
     }
-    (void)hold_sp; (void)hold_at;
+    (void)hold_at;
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
     free(g);
@@ -2622,7 +2629,7 @@ int main(int argc, char **argv)
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
-                          sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0, 0, 0,
+                          sp_mem, sp_stats, sp_loadv, isp_sp, 1, 0, 0, 0,
                           work_iova, per_frame_cal);
             }
 

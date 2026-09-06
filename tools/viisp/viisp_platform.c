@@ -365,8 +365,11 @@ void syncpt_table(void)
     printf("syncpoints value/promised:");
     for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
         uint32_t mn = syncpt_read(t[i].id), mx = syncpt_read_max(t[i].id);
+        /* Promised ahead of the value: a job still owed. Value ahead of
+         * the promise: the hardware raised a condition nobody declared
+         * (the armed-but-undeclared 36/37/39 do this on every frame). */
         printf(" %u %s %u/%u%s", t[i].id, t[i].name, mn, mx,
-               mx != mn ? " OWED" : "");
+               (int)(mx - mn) > 0 ? " OWED" : mx != mn ? " ahead" : "");
     }
     printf("\n");
 }

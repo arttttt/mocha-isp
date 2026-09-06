@@ -1947,7 +1947,7 @@ int main(int argc, char **argv)
          * raise the sequencing counter. The sensor is never touched. */
         if (ping_only) {
             syncpt_table();
-            int dead = isp_alive_check(isp_fd, isp_sp, "BEFORE THE RUN");
+            int dead = isp_alive_check(isp_fd, isp_sp, "AT PING");
             nvmap_unpin(buf_h);
             ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
             close(isp_fd);

@@ -1104,7 +1104,12 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
  * began. */
 static int isp_nowrite = 0, isp_stop_acked = -1;
 static uint32_t isp_seq_base = 0;
-static int ping_only = 0, syncpts_only = 0, stock_zero = 3;
+/* Off by default: with both halves in, the ISP wrote nothing at 720p
+ * (2026-09-06, twice: 15:10 and 15:13, parser 0x30/0xb4, first warm-up
+ * never written), while either half alone changed nothing visible. The
+ * stock writes these zeros before its sensor streams; we write them with
+ * the wire already live, which is not the same experiment. */
+static int ping_only = 0, syncpts_only = 0, stock_zero = 0;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --

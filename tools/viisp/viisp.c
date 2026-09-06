@@ -1900,6 +1900,17 @@ int main(int argc, char **argv)
              * job has actually executed -- config loaded, trigger 0x05
              * given -- as opposed to merely being queued. */
             uint32_t isp_fence0 = isp_fd >= 0 ? syncpt_read(isp_sp) : 0;
+            /* The fence of the ISP job this shot feeds -- the capture or the
+             * frame job itself, read right after its submit and before any
+             * job queued behind it. The VI shot waits for exactly this, as
+             * the stock's does (38 = 112 for its frame, 113 for the tick
+             * behind it). Waiting for the counter's promised value instead
+             * included the flush job behind a frame that parks on its own
+             * output: the flush cannot run until the frame is done, the
+             * frame needs the shot, the shot waits for the flush -- the
+             * VI channel sat on "waiting on syncpt 38 val 29" until its
+             * timeout (2026-09-07 00:02). */
+            uint32_t shot_fence = 0;
 
             /* Wiping is a diagnostic, not part of a capture: it is ten
              * megabytes through a hundred and fifty ioctls, it runs
@@ -1951,6 +1962,7 @@ int main(int argc, char **argv)
                 }
                 stock_open_submit(isp_fd, isp_sp, sp_mem, warm_left == 2 ? 11 : 14,
                                   warm_h, stats_h, stats_iova);
+                shot_fence = syncpt_read_max(isp_sp);
             }
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
@@ -1958,6 +1970,7 @@ int main(int argc, char **argv)
                 isp_cal_round(isp_fd, isp_sp);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                           sp_mem, sp_stats, sp_loadv, isp_sp);
+                shot_fence = syncpt_read_max(isp_sp);
                 /* And the same flush job the stream queues behind its last
                  * frame: the frame's output lands only with a job behind it,
                  * and the stop job must not be that job -- it disabled the
@@ -2033,8 +2046,8 @@ int main(int argc, char **argv)
                 vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                           CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
                 vi_flush(0);
-                vi_shot_gather(vi_fd, base, isp_sp, syncpt_read_max(isp_sp), sp_cmd,
-                               VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
+                vi_shot_gather(vi_fd, base, isp_sp, shot_fence ? shot_fence : syncpt_read(isp_sp),
+                               sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
 
             waited = 0;

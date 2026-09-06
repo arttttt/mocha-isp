@@ -2089,6 +2089,10 @@ int main(int argc, char **argv)
                 isp_base_stats = syncpt_read(sp_stats);
                 uint32_t fe_k = syncpt_read(VI1_ISPB_SYNCPT);
                 uint32_t fs_k = syncpt_read(VI1_FLASH_SYNCPT);
+                struct timespec ts0, ts;
+                clock_gettime(CLOCK_MONOTONIC, &ts0);
+                #define MS_SINCE(t0) ({ clock_gettime(CLOCK_MONOTONIC, &ts);                \
+                    (int)((ts.tv_sec - (t0).tv_sec) * 1000 + (ts.tv_nsec - (t0).tv_nsec) / 1000000); })
                 for (int k = 0; k < shots; k++) {
                     isp_cal_round(isp_fd, isp_sp);
                     isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
@@ -2102,27 +2106,30 @@ int main(int argc, char **argv)
                     vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
                                    sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT, isp_sp, f38);
                 }
-                printf("chain: %d frame(s) queued -- cal + frame + tick on the ISP,"
-                       " shot waiting on 38 on the VI, per frame\n", shots);
+                printf("chain: %d frame(s) queued in %d ms -- cal + frame + tick on the ISP,"
+                       " shot waiting on 38 on the VI, per frame\n", shots, MS_SINCE(ts0));
 
-                /* Watch the frame ends arrive. Each one is the previous
-                 * shot's frame passing the parser; the next shot follows it
-                 * in hardware. */
-                int t_ms = 0, last_end = 0;
+                /* Watch the frame ends arrive, timed from the first submit.
+                 * Each one is the previous shot's frame passing the parser;
+                 * the next shot follows it in hardware, so the spacing is
+                 * the chain's own period. Ends that came while the queue was
+                 * still being filled all show the time the watch began. */
+                int last_end = MS_SINCE(ts0);
                 for (int k = 0; k < shots; k++) {
-                    int limit = t_ms + 1500;
-                    while ((int)(syncpt_read(VI1_ISPB_SYNCPT) - (fe_k + k + 1)) < 0 && t_ms < limit) {
-                        usleep(1000);
-                        t_ms++;
-                    }
+                    int limit = MS_SINCE(ts0) + 1500, now;
+                    while ((int)(syncpt_read(VI1_ISPB_SYNCPT) - (fe_k + k + 1)) < 0 &&
+                           (now = MS_SINCE(ts0)) < limit)
+                        usleep(500);
+                    now = MS_SINCE(ts0);
                     int seen = (int)(syncpt_read(VI1_ISPB_SYNCPT) - (fe_k + k + 1)) >= 0;
-                    printf("  frame %d: END %s at +%d ms (%+d ms), STARTs so far %u, ISP writes so far %u\n",
-                           k, seen ? "seen" : "NOT SEEN", t_ms, t_ms - last_end,
+                    printf("  frame %d: END %s at %d ms (%+d), STARTs so far %u, ISP writes so far %u\n",
+                           k, seen ? "seen" : "NOT SEEN", now, now - last_end,
                            syncpt_read(VI1_FLASH_SYNCPT) - fs_k,
                            syncpt_read(sp_mem) - isp_base_mem);
-                    last_end = t_ms;
+                    last_end = now;
                     if (!seen) break;
                 }
+                #undef MS_SINCE
                 /* The last frame's output write follows its end. */
                 {
                     int w2 = 0;

@@ -1962,7 +1962,20 @@ int main(int argc, char **argv)
         /* Big enough for the offsets the runtime configuration hands out --
          * it reaches 0x3f4a0 into this buffer. */
         work_h = nvmap_create(work_kb * 1024);
-        if (work_h && nvmap_alloc(work_h) == 0) work_iova = nvmap_pin(work_h);
+        if (work_h && nvmap_alloc(work_h) == 0) {
+            work_iova = nvmap_pin(work_h);
+            /* Zeroed. The carveout hands out the same region run after
+             * run with whatever the previous run's ISP left in it, and the
+             * block reads this buffer (0x054 at init and in the working
+             * configuration, the tile engine's scratch). Stale contents
+             * here are state that survives a warm reboot and only a cold
+             * start clears -- which is what a "bad boot" looked like. */
+            uint32_t chunk = 65536, total = work_kb * 1024;
+            void *z = calloc(1, chunk);
+            for (uint32_t o = 0; o < total; o += chunk)
+                nvmap_rw(work_h, o, z, total - o < chunk ? total - o : chunk, 1);
+            free(z);
+        }
 
         /* The stock camera's statistics buffers sit half a megabyte apart,
          * eight of them in rotation, so half a megabyte is what it gives

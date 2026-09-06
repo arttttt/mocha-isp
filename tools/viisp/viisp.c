@@ -784,15 +784,27 @@ int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
  * These carry the stock camera's geometry, so they belong with its
  * resolution and not with a smaller one.
  */
-int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova)
+static int stock_stats_addr = 0;   /* --stock-stats-addr: the stock's literal 0x85001000 in 0x800/0x820 */
+
+int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova,
+                  unsigned W)
 {
     uint32_t cmd_h = nvmap_create(4096 * 2);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
 
-    static const struct { uint16_t m; uint16_t n; uint8_t noninc;
-                          const uint32_t *d; } blk[] = {
-        { 0x400, 12, 0, isp_real_400 }, { 0x800, 3, 0, isp_real_800 },
-        { 0x820, 3, 0, isp_real_820 }, { 0xc00, 3, 0, isp_real_c00 },
+    /* Three of these blocks carry the session's geometry, and the values
+     * here were read out of a 2592-wide stock session: 0x800/0x820 word 2
+     * is ((H-32)<<16)|(W-32), 0xc00 word 2 has the width in its low half,
+     * and 0x400 differs throughout. At 1280 wide the stock sends its own
+     * set (impl-2, pp-status-bits.md: stock_front_720p_full.txt:8823);
+     * until 2026-09-06 every 720p run of ours carried the 2592 words. */
+    int w720 = (W == 1280);
+    const struct { uint16_t m; uint16_t n; uint8_t noninc;
+                   const uint32_t *d; } blk[] = {
+        { 0x400, 12, 0, w720 ? isp_real_400_720 : isp_real_400 },
+        { 0x800, 3, 0, w720 ? isp_real_800_720 : isp_real_800 },
+        { 0x820, 3, 0, w720 ? isp_real_800_720 : isp_real_820 },
+        { 0xc00, 3, 0, w720 ? isp_real_c00_720 : isp_real_c00 },
         { 0x700, 16, 0, isp_real_700 }, { 0x750, 16, 0, isp_real_750 },
         { 0xd00, 10, 0, isp_real_d00 }, { 0xd0a, 1, 0, isp_real_d0a },
         { 0xd0b, 480, 1, isp_real_d0b }, { 0x600, 16, 0, isp_real_600 },
@@ -865,8 +877,9 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
     sa.fences = (uint32_t)(uintptr_t)&fence;
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    printf("stock's working configuration: %u words, rc=%d (%s)\n", n, rc,
-           rc == 0 ? "ok" : strerror(errno));
+    printf("stock's working configuration (%s geometry words, stats at %s): %u words, rc=%d (%s)\n",
+           w720 ? "720p" : "2592", stock_stats_addr || !stats_iova ? "the stock's 0x85001000" : "ours",
+           n, rc, rc == 0 ? "ok" : strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }
@@ -1121,7 +1134,7 @@ static uint32_t isp_seq_base = 0;
  * never written), while either half alone changed nothing visible. The
  * stock writes these zeros before its sensor streams; we write them with
  * the wire already live, which is not the same experiment. */
-static int ping_only = 0, syncpts_only = 0, stock_zero = 0, stock_stats_addr = 0;
+static int ping_only = 0, syncpts_only = 0, stock_zero = 0;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -2775,7 +2788,7 @@ int main(int argc, char **argv)
              * the place the capture puts it. */
             if (isp_fd >= 0 && out_iova && shot > 0 && !real_sent
                 && use_real_pass) {
-                isp_real_pass(isp_fd, isp_sp, work_iova);
+                isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W);
                 real_sent = 1;
             }
 
@@ -2944,7 +2957,7 @@ int main(int argc, char **argv)
                      * coefficients, once, and never in the opening round. */
                     if (ccm) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
                     if (use_real_pass && !real_sent) {
-                        isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova);
+                        isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W);
                         real_sent = 1;
                     }
                 }

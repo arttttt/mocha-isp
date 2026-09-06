@@ -28,6 +28,21 @@ static const uint32_t isp_real_c00[3] = {
     0x00007901, 0x00000000, 0x01030a20,
 };
 
+/* The same three blocks as the stock's 1280x720 session sends them, one
+ * ISP submit after its warm-ups (stock_front_720p_full.txt:8823; impl-2,
+ * pp-status-bits.md). 0x800/0x820 word 2 = ((720-32)<<16)|(1280-32). */
+static const uint32_t isp_real_400_720[12] = {
+    0x00000001, 0x004b0000, 0x00930000, 0x00220000,
+    0x2ff01000, 0x2ff01000, 0x2ff01000, 0x2ff01000,
+    0x00130020, 0x0002003f, 0x000a0028, 0x0001003f,
+};
+static const uint32_t isp_real_800_720[3] = {
+    0x85001000, 0x00100010, 0x02b004e0,
+};
+static const uint32_t isp_real_c00_720[3] = {
+    0x00005a01, 0x00000000, 0x00820500,
+};
+
 static const uint32_t isp_real_700[16] = {
     0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00001940,
     0x00000000, 0x10000000, 0x00000000, 0x00000000, 0x00001000, 0x00001b70,

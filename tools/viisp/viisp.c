@@ -2629,8 +2629,16 @@ int main(int argc, char **argv)
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
-                          sp_mem, sp_stats, sp_loadv, isp_sp, 1, 0, 0, 0,
+                          sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0, 0, 0,
                           work_iova, per_frame_cal);
+                /* And the same flush job the stream queues behind its last
+                 * frame: the frame's output lands only with a job behind it,
+                 * and the stop job must not be that job -- it disabled the
+                 * pipeline while chroma and statistics were still being
+                 * written. An 8x8 job without parking, into the warm-up
+                 * buffer, which stays mapped until the run ends. */
+                if (warm_h)
+                    isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 0, W, OH);
             }
 
             /* The stock's order, in its VI gathers: WAIT on the ISP

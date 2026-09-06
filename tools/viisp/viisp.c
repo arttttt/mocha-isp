@@ -226,6 +226,7 @@ struct isp_emc_info {
 #include "isp_stock.h"
 #include "isp_demosaic.h"
 #include "isp_real.h"
+#include "stock_opening_720p.h"
 
 /* The opening and the per-frame calibration both carry isp_b_cal_data,
  * read out of a 2592-wide stock session: its 0xd00 block and its 0xd0b
@@ -1167,6 +1168,7 @@ static uint32_t isp_seq_base = 0;
  * stock writes these zeros before its sensor streams; we write them with
  * the wire already live, which is not the same experiment. */
 static int ping_only = 0, syncpts_only = 0, stock_zero = 0;
+static int stock_opening = 0, declare_conds = 1;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -1225,6 +1227,96 @@ int isp_alive_check(int isp_fd, uint32_t sp, const char *when)
     }
     printf("ISP alive %s: counter %u at %u, nothing owed, ping retired\n", when, sp, mn);
     return 0;
+}
+
+/* --stock-opening: the stock camera's 720p opening, submit for submit
+ * (stock_opening_720p.h, from impl-1's stock-opening-720p.txt), in place
+ * of this tool's own 5507-word table and its warm-up gathers. Plain jobs
+ * go verbatim, with the stock's fixed statistics address 0x85001000 --
+ * an address in its mapping, not ours -- swapped for our buffer. The two
+ * warm-up captures relocate their plane and statistics pointers onto our
+ * buffers and declare the three armed conditions as the stock does. The
+ * ticks (host1x waits on 36 and 37 for the capture just sent) are not
+ * submitted: a wait that never clears takes the channel down, so the
+ * caller's own polling stands in for them. */
+static uint32_t stock_open_thr36, stock_open_thr37;
+static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned idx,
+                             uint32_t warm_h, uint32_t stats_h, uint32_t stats_iova)
+{
+    if (idx >= sizeof stock_opening_720p / sizeof stock_opening_720p[0]) return -1;
+    const struct stock_open_submit *so = &stock_opening_720p[idx];
+    if (so->kind == 2) {
+        int w = 0;
+        while ((syncpt_read(sp_mem) < stock_open_thr36 || syncpt_read(sp_mem + 1) < stock_open_thr37)
+               && w < 2500) { usleep(2000); w += 2; }
+        printf("stock opening %u: tick -- 36 at %u (wanted %u), 37 at %u (wanted %u) after %d ms\n",
+               idx, syncpt_read(sp_mem), stock_open_thr36, syncpt_read(sp_mem + 1), stock_open_thr37, w);
+        return 0;
+    }
+    uint32_t bytes = ((so->n + 8) * 4 + 4095) & ~4095u;
+    uint32_t cmd_h = nvmap_create(bytes);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+    uint32_t *g = malloc(bytes);
+    memcpy(g, so->w, so->n * 4);
+    unsigned n = so->n, nrel = 0, swapped = 0;
+    struct nvhost_reloc rel[2];
+    struct nvhost_reloc_shift sh[2] = { { 0 }, { 0 } };
+    for (unsigned i = 0; i < so->n; i++) {
+        if (so->kind == 1 && g[i] == OP_INCR(0xE04, 3) && i + 1 < so->n) {
+            rel[nrel].cmdbuf_mem = cmd_h; rel[nrel].cmdbuf_offset = (i + 1) * 4;
+            rel[nrel].target = warm_h; rel[nrel].target_offset = 0; nrel++;
+            g[i + 1] = 0;
+        } else if (so->kind == 1 && g[i] == OP_INCR(0x100, 4) && i + 1 < so->n) {
+            rel[nrel].cmdbuf_mem = cmd_h; rel[nrel].cmdbuf_offset = (i + 1) * 4;
+            rel[nrel].target = stats_h; rel[nrel].target_offset = 0; nrel++;
+            g[i + 1] = 0;
+        } else if (so->kind == 0 && g[i] == 0x85001000 && stats_iova && !stock_stats_addr) {
+            g[i] = stats_iova; swapped++;
+        }
+    }
+    g[n++] = OP_IMM(0, sp);
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    char what[32]; snprintf(what, sizeof what, "stock-opening-%u", idx);
+    gather_log(what, g, n);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si[4] = { { sp, 1 }, { sp_mem, 1 }, { sp_mem + 1, 1 }, { sp_mem + 3, 1 } };
+    unsigned nsi = (so->kind == 1 && declare_conds) ? 4 : 1;
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = nsi;
+    sa.num_cmdbufs = 1;
+    sa.num_relocs = nrel;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.relocs = (uint32_t)(uintptr_t)rel;
+    sa.reloc_shifts = (uint32_t)(uintptr_t)sh;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    if (so->kind == 1) {
+        stock_open_thr36 = syncpt_read(sp_mem) + 1;
+        stock_open_thr37 = syncpt_read(sp_mem + 1) + 1;
+    }
+    uint32_t was = syncpt_read(sp);
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    int w = 0;
+    /* Plain jobs retire at once; serialise on them so the log's order is
+     * the hardware's. A capture retires only with a frame, which the
+     * caller triggers after this returns. */
+    if (rc == 0 && so->kind == 0)
+        while (syncpt_read(sp) == was && w < 500) { usleep(1000); w++; }
+    printf("stock opening %u: %u words%s%s, %s, rc=%d (%s)%s\n", idx, n,
+           nrel ? ", 2 relocs" : "", swapped ? ", stats address ours" : "",
+           so->kind == 1 ? (nsi == 4 ? "conditions declared" : "38 only") : "plain",
+           rc, rc == 0 ? "ok" : strerror(errno),
+           so->kind == 0 ? (syncpt_read(sp) != was ? " retired" : " NOT RETIRED") : "");
+    free(g);
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
 }
 
 int isp_stop(int isp_fd, uint32_t sp)
@@ -1764,6 +1856,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-stock-zero") == 0) stock_zero = 0;
         else if (strcmp(a, "--stock-stats-addr") == 0) stock_stats_addr = 1;
         else if (strcmp(a, "--cal-2592") == 0) cal_2592 = 1;
+        else if (strcmp(a, "--stock-opening") == 0) stock_opening = 1;
+        else if (strcmp(a, "--no-declare-conds") == 0) declare_conds = 0;
         else if (strncmp(a, "--stock-zero=", 13) == 0) stock_zero = (int)strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--ping") == 0) ping_only = 1;
         else if (strcmp(a, "--syncpts") == 0) syncpts_only = 1;
@@ -2192,7 +2286,12 @@ int main(int argc, char **argv)
          * until the channel has shown it retires one. */
         if (isp_alive_check(isp_fd, isp_sp, "BEFORE THE RUN")) return 3;
         isp_seq_base = syncpt_read(isp_sp);
-        if (work_h)
+        if (stock_opening) {
+            /* Submits 0..10: two zero passes, the shading tables and value
+             * rounds, the ticks and the 0x053 job, as the stock sends them. */
+            for (unsigned i = 0; i <= 10; i++)
+                stock_open_submit(isp_fd, isp_sp, sp_mem, i, 0, stats_h, stats_iova);
+        } else if (work_h)
             isp_init(isp_fd, work_h, isp_sp, work_iova, stats_iova, geo);
         if (out_h) {
             uint32_t chunk = 65536;
@@ -2841,7 +2940,22 @@ int main(int argc, char **argv)
              * instead, in place of a real frame, while the receiver is
              * armed and the sensor is delivering -- the way stock runs
              * it, between frames of a live stream. */
-            if (warm_left > 0 && isp_fd >= 0 && warm_h) {
+            if (warm_left > 0 && isp_fd >= 0 && warm_h && stock_opening) {
+                /* The stock's two warm-up captures, with its curves job
+                 * between them (submits 11, 13, 14); the ticks are the
+                 * caller's polling below. No demosaic or colour jobs of
+                 * our own: the stock carries their content in the
+                 * working configuration. */
+                isp_base_mem = syncpt_read(sp_mem);
+                if (warm_left == 1) {
+                    stock_open_submit(isp_fd, isp_sp, sp_mem, 12, warm_h, stats_h, stats_iova);
+                    stock_open_submit(isp_fd, isp_sp, sp_mem, 13, warm_h, stats_h, stats_iova);
+                }
+                stock_open_submit(isp_fd, isp_sp, sp_mem, warm_left == 2 ? 11 : 14,
+                                  warm_h, stats_h, stats_iova);
+                dm_sent = 1;
+            }
+            else if (warm_left > 0 && isp_fd >= 0 && warm_h) {
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_warmup(isp_fd, isp_sp, warm_h, stats_h,
                            warm_left == 2, W, OH);
@@ -2999,7 +3113,9 @@ int main(int argc, char **argv)
                 if (--warm_left == 0) {
                     /* Where the capture puts it: after the warm-up and the
                      * coefficients, once, and never in the opening round. */
-                    if (ccm) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
+                    if (stock_opening)
+                        stock_open_submit(isp_fd, isp_sp, sp_mem, 15, warm_h, stats_h, stats_iova);
+                    if (ccm && !stock_opening) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
                     if (use_real_pass && !real_sent) {
                         isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova, W);
                         real_sent = 1;

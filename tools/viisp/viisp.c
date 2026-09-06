@@ -1053,6 +1053,9 @@ int main(int argc, char **argv)
         return 0;
     }
     stock_open_W = W; stock_open_H = H;
+    /* Before the first channel open: the modules must not gate for the whole
+     * session (see acm_hold in viisp_platform.c). */
+    acm_hold();
     if (!frame_length) frame_length = 2 * native_vts(W, H);
     if (coarse_time >= frame_length) coarse_time = frame_length - 8;
     printf("sensor timing: frame length %u lines (native %u), coarse %u, gain %u\n",
@@ -2351,6 +2354,7 @@ shutdown:
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);
     close(nvmap_fd);
+    acm_release();
     /* The line the wrapper reads. A job still owed on the sequencing
      * counter, or a stop the block never took, is a dead channel: the
      * kernel will print its timeout within isp_job_timeout_ms, and nothing

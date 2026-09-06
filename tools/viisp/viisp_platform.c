@@ -266,6 +266,49 @@ void gather_log(const char *what, const uint32_t *g, unsigned n)
     fflush(fp);
 }
 
+/* nvhost gates a module's clocks 60 ms after its last busy/idle pair and the
+ * VENC partition 500 ms after (t124.c: VI/ISP_CLOCKGATE_DELAY 60,
+ * *_POWERGATE_DELAY 500; nvhost_acm.c: every REGRDWR and every job is one
+ * busy/idle pair and idle arms runtime-PM autosuspend). The stock never lets
+ * that happen mid-session: a parked wait sits on VI through every frame and
+ * its ISP cycle is continuous. Ours had gaps of hundreds of milliseconds
+ * between register writes while the sensor streamed, so the CSI's clocks
+ * went off under the lanes and the partition -- with the VI/CSI registers
+ * -- went off during the longer waits. The kernel exposes the two delays
+ * per module in sysfs; for the length of a session they are raised here
+ * and put back at the end. */
+static char acm_saved[4][16];
+static const char *acm_knobs[4] = {
+    "/sys/devices/platform/host1x/vi.1/acm/clockgate_delay",
+    "/sys/devices/platform/host1x/vi.1/acm/powergate_delay",
+    "/sys/devices/platform/host1x/isp.1/acm/clockgate_delay",
+    "/sys/devices/platform/host1x/isp.1/acm/powergate_delay",
+};
+static int acm_rw(const char *path, const char *val, char *out, size_t n)
+{
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return -1;
+    if (out) { ssize_t r = read(fd, out, n - 1); out[r > 0 ? r : 0] = 0; lseek(fd, 0, SEEK_SET); }
+    int rc = val ? (write(fd, val, strlen(val)) < 0 ? -1 : 0) : 0;
+    close(fd);
+    return rc;
+}
+void acm_hold(void)
+{
+    for (int i = 0; i < 4; i++)
+        if (acm_rw(acm_knobs[i], "60000", acm_saved[i], sizeof acm_saved[i]) < 0)
+            printf("  %s: %s\n", acm_knobs[i], strerror(errno));
+    for (int i = 0; i < 4; i++) { char *nl = strchr(acm_saved[i], '\n'); if (nl) *nl = 0; }
+    printf("  nvhost gating held for the session: vi.1 clock/power %s/%s ms, isp.1 %s/%s ms -> 60000\n",
+           acm_saved[0], acm_saved[1], acm_saved[2], acm_saved[3]);
+}
+void acm_release(void)
+{
+    for (int i = 0; i < 4; i++)
+        if (acm_saved[i][0]) acm_rw(acm_knobs[i], acm_saved[i], 0, 0);
+    printf("  nvhost gating delays restored\n");
+}
+
 /* The syncpoint counters live behind the control node, not the channel. */
 uint32_t syncpt_read(uint32_t id)
 {

@@ -356,6 +356,8 @@ void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);
 int   pmc_dpd_release_reg(unsigned long req_off, uint32_t bit);
 uint32_t syncpt_read(uint32_t id);
+void acm_hold(void);
+void acm_release(void);
 void gather_log(const char *what, const uint32_t *g, unsigned n);
 uint32_t syncpt_read_max(uint32_t id);
 void syncpt_table(void);

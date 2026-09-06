@@ -1716,7 +1716,7 @@ int main(int argc, char **argv)
     uint32_t sp_id = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0)
         sp_id = gp.value;
-    uint32_t sp_mw = sp_id, mw_base = 0;
+    uint32_t sp_mw = sp_id, mw_base = 0, fe_base = 0;
     gp.param = 1; gp.value = 0;
     if (ioctl(vi_fd, NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT, &gp) == 0 && gp.value)
         sp_mw = gp.value;
@@ -2554,6 +2554,7 @@ int main(int argc, char **argv)
         }
 
         mw_base = syncpt_read(sp_mw);
+        fe_base = syncpt_read(VI1_ISPB_SYNCPT);
         for (int shot = 0; shot < shots; shot++) {
             int started = 0, waited = 0;
 
@@ -2702,6 +2703,10 @@ int main(int argc, char **argv)
              * ever being armed. */
             if (no_isp)
                 vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, T124_MWB_ACK_DONE << 8 | sp_mw);
+            /* Frame end of port B onto 46, every shot: whether the parser
+             * reaches the end of a frame at all is the receiver-side fact
+             * the run's summary reports. */
+            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
             vi_wr(base + VI_CSI_SINGLE_SHOT, SINGLE_SHOT_CAPTURE);
             vi_flush(0);
 
@@ -2849,8 +2854,9 @@ int main(int argc, char **argv)
     /* Read the lane interface while the sensor is still powered. A stock
      * session shows 0x110 here; zero means nothing ever arrived on the
      * wire, which points at the sensor rather than the receiver. */
-    printf("CIL status: E=0x%08x CILE=0x%08x parser=0x%08x\n",
-           vi_rd(0xA18), vi_rd(0xA1C), vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
+    printf("CIL status: E=0x%08x CILE=0x%08x parser=0x%08x; frame ends (46) this run: %u\n",
+           vi_rd(0xA18), vi_rd(0xA1C), vi_rd(T124_PP_B_PIXEL_PARSER_STATUS),
+           syncpt_read(VI1_ISPB_SYNCPT) - fe_base);
 
     /* The channel is exclusive, so nothing outside this process can read
      * the aperture while we hold it -- and picking ranges by hand is how a

@@ -325,6 +325,28 @@ void vi_wr(uint32_t off, uint32_t val)
     batch_n++;
 }
 
+/* Every gather this tool submits, word for word, in the stock trace's own
+ * line format ("[us] SB ... words=N" then "[us] GA ... GCMD[k]: w w ...")
+ * so that a run of ours and a stock session diff with the same script.
+ * Words that the kernel relocates are logged before relocation (zero
+ * where an address goes). /data/local/tmp/viisp_gathers.txt, truncated
+ * at the first gather of the run. */
+void gather_log(const char *what, const uint32_t *g, unsigned n)
+{
+    static FILE *fp;
+    if (!fp) { fp = fopen("/data/local/tmp/viisp_gathers.txt", "w"); if (!fp) return; }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long us = (unsigned long)ts.tv_sec * 1000000ul + (unsigned long)ts.tv_nsec / 1000ul;
+    fprintf(fp, "[%lu] SB viisp:%s words=%u\n", us, what, n);
+    for (unsigned i = 0; i < n; i += 8) {
+        fprintf(fp, "[%lu] GA viisp:%s GCMD[%u]:", us, what, i);
+        for (unsigned j = i; j < n && j < i + 8; j++) fprintf(fp, " %08x", g[j]);
+        fprintf(fp, "\n");
+    }
+    fflush(fp);
+}
+
 /* The syncpoint counters live behind the control node, not the channel. */
 uint32_t syncpt_read(uint32_t id)
 {

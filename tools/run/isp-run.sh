@@ -197,6 +197,7 @@ adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}; echo TOOL_EXIT=\$?" 2>&1 | t
 tool_exit=$(grep -oE "^TOOL_EXIT=[0-9]+" "$ROOT/build/last-run.log" | tail -1 | cut -d= -f2)
 tool_exit=${tool_exit:-1}
 fingerprint after >> "$RUNLOG"
+adb pull /data/local/tmp/viisp_gathers.txt "$ROOT/build/runs/$STAMP.gathers.txt" >/dev/null 2>&1 && echo "gathers: $ROOT/build/runs/$STAMP.gathers.txt"
 adb shell 'dmesg | tail -40' 2>/dev/null | tr -d '\r' | sed 's/^/dmesg: /' >> "$RUNLOG"
 echo "run log: $RUNLOG"
 

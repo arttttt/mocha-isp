@@ -643,6 +643,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("isp-opening", g, (unsigned)n);
     free(g);
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, n };
@@ -740,6 +741,7 @@ int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("demosaic", g, (unsigned)n);
 
     struct nvhost_reloc rel[4] = {
         { cmd_h, (uint32_t)y_word * 4, out_h, 0 },
@@ -865,6 +867,7 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("working-config", g, (unsigned)n);
     free(g);
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, n };
@@ -952,6 +955,7 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    gather_log("warm-up", g, (unsigned)n);
 
     /* Two, not four: the pair in the middle of the processing block are
      * decimation ratios, not addresses, and relocating them was writing
@@ -1107,6 +1111,7 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
     g[n++] = OP_IMM(0, sp);
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    gather_log("colour", g, (unsigned)n);
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp, 1 };
@@ -1151,6 +1156,7 @@ int isp_ping(int isp_fd, uint32_t sp, int wait_ms)
     if (!cmd_h || nvmap_alloc(cmd_h)) return -2;
     uint32_t g[2] = { OP_SETCLASS(ISP_CLASS_B), OP_IMM(0, sp) };
     nvmap_rw(cmd_h, 0, g, sizeof g, 1);
+    gather_log("ping", g, 2);
     struct nvhost_cmdbuf cb = { cmd_h, 0, 2 };
     struct nvhost_syncpt_incr si = { sp, 1 };
     uint32_t cls = ISP_CLASS_B;
@@ -1212,6 +1218,7 @@ int isp_stop(int isp_fd, uint32_t sp)
     g[n++] = OP_INCR(0x015, 1); g[n++] = 0x00000000;
     g[n++] = OP_IMM(0, sp);
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    gather_log("stop", g, (unsigned)n);
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
     struct nvhost_syncpt_incr si = { sp, 1 };
@@ -1391,6 +1398,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     (void)hold_at;
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+    gather_log("frame", g, (unsigned)n);
     free(g);
 
     struct nvhost_reloc rel[4] = {
@@ -2207,6 +2215,7 @@ int main(int argc, char **argv)
         g[n++] = OP_INCR(0x282, 1); g[n++] = image_def;
         g[n++] = OP_IMM(0, sp_cmd);
         nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+        gather_log("vi-routing", g, (unsigned)n);
 
         struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
         struct nvhost_syncpt_incr si = { sp_cmd, 1 };
@@ -2624,6 +2633,7 @@ int main(int argc, char **argv)
          * exactly the reading we were treating as evidence. */
         g[n++] = OP_IMM(0, sp_cmd);
         nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
+        gather_log("vi-capture", g, (unsigned)n);
 
         struct nvhost_reloc rel = { cmd_h, (uint32_t)addr_word * 4, buf_h, 0 };
         struct nvhost_reloc_shift sh = { 0 };

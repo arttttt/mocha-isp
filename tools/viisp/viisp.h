@@ -166,16 +166,24 @@ struct nvhost32_submit_args {
  * way to get one is to let the kernel relocate a handle for us -- which
  * means a real submit rather than a register poke.
  *
- * Method numbers are not the register offsets. Two known pairs from the
- * kernel's own VI gather fix them: the image definition is offset 0x10C on
- * channel 0 and method 0x242, and 0x20C on channel 1 and method 0x282. So
- * method = offset/4 + 0x1FF, and both pairs agree. */
+ * VI class methods are the register offsets divided by four, across the
+ * whole aperture. The stock's own per-frame VI gather settles it (impl-2,
+ * stock-720p-frame-path.md): 0x03c carries the DVFS word (0x0F0), 0x081/
+ * 0x082 single-shot and state update (0x204/0x208), 0x083 x6 the channel-1
+ * image block (0x20C..0x220, IMAGE_DEF first), 0x099 the ISP interface
+ * (0x264), 0x21b x6 the port-B parser words (0x86C..), 0x242 the brick
+ * command (0x908: 0x10000000 = brick E on, 0x20000000 = off), 0x282 x3
+ * the CIL E pads (0xA08..0xA10: 0, 0, 9), 0x2a7 x9 the port-B pattern
+ * generator (0xA9C..). The "+0x1FF" form this used to define -- from the
+ * 24.1 tree's own experiments, which never produced a frame -- put the
+ * --no-isp gather's surface address and trigger into the CIL E block
+ * (0xA20..0xA28) and the routing gather's image word into the pad. */
 #define OP_SETCLASS(c)     ((0u << 28) | ((c) << 6))
 #define OP_INCR(m, n)      ((1u << 28) | ((m) << 16) | (n))
 #define OP_NONINCR(m, n)   ((2u << 28) | ((m) << 16) | (n))
 #define OP_IMM(m, v)       ((4u << 28) | ((m) << 16) | ((v) & 0xffff))
 #define VI_CLASS_ID        0x30
-#define VI_METHOD(off)     (((off) >> 2) + 0x1FF)
+#define VI_METHOD(off)     ((off) >> 2)
 #define NVHOST_IOCTL_CHANNEL_SET_NVMAP_FD \
     _IOW(NVHOST_IOCTL_MAGIC, 5, struct nvhost_set_nvmap_fd_args)
 #define NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT \

@@ -2236,8 +2236,12 @@ int main(int argc, char **argv)
         uint32_t g[10];
         int n = 0;
         g[n++] = OP_SETCLASS(VI_CLASS_ID);
-        g[n++] = OP_INCR(0x099, 1); g[n++] = ISPINTF_CONFIG_ENABLE;
-        g[n++] = OP_INCR(0x282, 1); g[n++] = image_def;
+        g[n++] = OP_INCR(VI_METHOD(0x264), 1); g[n++] = ISPINTF_CONFIG_ENABLE;
+        /* IMAGE_DEF by its method, 0x083, as the stock's per-frame VI
+         * gather writes it. This used to be 0x282, which is the CIL E pad
+         * register (the stock writes {0, 0, 9} there): the image word went
+         * into the pad and the bring-up's zero later covered it. */
+        g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 1); g[n++] = image_def;
         g[n++] = OP_IMM(0, sp_cmd);
         nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
         gather_log("vi-routing", g, (unsigned)n);
@@ -2631,9 +2635,9 @@ int main(int argc, char **argv)
          * the driver's own -- 0x099 for port B's ISP interface and 0x282
          * for its image definition -- and it is not the +0x1FF form the
          * rest of the channel uses. */
-        g[n++] = OP_INCR(0x099, 1);
+        g[n++] = OP_INCR(VI_METHOD(0x264), 1);
         g[n++] = ISPINTF_CONFIG_ENABLE;
-        g[n++] = OP_INCR(0x282, 1);
+        g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 1);
         g[n++] = image_def;
 
         g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SURFACE0_OFFSET_MSB), 1);

@@ -651,14 +651,26 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
  * (2026-09-07 00:02). Only 47 is declared: a frame that never starts must
  * not take the VI channel down, and the declared 46/49 of our previous
  * form did exactly that. The kernel adds SETCLASS(VI) for class 0x30. */
-static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t sp_cmd,
-                          uint32_t sp_fe, uint32_t sp_fs)
+static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
+                          uint32_t size_word, uint32_t wc_word, uint32_t dt,
+                          uint32_t sp_cmd, uint32_t sp_fe, uint32_t sp_fs)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-    uint32_t g[12];
+    uint32_t g[32];
     unsigned n = 0;
     g[n++] = OP_SETCLASS(VI_CLASS_ID);
+    /* The image block and the ISP interface by method, in the gather that
+     * shoots: this is what both gathers that DO capture here carry -- the
+     * stock's 68-word first-frame gather (0x083 x6 with IMAGE_DEF, then the
+     * shot) and this tool's own memory-path gather (0x099, 0x083, surfaces,
+     * shot). The 24.1 driver's note says it: written through the registers
+     * these bits are set but the pixel path is not activated; written as
+     * methods it is. Our bare method shots (00:05, 00:24, 00:26) armed
+     * nothing: frame ends without frame starts, an empty ISP completion. */
+    g[n++] = OP_INCR(VI_METHOD(0x264), 1); g[n++] = 3;
+    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 6);
+    g[n++] = image_def; g[n++] = 0x001c984c; g[n++] = 0; g[n++] = size_word; g[n++] = wc_word; g[n++] = dt;
     /* Arms BEFORE the shot. The 24.1 driver's working single-shot path
      * (t124_capture.c: arm_frame_start, then SINGLE_SHOT) and this tool's
      * register path both arm first; with the arms after the shot -- the
@@ -2055,7 +2067,8 @@ int main(int argc, char **argv)
                  * flight it never comes (00:24: none seen in 150 ms, three
                  * times). No parser command word per shot: written once at
                  * the bring-up, as the stock and the 24.1 driver do. */
-                vi_shot_gather(vi_fd, base, sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
+                vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
+                               sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
 
             waited = 0;

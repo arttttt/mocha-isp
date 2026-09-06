@@ -2133,6 +2133,7 @@ int main(int argc, char **argv)
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
+    if (kernel_csi) pmc_dpd_release_reg(PMC_IO_DPD_REQ, PMC_DPD_BIT_CSIB);   /* the kernel's pad for this port */
     if (emc_pin) emc_pin_high();
     car_enable_csi_clocks();
 

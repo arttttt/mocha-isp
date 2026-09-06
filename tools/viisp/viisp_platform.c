@@ -156,6 +156,14 @@ void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
 void mipi_calibrate_csie(void)
 {
     uint32_t st = 0;
+    if (kernel_csi) {
+        /* The block sits outside the VE partition and keeps what the last
+         * session left: the auto-calibration control and the noise-filter
+         * and prescale fields of CTRL that this sequence never wrote
+         * (impl-2). Zero the one, set the other as the 24.1 driver does. */
+        mem_wr(MIPI_CAL_BASE + 0x04, 0x00000000, 0);
+        mipi_upd(MIPI_CAL_CTRL, 0xff000000u, (0xau << 26) | (2u << 24));
+    }
 
     /* 1. Override the block's own clock gating. */
     mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
@@ -236,10 +244,18 @@ void mipi_calibrate_csie(void)
     mipi_upd(MIPI_CAL_CILD_CFG2, MIPI_CAL_CLKSEL, MIPI_CAL_CLKSEL);
 }
 
-int pmc_dpd_release(uint32_t bit)
+int pmc_dpd_release_reg(unsigned long req_off, uint32_t bit);
+int pmc_dpd_release(uint32_t bit) { return pmc_dpd_release_reg(PMC_IO_DPD2_REQ, bit); }
+
+/* The same against either request register: the kernel's vi2 path takes
+ * the CSI pad out of deep power down in IO_DPD_REQ (0x1B8), bits 0/1 =
+ * CSIA/CSIB, before every stream and puts it back at the stop; a pad
+ * left in DPD by a stock session is a weak wire -- partial frames, no
+ * frame end (impl-2, bad-boot-state.md). */
+int pmc_dpd_release_reg(unsigned long req_off, uint32_t bit)
 {
     long page = sysconf(_SC_PAGESIZE);
-    unsigned long addr = PMC_BASE + PMC_IO_DPD2_REQ;
+    unsigned long addr = PMC_BASE + req_off;
     unsigned long base = addr & ~(unsigned long)(page - 1);
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd < 0) { printf("dpd: /dev/mem %s\n", strerror(errno)); return -1; }

@@ -24,6 +24,8 @@
  * second request register per the driver's own table. */
 #define PMC_BASE            0x7000E400UL
 #define PMC_IO_DPD2_REQ     0x1C0
+#define PMC_IO_DPD_REQ      0x1B8
+#define PMC_DPD_BIT_CSIB    (1u << 1)
 #define PMC_DPD_CODE_OFF    0x40000000u
 #define PMC_DPD_BIT_CSIE    (1u << 12)
 
@@ -356,6 +358,7 @@ void  emc_unpin(void);
 void  mipi_upd(unsigned off, uint32_t mask, uint32_t val);
 void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);
+int   pmc_dpd_release_reg(unsigned long req_off, uint32_t bit);
 uint32_t syncpt_read(uint32_t id);
 void  vi_wr(uint32_t off, uint32_t val);
 int   vi_flush(const char *what);

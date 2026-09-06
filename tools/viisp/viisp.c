@@ -695,14 +695,28 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
  * (2026-09-07 00:02). Only 47 is declared: a frame that never starts must
  * not take the VI channel down, and the declared 46/49 of our previous
  * form did exactly that. The kernel adds SETCLASS(VI) for class 0x30. */
+/* The single-shot gather. With wait_sp set it begins the stock's way: a
+ * host1x WAIT on that counter reaching wait_thresh -- the ISP stream counter
+ * at the value the frame job's own increment brings it to -- so the shot
+ * fires the instant the ISP has taken that frame's configuration, with no
+ * CPU between the two. The tick behind the previous frame holds the frame
+ * job back until the previous frame's statistics are done, so the chain is
+ * frame end -> statistics -> next configuration -> next shot, all in
+ * hardware; the stock measures 37-156 us from end to shot. */
 static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
                           uint32_t size_word, uint32_t wc_word, uint32_t dt,
-                          uint32_t sp_cmd, uint32_t sp_fe, uint32_t sp_fs)
+                          uint32_t sp_cmd, uint32_t sp_fe, uint32_t sp_fs,
+                          uint32_t wait_sp, uint32_t wait_thresh)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
     uint32_t g[32];
     unsigned n = 0;
+    if (wait_sp) {
+        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+        g[n++] = (wait_sp << 24) | (wait_thresh & 0xFFFFFF);
+    }
     g[n++] = OP_SETCLASS(VI_CLASS_ID);
     /* The image block and the ISP interface by method, in the gather that
      * shoots: this is what both gathers that DO capture here carry -- the
@@ -746,6 +760,47 @@ static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
     errno = 0;
     int rc = ioctl(vi_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
     if (rc) printf("  VI shot gather: rc=%d (%s)\n", rc, strerror(errno));
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
+/* The tick behind a frame: the stock's two-word wait that parks the ISP
+ * channel until the frame's statistics are done, so that the next cal round
+ * and frame configuration load only after this frame has been processed.
+ * Everything queued behind it -- and the VI shot waiting on the next frame
+ * job's increment -- is thereby timed off the frame end in hardware. */
+static int isp_tick(int isp_fd, uint32_t sp, uint32_t wait_sp, uint32_t wait_thresh)
+{
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+    uint32_t g[8];
+    unsigned n = 0;
+    g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
+    g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
+    g[n++] = (wait_sp << 24) | (wait_thresh & 0xFFFFFF);
+    g[n++] = OP_SETCLASS(ISP_CLASS_B);
+    g[n++] = OP_IMM(0, sp);
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("tick", g, n);
+
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    /* Waits for one frame's statistics; a frame that never comes takes the
+     * channel down at this timeout, which the exit guard then waits out. */
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    if (rc) printf("  ISP tick: rc=%d (%s)\n", rc, strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }
@@ -855,36 +910,18 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = ISP_TRIGGER_SENSOR;
 
-    /* Park the job on the frame's own completion and on statistics, the way
-     * stock's post-frame submit does. The relocation pins then last exactly
-     * as long as the writes they guard, and the keepalive flood that papered
-     * over the gap is gone. The threshold is read at submit time: nothing
-     * else on this exclusive channel moves 36 or 37 between here and the
-     * frame, so +1 is unambiguous. If the sensor never delivers, the job
-     * sits until its timeout and the channel dies -- the same price every
-     * wedged run paid. */
-    /* The channel's own counter goes up HERE, right after the trigger and
-     * before the parking waits: the stock's frame job carries no waits at
-     * all and its increment means "config loaded, trigger given", while a
-     * separate two-word gather behind it parks the channel on 36/37. With
-     * the increment after the waits it meant "frame finished", and the VI
-     * side had nothing to wait on before its single-shot. */
+    /* The channel's own counter goes up HERE, right after the trigger, and
+     * the job ends: the stock's frame job carries no waits at all and its
+     * increment means "config loaded, trigger given" -- which is exactly
+     * what the VI shot gather waits for before it fires. The channel is
+     * parked on the frame's completion by the separate tick job behind it
+     * (isp_tick), the way the stock does it, and the relocation pins hold
+     * as long as the declared conditions are outstanding, so the frame's
+     * writes are covered without a wait in here. The wait that used to
+     * follow this increment made the job park on its own output, and a
+     * VI shot waiting on the promised value of this counter then waited
+     * for a frame that needed the shot (2026-09-07 00:02). */
     g[n++] = OP_IMM(0, sp);
-    {
-        /* hold_at is the queue depth: 0 when this job is the only one in
-         * flight, 1 when it is queued behind a frame still running and
-         * must park on the frame after that one. */
-        /* park_mem/park_stats, when given, are absolute: the stream keeps
-         * its own count of frames, because a threshold taken from a read of
-         * the counter at submit time races the previous frame's completion
-         * -- the output runs a job behind at 2592 -- and one off-by-one per
-         * frame drifts the queue until a job parks on a value that never
-         * comes. */
-        uint32_t want_mem = syncpt_read(sp_mem) + 1;
-        g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-        g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1);
-        g[n++] = (sp_mem << 24) | (want_mem & 0xFFFFFF);
-    }
 
     nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
     gather_log("frame", g, (unsigned)n);
@@ -2038,20 +2075,67 @@ int main(int argc, char **argv)
                 shot_fence = syncpt_read_max(isp_sp);
             }
             else if (isp_fd >= 0 && out_iova && stats_h) {
+                /* The real frames, chained in hardware the stock's way. Every
+                 * cycle is queued up front: cal round, frame job, the tick
+                 * that parks the ISP channel until this frame's statistics
+                 * are done, and the VI shot gather that waits for the frame
+                 * job's own increment of the stream counter. So the shot for
+                 * frame k fires the moment the ISP has loaded frame k's
+                 * configuration, which the tick behind frame k-1 releases
+                 * only once frame k-1 has been processed -- end, statistics,
+                 * next configuration, next shot, no CPU in the loop. The CPU
+                 * only watches the counters afterwards. */
                 isp_base_mem = syncpt_read(sp_mem);
                 isp_base_stats = syncpt_read(sp_stats);
-                isp_cal_round(isp_fd, isp_sp);
-                isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
-                          sp_mem, sp_stats, sp_loadv, isp_sp);
-                shot_fence = syncpt_read_max(isp_sp);
-                /* And the same flush job the stream queues behind its last
-                 * frame: the frame's output lands only with a job behind it,
-                 * and the stop job must not be that job -- it disabled the
-                 * pipeline while chroma and statistics were still being
-                 * written. An 8x8 job without parking, into the warm-up
-                 * buffer, which stays mapped until the run ends. */
-                if (warm_h)
-                    isp_warmup(isp_fd, isp_sp, warm_h, stats_h, 0, W, OH);
+                uint32_t fe_k = syncpt_read(VI1_ISPB_SYNCPT);
+                uint32_t fs_k = syncpt_read(VI1_FLASH_SYNCPT);
+                for (int k = 0; k < shots; k++) {
+                    isp_cal_round(isp_fd, isp_sp);
+                    isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
+                              sp_mem, sp_stats, sp_loadv, isp_sp);
+                    /* The frame job's increment is the last thing promised on
+                     * the stream counter so far; its statistics fence is the
+                     * last promised on the statistics counter. */
+                    uint32_t f38 = syncpt_read_max(isp_sp);
+                    uint32_t f37 = syncpt_read_max(sp_stats);
+                    isp_tick(isp_fd, isp_sp, sp_stats, f37);
+                    vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
+                                   sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT, isp_sp, f38);
+                }
+                printf("chain: %d frame(s) queued -- cal + frame + tick on the ISP,"
+                       " shot waiting on 38 on the VI, per frame\n", shots);
+
+                /* Watch the frame ends arrive. Each one is the previous
+                 * shot's frame passing the parser; the next shot follows it
+                 * in hardware. */
+                int t_ms = 0, last_end = 0;
+                for (int k = 0; k < shots; k++) {
+                    int limit = t_ms + 1500;
+                    while ((int)(syncpt_read(VI1_ISPB_SYNCPT) - (fe_k + k + 1)) < 0 && t_ms < limit) {
+                        usleep(1000);
+                        t_ms++;
+                    }
+                    int seen = (int)(syncpt_read(VI1_ISPB_SYNCPT) - (fe_k + k + 1)) >= 0;
+                    printf("  frame %d: END %s at +%d ms (%+d ms), STARTs so far %u, ISP writes so far %u\n",
+                           k, seen ? "seen" : "NOT SEEN", t_ms, t_ms - last_end,
+                           syncpt_read(VI1_FLASH_SYNCPT) - fs_k,
+                           syncpt_read(sp_mem) - isp_base_mem);
+                    last_end = t_ms;
+                    if (!seen) break;
+                }
+                /* The last frame's output write follows its end. */
+                {
+                    int w2 = 0;
+                    while ((int)(syncpt_read(sp_mem) - (isp_base_mem + shots)) < 0 && w2 < 1000) {
+                        usleep(2000);
+                        w2 += 2;
+                    }
+                    unsigned writes = syncpt_read(sp_mem) - isp_base_mem;
+                    if (writes < (unsigned)shots) isp_nowrite += shots - writes;
+                    printf("  ISP wrote %u of %d frame(s) (last waited %d ms), parser %08x\n",
+                           writes, shots, w2, vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
+                }
+                break;
             }
 
             /* The stock's order, in its VI gathers: WAIT on the ISP
@@ -2127,7 +2211,7 @@ int main(int argc, char **argv)
                  * times). No parser command word per shot: written once at
                  * the bring-up, as the stock and the 24.1 driver do. */
                 vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
-                               sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
+                               sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT, 0, 0);
             }
 
             waited = 0;

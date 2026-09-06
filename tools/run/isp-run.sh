@@ -79,7 +79,27 @@ wait_ready() {
                 echo "booted ${up}s ago -- waiting until 90 s so the camera stack settles"
                 sleep $((90 - up))
             fi
-            return 0
+            # boot_completed and 90 s are not "the system is up": a run started
+            # then (2026-09-06 23:16) went onto a device still bringing its
+            # stack up. Wait for quiet -- no kernel message for 15 s, the
+            # sensor's boot-time probe (ardbeg_ov5693_power_on) older than
+            # 30 s, mediaserver running -- for up to five minutes.
+            for _ in $(seq 1 60); do
+                st=$(adb shell 'now=$(cut -d. -f1 /proc/uptime);
+                    last=$(dmesg | tail -1 | sed -E "s/^<[0-9]>\[ *([0-9]+)\..*/\1/");
+                    cam=$(dmesg | grep ardbeg_ov5693_power_on | tail -1 | sed -E "s/^<[0-9]>\[ *([0-9]+)\..*/\1/");
+                    ms=$(ps | grep -c "[m]ediaserver");
+                    echo "$now ${last:-0} ${cam:-0} $ms"' 2>/dev/null | tr -d '\r')
+                set -- $st
+                now=${1:-0}; last=${2:-0}; cam=${3:-0}; ms=${4:-0}
+                if [ "$ms" -ge 1 ] && [ $((now - last)) -ge 15 ] && [ $((now - cam)) -ge 30 ]; then
+                    echo "device quiet: uptime ${now}s, last kernel message ${last}s, last sensor probe ${cam}s, mediaserver up"
+                    return 0
+                fi
+                sleep 5
+            done
+            echo "device never went quiet -- stopping"
+            return 1
         fi
         sleep 3
     done

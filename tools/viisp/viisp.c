@@ -806,14 +806,19 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_io
         { 0x820, 3, 0, w720 ? isp_real_800_720 : isp_real_820 },
         { 0xc00, 3, 0, w720 ? isp_real_c00_720 : isp_real_c00 },
         { 0x700, 16, 0, isp_real_700 }, { 0x750, 16, 0, isp_real_750 },
-        { 0xd00, 10, 0, isp_real_d00 }, { 0xd0a, 1, 0, isp_real_d0a },
-        { 0xd0b, 480, 1, isp_real_d0b }, { 0x600, 16, 0, isp_real_600 },
+        { 0xd00, 10, 0, w720 ? isp_real_d00_720 : isp_real_d00 },
+        { 0xd0a, 1, 0, isp_real_d0a },
+        { 0xd0b, 480, 1, w720 ? isp_real_d0b_720 : isp_real_d0b },
+        /* Only the 720p configuration has this block; count 0 skips it. */
+        { 0xd0c, (uint16_t)(w720 ? 2 : 0), 0, isp_real_d0c_720 },
+        { 0x600, 16, 0, isp_real_600 },
     };
 
     uint32_t *g = malloc(4096 * 2);
     unsigned n = 0;
     g[n++] = OP_SETCLASS(ISP_CLASS_B);
     for (unsigned b = 0; b < sizeof blk / sizeof blk[0]; b++) {
+        if (!blk[b].n) continue;
         g[n++] = blk[b].noninc ? OP_NONINCR(blk[b].m, blk[b].n)
                                : OP_INCR(blk[b].m, blk[b].n);
         unsigned first = n;

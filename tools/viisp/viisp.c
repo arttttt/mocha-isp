@@ -435,6 +435,11 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
      * four window words describe the 1280x720 frame -- the zeros-and-
      * 0x70000 tail was the 8x8 warm-up's values, never the running
      * configuration. */
+    /* --no-x930 leaves this block out: no stock session at either size
+     * writes it (impl-1), the words came from a shadow read of one 720
+     * session, and a scene with a window in it -- high dynamic range --
+     * is where our output turns to saturated contours. */
+    if (!no_x930) {
     g[n++] = OP_INCR(0x930, 18);
     g[n++] = 0x0000001d; g[n++] = 0x88888888;
     g[n++] = 0x78787800; g[n++] = 0x00000078;
@@ -445,6 +450,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
     g[n++] = 0x00000078; g[n++] = 0x3fc00000;
     g[n++] = 0x00220000; g[n++] = 0x0004003f;
     g[n++] = 0x00120000; g[n++] = 0x0003003f;
+    }
 
     g[n++] = OP_INCR(0xC00, 3);
     g[n++] = 0x00000101; g[n++] = 0x00000000; g[n++] = 0x00100000;
@@ -1621,6 +1627,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
         else if (strcmp(a, "--kernel-csi") == 0) kernel_csi = 1;
+        else if (strcmp(a, "--no-x930") == 0) no_x930 = 1;
         else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
         else if (strncmp(a, "--x400-word=", 12) == 0) {
             x400_idx = atoi(a + 12);

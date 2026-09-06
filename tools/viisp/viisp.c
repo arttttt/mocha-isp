@@ -227,6 +227,27 @@ struct isp_emc_info {
 #include "isp_demosaic.h"
 #include "isp_real.h"
 
+/* The opening and the per-frame calibration both carry isp_b_cal_data,
+ * read out of a 2592-wide stock session: its 0xd00 block and its 0xd0b
+ * mesh are that raster's. At 1280 wide they are swapped for the stock's
+ * 720p words -- the same ones the working configuration sends -- else
+ * every frame re-applies a shading mesh laid out for a different raster
+ * on top of the working configuration's, which is what impl-1's gather
+ * diff found (gather-diff-720p.md §3). --cal-2592 keeps the old table. */
+static unsigned cal_fit_w = 2592;
+static int cal_2592 = 0;
+static void cal_fit_width(uint32_t *g, unsigned words)
+{
+    if (cal_fit_w != 1280 || cal_2592) return;
+    for (unsigned i = 0; i + 1 < words; i++) {
+        if (g[i] == 0x1d00000a && i + 10 < words) {
+            memcpy(&g[i + 1], isp_real_d00_720, 10 * 4); i += 10;
+        } else if (g[i] == 0x2d0b01e0 && i + 480 < words) {
+            memcpy(&g[i + 1], isp_real_d0b_720, 480 * 4); i += 480;
+        }
+    }
+}
+
 /* Put the stock camera's own configuration into the gather.
  *
  * Every block it fills in when it opens the ISP, with the values it fills
@@ -611,6 +632,7 @@ int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
 
 
     memcpy(&g[n], isp_b_cal_data, words * 4);
+    cal_fit_width(&g[n], words);
     n += words;
     /* The blob ends with 0x053 and 0x054 -- the work buffer's enable and its
      * address. The driver patches a zero into the address and calls that
@@ -1298,6 +1320,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * pass had left. */
     if (per_frame_cal) {
         memcpy(&g[n], isp_b_cal_data, cal_words * 4);
+        cal_fit_width(&g[n], cal_words);
         n += cal_words;
         g[n - 2] = 0x00000001;
         g[n - 1] = work_iova;
@@ -1740,6 +1763,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--release-csib") == 0) release_csib = 1;
         else if (strcmp(a, "--no-stock-zero") == 0) stock_zero = 0;
         else if (strcmp(a, "--stock-stats-addr") == 0) stock_stats_addr = 1;
+        else if (strcmp(a, "--cal-2592") == 0) cal_2592 = 1;
         else if (strncmp(a, "--stock-zero=", 13) == 0) stock_zero = (int)strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--ping") == 0) ping_only = 1;
         else if (strcmp(a, "--syncpts") == 0) syncpts_only = 1;
@@ -1813,6 +1837,7 @@ int main(int argc, char **argv)
     uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
 
     if (syncpts_only) { syncpt_table(); return 0; }
+    cal_fit_w = W;
     if (ping_only) printf("=== viisp --ping: is the ISP-B channel taking work? (no sensor, no VI) ===\n");
     else printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);

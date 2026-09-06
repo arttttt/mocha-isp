@@ -406,7 +406,7 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
                unsigned W, unsigned H);
 int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
                unsigned W, unsigned H);
-void isp_stop(int isp_fd, uint32_t sp);
+int   isp_stop(int isp_fd, uint32_t sp);   /* returns whether the block acknowledged it */
 int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
               unsigned W, unsigned H, uint32_t fmt,
               uint32_t u_off, uint32_t v_off,

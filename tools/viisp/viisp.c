@@ -1240,6 +1240,7 @@ int isp_alive_check(int isp_fd, uint32_t sp, const char *when)
  * submitted: a wait that never clears takes the channel down, so the
  * caller's own polling stands in for them. */
 static uint32_t stock_open_thr36, stock_open_thr37;
+static unsigned stock_open_W = 1280, stock_open_H = 720;
 static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned idx,
                              uint32_t warm_h, uint32_t stats_h, uint32_t stats_iova)
 {
@@ -1266,6 +1267,13 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
             rel[nrel].cmdbuf_mem = cmd_h; rel[nrel].cmdbuf_offset = (i + 1) * 4;
             rel[nrel].target = warm_h; rel[nrel].target_offset = 0; nrel++;
             g[i + 1] = 0;
+        } else if (so->kind == 1 && g[i] == OP_INCR(0x500, 6) && i + 6 < so->n) {
+            /* The warm-up capture's decimation trio is the one place the
+             * 720p and 2592 openings differ (impl-1): (1<<23)/W, W<<17 and
+             * (H/8)<<20, the same forms the warm-up builder computes. */
+            g[i + 2] = (1u << 23) / stock_open_W;
+            g[i + 3] = stock_open_W << 17;
+            g[i + 4] = (stock_open_H / 8) << 20;
         } else if (so->kind == 1 && g[i] == OP_INCR(0x100, 4) && i + 1 < so->n) {
             rel[nrel].cmdbuf_mem = cmd_h; rel[nrel].cmdbuf_offset = (i + 1) * 4;
             rel[nrel].target = stats_h; rel[nrel].target_offset = 0; nrel++;
@@ -1991,6 +1999,7 @@ int main(int argc, char **argv)
 
     if (syncpts_only) { syncpt_table(); return 0; }
     cal_fit_w = W;
+    stock_open_W = W; stock_open_H = H;
     if (ping_only) printf("=== viisp --ping: is the ISP-B channel taking work? (no sensor, no VI) ===\n");
     else printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);

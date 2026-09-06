@@ -835,13 +835,14 @@ static int isp_cal_round(int isp_fd, uint32_t sp)
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
-    uint32_t was = syncpt_read(sp);
     errno = 0;
     int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-    int w = 0;
-    if (rc == 0) while (syncpt_read(sp) == was && w < 500) { usleep(1000); w++; }
-    printf("stock cal round: %u words, rc=%d (%s)%s\n", n, rc, rc == 0 ? "ok" : strerror(errno),
-           syncpt_read(sp) != was ? " retired" : " NOT RETIRED");
+    /* No waiting for the round to retire here: in the chain it is queued
+     * behind the previous frame's tick and retires only once that frame is
+     * done, and waiting on it from the CPU serialised the whole queue at
+     * one frame per hundred milliseconds (run 025524: six cycles took
+     * 599 ms to queue). The counter is checked at the session's end. */
+    if (rc) printf("stock cal round: %u words, rc=%d (%s)\n", n, rc, strerror(errno));
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
     return rc;
 }

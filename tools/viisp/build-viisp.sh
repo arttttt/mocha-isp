@@ -20,7 +20,7 @@ mkdir -p "$OUTDIR"
 OUT="$OUTDIR/viisp"
 rm -f "$OUT"
 $CC -std=gnu99 -pie -O2 -Wall -o "$OUT" \
-    "$DIR/viisp.c" "$DIR/viisp_platform.c" "$DIR/isp_geom.c" -ldl
+    "$DIR/viisp.c" "$DIR/viisp_platform.c" -ldl
 
 echo "=== built: $OUT ($(stat -c%s "$OUT") bytes) ==="
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$OUT" | grep NEEDED

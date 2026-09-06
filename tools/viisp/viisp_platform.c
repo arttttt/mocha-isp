@@ -15,27 +15,9 @@ int real_sent;
  * the first, the statistics conditions armed, the geometry blocks for the
  * frame size, the real pass after the warm-ups, the stock's streaming
  * transfer block, the calibration with every frame. */
-int use_real_pass = 1;
-int arm_stats = 1;
-int do_warmup = 1;
-int per_frame_cal = 1;
-int geo_blocks = 1;
-int stream_xfer = 1;
-uint32_t work_word_override; int work_word_set, work_word_iova;   /* --work-word=HEX | iova */
-unsigned stock_groups = STOCK_DEMOSAIC;  /* --stock-groups=MASK: which groups of the stock table isp_init sends */
-int stock_vi;       /* --stock-vi: the stock camera's VI and parser words instead of the R21.5 driver's */
 int no_isp;         /* --no-isp: never open the ISP channel; VI to memory alone */
-int sensor_late;     /* 0: the sensor streams before the receiver comes up (the MIPI calibration needs the clock lane live). The other order is kept as code only. */
 int cile_rewritten;  /* the CILE pad re-write before the first shot has been done */
-unsigned long emc_bw = 163200000;   /* --emc-bw: the ISP's EMC bandwidth request, bytes/s (the stock's 163.2 MB/s) */
-int emc_pin;                        /* --emc-pin: the old stopgap -- pin the CPU governor to performance. Off: the ISP channel's own "emc" request (SET_CLK_RATE, ispb.emc) puts EMC on PLLM while the module is busy, measured */
-int no_emc_bw, no_set_emc;          /* --no-emc-bw / --no-set-emc: leave one EMC lever out (attribution) */
-int x400_idx = -1; uint32_t x400_val;  /* --x400-word=IDX,HEX */
-int no_x930;                        /* --no-x930: leave the 0x930 window words out of the opening */
-int kernel_csi;                     /* --kernel-csi: the kernel's port-B bring-up/teardown registers on top of ours */
-int release_csib;                   /* --release-csib: take the CSIB pad out of deep power down too (the stock kernel leaves it in) */
-int blc_tail = -1;                  /* --blc-tail=HEX: low halves of 0x400 words 9/11 (stock 0x3f) */
-int shot_delay_ms = 20;             /* --shot-delay=MS: --stream waits this long after output-done before the next shot; 20 lands every shot in the blanking at 15 fps (measured: 1 shot, 66 ms, parser 0 per frame) */
+unsigned long emc_bw = 163200000;   /* the ISP's EMC bandwidth request, bytes/s: the stock's 163.2 MB/s */
 /* Ten seconds, not sixty: a single-capture job parks on the output
  * condition, which is at most a few frame periods away, and a job that is
  * still owed when the tool exits should be timed out -- and show up in the
@@ -43,10 +25,8 @@ int shot_delay_ms = 20;             /* --shot-delay=MS: --stream waits this long
  * under "channel survived". */
 int isp_job_timeout_ms = 10000;     /* host1x timeout of the ISP frame job; stream_run lowers it */
 int isp_wait_ms = 2500;             /* --isp-wait: how long to wait for the ISP's output write per frame */
-int stream_n;                       /* --stream=N: N frames by the stock's protocol instead of single shots */
-unsigned isp_emc_clk = 81600;       /* --isp-emc-clk: the isp_clk (kHz) in the ISP SET_EMC ioctl; the stock's 81600 -> 162 MB/s ISO */
+unsigned isp_emc_clk = 81600;       /* the isp_clk (kHz) in the ISP SET_EMC ioctl; the stock's 81600 -> 162 MB/s ISO */
 uint32_t wb_r, wb_b;    /* --wb: white-balance gains for 0x705 / 0x70b, 4.12 */
-int ccm = 3;
 unsigned stats_kb = 512, work_kb = 512;
 
 int mem_wr(unsigned long addr, uint32_t val, uint32_t *before)
@@ -89,36 +69,6 @@ int mem_rd(unsigned long addr, uint32_t *out)
  * governor -- cpu.emc follows the CPU rate -- so the run pins it to
  * performance and puts the old governor back at exit. */
 #define CPU0_GOVERNOR "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
-static char saved_governor[32];
-
-void emc_pin_high(void)
-{
-    FILE *f = fopen(CPU0_GOVERNOR, "r");
-    if (!f) { printf("  EMC: no cpufreq governor node\n"); return; }
-    if (!fgets(saved_governor, sizeof saved_governor, f)) saved_governor[0] = 0;
-    fclose(f);
-    char *nl = strchr(saved_governor, '\n'); if (nl) *nl = 0;
-    if (strcmp(saved_governor, "performance") == 0) { saved_governor[0] = 0; printf("  EMC: governor already performance\n"); return; }
-    f = fopen(CPU0_GOVERNOR, "w");
-    if (!f) { printf("  EMC: cannot set governor: %s\n", strerror(errno)); saved_governor[0] = 0; return; }
-    fputs("performance\n", f);
-    fclose(f);
-    usleep(200000);   /* the shared bus follows within a DVFS tick */
-    uint32_t src = 0;
-    mem_rd(CAR_BASE + 0x19c, &src);
-    printf("  EMC: governor %s -> performance, EMC source 0x%08x%s\n", saved_governor, src,
-           (src >> 29) == 4 ? " (PLLM)" : " (NOT PLLM -- the ISP will starve)");
-}
-
-void emc_unpin(void)
-{
-    if (!saved_governor[0]) return;
-    FILE *f = fopen(CPU0_GOVERNOR, "w");
-    if (!f) return;
-    fputs(saved_governor, f); fputs("\n", f);
-    fclose(f);
-    printf("  EMC: governor back to %s\n", saved_governor);
-}
 
 void car_enable_csi_clocks(void)
 {
@@ -163,15 +113,6 @@ void mipi_upd(unsigned off, uint32_t mask, uint32_t val)
 void mipi_calibrate_csie(void)
 {
     uint32_t st = 0;
-    if (kernel_csi) {
-        /* The block sits outside the VE partition and keeps what the last
-         * session left: the auto-calibration control and the noise-filter
-         * and prescale fields of CTRL that this sequence never wrote
-         * (impl-2). Zero the one, set the other as the 24.1 driver does. */
-        mem_wr(MIPI_CAL_BASE + 0x04, 0x00000000, 0);
-        mipi_upd(MIPI_CAL_CTRL, 0xff000000u, (0xau << 26) | (2u << 24));
-    }
-
     /* 1. Override the block's own clock gating. */
     mipi_upd(MIPI_CAL_CTRL, MIPI_CAL_CLKEN_OVR, MIPI_CAL_CLKEN_OVR);
 

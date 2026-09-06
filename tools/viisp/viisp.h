@@ -332,32 +332,17 @@ struct nvhost32_submit_args {
 /* ---- shared state ---- */
 extern int nvmap_fd, vi_fd;
 extern uint32_t alloc_heap;
-extern int dm_sent, real_sent, use_real_pass;
-extern int arm_stats, do_warmup;
-extern int per_frame_cal, geo_blocks, ccm, stream_xfer;
+extern int dm_sent, real_sent;
 /* Groups of the stock configuration table (isp_stock.h), for --stock-groups. */
-#define STOCK_DEMOSAIC 1    /* 0x900..0x908, 0x506 */
-#define STOCK_COLOUR   2    /* 0x600, 0x650 + the four tone tables, 0xd00.. shading */
-#define STOCK_STATS    4    /* 0x909..0x920 */
-#define STOCK_INPUT    8    /* 0x200, 0x202, 0x205 */
-#define STOCK_CCM      16   /* 0x300, 0x304 */
-#define STOCK_CHAN     32   /* 0x700, 0x750: the stock process's own addresses */
-extern unsigned stock_groups;
 /* --work-word=HEX: what goes into 0x054 in the PER-FRAME calibration only,
  * in place of the default zero; the opening and the working configuration
  * keep the work buffer's address. The stock's steady-state rounds carry a
  * constant there per resolution (0x02016b4c at 2592, 0x003e0e8f at 720p --
  * odd, so not an address) and never relocate it, while its opening has
  * {0,0} and its working configuration {1,0}. One variable per cell. */
-extern uint32_t work_word_override;
-extern int work_word_set, work_word_iova;
-static inline uint32_t work_word(uint32_t iova) { return work_word_set ? work_word_override : iova; }
-extern int stock_vi, no_isp, sensor_late, cile_rewritten;
+extern int no_isp, cile_rewritten;
 extern unsigned long emc_bw;
-extern int isp_wait_ms, stream_n, isp_job_timeout_ms, shot_delay_ms, emc_pin;
-extern int release_csib;
-extern int no_emc_bw, no_set_emc, blc_tail, x400_idx, kernel_csi, no_x930;
-extern uint32_t x400_val;
+extern int isp_wait_ms, isp_job_timeout_ms;
 extern unsigned isp_emc_clk;
 extern uint32_t wb_r, wb_b;
 extern unsigned stats_kb, work_kb;
@@ -366,8 +351,6 @@ extern unsigned stats_kb, work_kb;
 int   mem_wr(unsigned long addr, uint32_t val, uint32_t *before);
 int   mem_rd(unsigned long addr, uint32_t *out);
 void  car_enable_csi_clocks(void);
-void  emc_pin_high(void);
-void  emc_unpin(void);
 void  mipi_upd(unsigned off, uint32_t mask, uint32_t val);
 void  mipi_calibrate_csie(void);
 int   pmc_dpd_release(uint32_t bit);
@@ -387,42 +370,18 @@ void  nvmap_invalidate(uint32_t h, uint32_t len);
 int   nvmap_rw(uint32_t h, uint32_t off, void *p, uint32_t len, int wr);
 
 /* ---- geometry, measured off the stock captures ---- */
-struct geom_cfg {
-    uint32_t in_dims;               /* 0x202 words 1-2 */
-    uint32_t in_phase;              /* 0x205 word 3 */
-    uint32_t d20_mode, d20_step;    /* 0xd20 word 0, words 2-5 */
-    uint32_t s909_w4;               /* 0x909 word 3 */
-    uint32_t s910_w3, s910_w7, s910_w8; /* 0x910 words 3, 7, 8 */
-    uint32_t s91c_w5;               /* 0x91c word 5 */
-    uint32_t x700_w5, x700_w11;     /* 0x700 words 5, 11 */
-    uint32_t c00_w0, c00_w2_hi;     /* 0xc00 word 0, high half of word 2 */
-    uint32_t d00[8];                /* 0xd00 words 1-8 */
-    uint32_t p400_w8, p400_w9, p400_w10, p400_w11; /* 0x400 tail */
-};
-const struct geom_cfg *geom_for(unsigned W, unsigned H);
 
 /* ---- ISP jobs ---- */
-unsigned isp_stock_emit(uint32_t *g, unsigned n, uint32_t work_iova);
-int isp_init(int isp_fd, uint32_t work_h, uint32_t sp,
-             uint32_t work_iova, uint32_t stats_iova,
-             const struct geom_cfg *geo);
-int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
-                 uint32_t stats_h, uint32_t u_off, uint32_t v_off,
-                 uint32_t work_iova);
 int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova,
                   unsigned W);
 int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
                uint32_t stats_h, int write_enable,
                unsigned W, unsigned H);
-int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
-               unsigned W, unsigned H);
 int   isp_stop(int isp_fd, uint32_t sp);   /* returns whether the block acknowledged it */
 int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
-              unsigned W, unsigned H, uint32_t fmt,
-              uint32_t u_off, uint32_t v_off,
-              uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
-              uint32_t sp, uint32_t hold_sp, uint32_t hold_at,
-              uint32_t park_mem, uint32_t park_stats,
-              uint32_t work_iova, int per_frame_cal);
+                     unsigned W, unsigned H, uint32_t fmt,
+                     uint32_t u_off, uint32_t v_off,
+                     uint32_t sp_mem, uint32_t sp_stats, uint32_t sp_loadv,
+                     uint32_t sp);
 
 #endif /* VIISP_H */

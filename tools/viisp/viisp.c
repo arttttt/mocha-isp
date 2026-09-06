@@ -973,7 +973,6 @@ int main(int argc, char **argv)
      * brings the camera back -- so the cost of asking for more is paid by
      * hand, every time. Two is the ceiling; anything larger is clamped. */
     int shots = 1;
-    const int settle = 200;
     /* The ISP clock as the stock asks for it: SET_CLK_RATE moduleid 0xb
      * on isp.1 at 81.6 MHz (stock_front_camera_open_full.txt:9220; 0xb
      * matches no clock entry, so the kernel takes clock 0, "isp"). We had
@@ -1846,28 +1845,22 @@ int main(int argc, char **argv)
         uint8_t fill[64];
         memset(fill, 0xA5, sizeof fill);
 
-        /* Arm the frame-start condition and block until it moves. Every use
-         * of this sits between frames, never during one. */
-        #define WAIT_FRAME_START(limit_ms) ({                                 \
-            uint32_t _b = syncpt_read(sp_id);                                 \
-            vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT,                                \
-                  T124_PPB_FRAME_START << 8 | sp_id);                         \
-            vi_flush(0);                                                      \
-            int _w = 0;                                                       \
-            while (syncpt_read(sp_id) == _b && _w < (limit_ms)) {             \
-                usleep(500); _w++;                                            \
-            }                                                                 \
-            syncpt_read(sp_id) != _b ? _w : -1;                               \
-        })
-
         /* A trigger written part way through a frame captures only what is
-         * left of it -- the first one wrote rows 0 to 1704, exactly the
-         * lines that remained. The whole frame comes from triggering in the
-         * blanking, and the blanking is narrow: the sensor's own registers
-         * put it at forty lines out of 1984, a millisecond and a half.
+         * left of it: the parser passes the remaining lines, the frame has
+         * no start, and the ISP -- which begins on a frame start -- ignores
+         * it. The whole frame comes from triggering in the blanking, which
+         * the stock does by chaining: its next shot follows the previous
+         * frame's END within 37-156 us (impl-2, stock-shot-phase-720p.md),
+         * and its first shot goes to a parser that has never seen a packet,
+         * which then waits for the next start.
          *
-         * So the frame period is measured first, from one start to the next,
-         * and the trigger is aimed just short of the following one. */
+         * There is no period measurement here any more. Measuring it armed
+         * the frame-start condition and returned exactly at a start, and
+         * the shot that followed two milliseconds later landed in the
+         * active part of the frame every time -- as did the ones 400 ms
+         * later, six periods and four milliseconds on (00:05 to 00:28,
+         * three runs, nine shots, no frame start). The parser is reset and
+         * enabled here and left alone until the first shot. */
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
@@ -1875,15 +1868,6 @@ int main(int argc, char **argv)
         vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
                   CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
         vi_flush(0);
-
-        int period = 0;
-        WAIT_FRAME_START(400);
-        for (int i = 0; i < 3; i++) {
-            int p = WAIT_FRAME_START(400);
-            if (p > 0 && (period == 0 || p < period)) period = p;
-        }
-        period = period > 0 ? period : 132;      /* half-millisecond ticks */
-        printf("  frame period: %d.%d ms\n", period / 2, (period % 2) * 5);
 
         /* Bring the tile engine up the way stock does, before asking for a
          * real frame: a warm-up frame with the enable inside it, then the
@@ -1905,10 +1889,16 @@ int main(int argc, char **argv)
         mw_base = syncpt_read(sp_mw);
         fe_base = syncpt_read(VI1_ISPB_SYNCPT);
         for (int shot = 0; shot < shots; shot++) {
-            int started = 0, waited = 0;
+            int started = 0, ended = 0, waited = 0;
 
             uint32_t fs_sp = no_isp ? sp_id : VI1_FLASH_SYNCPT;
             uint32_t fs0 = syncpt_read(fs_sp);
+            /* The frame END (46, condition 0xf) is what every shot but the
+             * first chains on: it fires whether or not the frame had a
+             * start, so it is the boundary the next shot has to follow at
+             * once. Read before the shot, so that only this shot's end
+             * counts. */
+            uint32_t fe0 = syncpt_read(VI1_ISPB_SYNCPT);
             /* The ISP channel's own counter (38): every job of ours ends
              * with an immediate increment on it, so it tells whether the
              * job has actually executed -- config loaded, trigger 0x05
@@ -2072,51 +2062,48 @@ int main(int argc, char **argv)
             }
 
             waited = 0;
-            while (syncpt_read(fs_sp) == fs0 && waited < 400) {
-                usleep(1000);
-                waited++;
+            if (no_isp) {
+                while (syncpt_read(fs_sp) == fs0 && waited < 400) {
+                    usleep(1000);
+                    waited++;
+                }
+                started = syncpt_read(fs_sp) != fs0;
+                ended = syncpt_read(VI1_ISPB_SYNCPT) != fe0;
+            } else {
+                /* Wait for this shot's frame END, not its start: a shot
+                 * that landed inside a frame has no start to wait for, but
+                 * its end still comes, and that end is the boundary the
+                 * next shot has to follow while the sensor is still in the
+                 * blanking. Nothing below this point may take long. */
+                while (syncpt_read(VI1_ISPB_SYNCPT) == fe0 && waited < 300) {
+                    usleep(1000);
+                    waited++;
+                }
+                ended = syncpt_read(VI1_ISPB_SYNCPT) != fe0;
+                started = syncpt_read(fs_sp) != fs0;
             }
-            started = syncpt_read(fs_sp) != fs0;
 
-            /* Release the ISP's parked job as soon as the block says it
-             * has written, and give up after a bounded wait either way.
-             * Holding it until the end of the whole capture is what kept
-             * running past the job timeout the kernel allows -- and a
-             * job that overruns takes the ISP channel with it, which
-             * costs a reboot. Short and self-limiting instead. */
-            /* The parked job now holds the mapping until the frame and
-             * the statistics are actually done, so the loop here only
-             * watches -- no more keepalive submits every two
-             * milliseconds, which was what buried the channel in
-             * three-second timeouts whenever anything stalled. */
+            /* The ISP's output write follows the frame end by a few
+             * milliseconds. Wait for it only when a frame actually started
+             * -- an end without a start wrote nothing and would only burn
+             * the blanking -- and only briefly: the next ISP job must not
+             * be loaded while the block is still writing this one out, and
+             * the next shot must still land before the following start. */
             if (isp_fd >= 0 && out_iova) {
                 int w2 = 0;
-                /* A full-resolution frame writes at roughly three rows a
-                 * millisecond here, so it needs the better part of a
-                 * second -- six hundred milliseconds cut it off at
-                 * seventeen hundred rows of nineteen hundred. */
-                while (syncpt_read(sp_mem) == isp_base_mem && w2 < isp_wait_ms) {
-                    usleep(2000);
-                    w2 += 2;
-                }
-                /* A moment beyond the condition, because the last
-                 * transfer may still be draining when it fires. */
+                if (started)
+                    while (syncpt_read(sp_mem) == isp_base_mem && w2 < 10) {
+                        usleep(1000);
+                        w2++;
+                    }
                 if (syncpt_read(sp_mem) == isp_base_mem) isp_nowrite++;
                 printf("  ISP wrote after %dms%s\n", w2,
                        syncpt_read(sp_mem) != isp_base_mem ? "" : " (NO)");
             }
 
-            /* One whole frame from the start, plus what the caller asks
-             * for on top -- unless --fast-arm. The sensor's active part
-             * is about a third of the 66 ms period; a trigger that
-             * arrives a quarter of a second after the last frame lands
-             * at a random phase, and inside the active part it catches
-             * a frame already under way: the receiver flags it (parser
-             * 0x34, 0x1b4) and the block never completes. The stock
-             * camera arms the next frame the moment the previous one is
-             * done, inside the blanking. */
-            printf("  frame %d: %s (start %dms, settle %dms), parser %08x\n",
-                   shot, started ? "started" : "NEVER STARTED", waited, settle,
+            printf("  frame %d: START %s, END %s after %d ms, parser %08x\n",
+                   shot, started ? "yes" : "NO",
+                   ended ? "seen" : "NOT SEEN", waited,
                    vi_rd(T124_PP_B_PIXEL_PARSER_STATUS));
 
             /* A warm-up round is not one of the frames that were asked

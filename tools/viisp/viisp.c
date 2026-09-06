@@ -641,47 +641,42 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
  * trigger (impl-2, stock-steady-cycle-720p.md §1, §8). This is the cal
  * round, verbatim; the frame gather is isp_frame with everything else
  * left out. */
-/* The stock's steady-state VI gather, word for word (stock_front_720p_full.txt
- * :8793, 285 of them in the session): a host1x wait on the ISP channel's
- * counter, THREE class words back to VI, the single-shot, the two arms
- * (frame end onto 46, frame start onto 49); then the increment on the
- * channel's own counter 47 as a second gather; 46, 49 and 47 declared. Our
- * first form had one class word after the wait and the shot as the very
- * next method -- the gathers retired (47 moved) but no frame ever started
- * (49 never moved): the shot did not take. The stock pads every class
- * switch after a wait with the same three words, in this gather and in
- * its 68-word one, and that is what is replicated here. */
-static int vi_shot_gather(int vi_fd, uint32_t base,
-                          uint32_t wait_sp, uint32_t wait_thr, uint32_t sp_cmd,
+/* The stock's shot, as the decompiled NvViCsiSingleShotAndFlushT12x sends
+ * it and as its 285 steady-state gathers read (stock_front_720p_full.txt
+ * :8793): class VI, single-shot first, then the arms -- frame end onto 46,
+ * frame start onto 49 -- then the channel's own increment as a second
+ * gather. No host1x wait inside: the stock's wait is on the frame job's
+ * fence, which this tool's CPU already waited for before calling, and a
+ * wait with a threshold from the future is how the channel deadlocked
+ * (2026-09-07 00:02). Only 47 is declared: a frame that never starts must
+ * not take the VI channel down, and the declared 46/49 of our previous
+ * form did exactly that. The kernel adds SETCLASS(VI) for class 0x30. */
+static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t sp_cmd,
                           uint32_t sp_fe, uint32_t sp_fs)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-    uint32_t g[16];
+    uint32_t g[12];
     unsigned n = 0;
-    g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
-    g[n++] = OP_NONINCR(HOST1X_WAIT_SYNCPT, 1); g[n++] = (wait_sp << 24) | (wait_thr & 0xFFFFFF);
-    g[n++] = OP_SETCLASS(VI_CLASS_ID);
-    g[n++] = OP_SETCLASS(VI_CLASS_ID);
     g[n++] = OP_SETCLASS(VI_CLASS_ID);
     g[n++] = OP_NONINCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1); g[n++] = 1;
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0fu << 8) | sp_fe;
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0au << 8) | sp_fs;
-    unsigned n0 = n;                                   /* 12 words */
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = sp_cmd;    /* the tail, its own gather */
+    unsigned n0 = n;
+    g[n++] = OP_NONINCR(0x000, 1); g[n++] = sp_cmd;
     nvmap_rw(cmd_h, 0, g, n * 4, 1);
     gather_log("vi-shot", g, n);
 
     struct nvhost_cmdbuf cb[2] = { { cmd_h, 0, n0 }, { cmd_h, n0 * 4, n - n0 } };
-    struct nvhost_syncpt_incr si[3] = { { sp_fe, 1 }, { sp_fs, 1 }, { sp_cmd, 1 } };
+    struct nvhost_syncpt_incr si = { sp_cmd, 1 };
     uint32_t cls[2] = { VI_CLASS_ID, VI_CLASS_ID };
     struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 3;
+    sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 2;
     sa.timeout = 3000;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)si;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)cb;
     sa.class_ids = (uint32_t)(uintptr_t)cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
@@ -1989,13 +1984,18 @@ int main(int argc, char **argv)
              * (0x34/0xb4) and bands of the picture shifted sideways by
              * the pixels lost. */
             if (isp_fd >= 0 && (warm_h || (out_iova && stats_h))) {
+                /* Wait for the ISP job this shot feeds to have executed: its
+                 * own fence on 38 (the stock's VI shot waits for exactly
+                 * this value), not merely for the counter to move. */
                 int wj = 0;
-                while (syncpt_read(isp_sp) == isp_fence0 && wj < 500) {
+                uint32_t want = shot_fence ? shot_fence : isp_fence0 + 1;
+                while ((int)(syncpt_read(isp_sp) - want) < 0 && wj < 500) {
                     usleep(1000);
                     wj++;
                 }
                 if (wj >= 500)
-                    printf("  ISP job not executed within 500 ms (38 unchanged)\n");
+                    printf("  ISP job not executed within 500 ms (38 at %u, wanted %u)\n",
+                           syncpt_read(isp_sp), want);
             }
             if (no_isp) {
                 vi_wr(base + VI_CSI_SURFACE0_OFFSET_MSB, 0);
@@ -2040,14 +2040,28 @@ int main(int argc, char **argv)
                 /* The ISP path shoots the stock's way: one VI gather that
                  * waits for the ISP job just sent and fires the single-shot
                  * with the frame-end and frame-start arms declared. */
-                /* The parser command word first, as the CPU path wrote it
-                 * (enable + single-shot enable), then the stock's 12-word
-                 * gather: wait for the ISP job, shoot, arm. */
-                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
-                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
-                vi_flush(0);
-                vi_shot_gather(vi_fd, base, isp_sp, shot_fence ? shot_fence : syncpt_read(isp_sp),
-                               sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
+                /* The ISP job this shot feeds has executed (38 reached its
+                 * fence, waited for above). Now the phase: the stock's shot
+                 * leaves within ~200 us of the previous frame's end -- its
+                 * park on 46 releases, the ISP round goes in, the shot
+                 * follows -- so it always lands in the blanking and the
+                 * capture begins at the next frame start. Ours left at
+                 * whatever phase our waits ended in, and the gathers of
+                 * 2026-09-07 00:05 each produced a frame end (46 +3) and
+                 * never a frame start (49 +0): captures begun mid-frame.
+                 * So: arm one frame end, wait for it, shoot at once. No
+                 * parser command word per shot -- the stock writes it once,
+                 * in its session config. */
+                {
+                    uint32_t fe = syncpt_read(VI1_ISPB_SYNCPT);
+                    vi_wr(TEGRA_VI_CFG_VI_INCR_SYNCPT, (0x0fu << 8) | VI1_ISPB_SYNCPT);
+                    vi_flush(0);
+                    int wfe = 0;
+                    while (syncpt_read(VI1_ISPB_SYNCPT) == fe && wfe < 300) { usleep(500); wfe++; }
+                    if (syncpt_read(VI1_ISPB_SYNCPT) == fe)
+                        printf("  no frame end seen in 150 ms before the shot\n");
+                }
+                vi_shot_gather(vi_fd, base, sp_cmd, VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
 
             waited = 0;

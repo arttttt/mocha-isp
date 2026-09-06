@@ -341,7 +341,7 @@ static inline uint32_t work_word(uint32_t iova) { return work_word_set ? work_wo
 extern int stock_vi, no_isp, sensor_late, cile_rewritten;
 extern unsigned long emc_bw;
 extern int isp_wait_ms, stream_n, isp_job_timeout_ms, shot_delay_ms, emc_pin;
-extern int no_emc_bw, no_set_emc, blc_tail, x400_idx;
+extern int no_emc_bw, no_set_emc, blc_tail, x400_idx, kernel_csi;
 extern uint32_t x400_val;
 extern unsigned isp_emc_clk;
 extern uint32_t wb_r, wb_b;

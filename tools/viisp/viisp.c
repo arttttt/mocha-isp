@@ -1620,6 +1620,7 @@ int main(int argc, char **argv)
         else if (strncmp(a, "--pp-trace=", 11) == 0) pp_trace_ms = atoi(a + 11);
         else if (strncmp(a, "--shot-delay=", 13) == 0) shot_delay_ms = atoi(a + 13);
         else if (strcmp(a, "--emc-pin") == 0) emc_pin = 1;
+        else if (strcmp(a, "--kernel-csi") == 0) kernel_csi = 1;
         else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
         else if (strncmp(a, "--x400-word=", 12) == 0) {
             x400_idx = atoi(a + 12);
@@ -2174,18 +2175,29 @@ int main(int argc, char **argv)
      * sensor: only CILA/CILB (zero) and CILE (zero, then THS 9). The
      * 4x brick mode here is what the R21.5 V4L2 driver did. */
     if (!(stock_vi & 4)) vi_wr(T124_CILC_PAD_CONFIG0, 0x00010000);
+    if (kernel_csi) {
+        /* --kernel-csi: the registers the kernel's own port-B path writes
+         * and this reconstruction had left to reset defaults (impl-1,
+         * csi-bringup-diff.md): the A/B pads and masks, the full PHY_CIL
+         * command word, THS 0xa on CIL E, a parser reset before use,
+         * CONTROL1 0x11, and the kernel's teardown at exit. */
+        vi_wr(T124_CILA_PAD_CONFIG0, 0x00010000);
+        vi_wr(T124_CILB_PAD_CONFIG0, 0x00000000);
+    }
     vi_wr(T124_CILD_PAD_CONFIG0, 0x00000000);
     vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
 
+    if (kernel_csi) { vi_wr(T124_CSI_CIL_A_INT_MASK, 0x0); vi_wr(T124_CSI_CIL_B_INT_MASK, 0x0); }
     vi_wr(T124_CSI_CIL_C_INT_MASK, 0x0);
     vi_wr(T124_CSI_CIL_D_INT_MASK, 0x0);
     vi_wr(T124_CSI_CIL_E_INT_MASK, 0x0);
-    vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+    vi_wr(T124_PHY_CILE_CONTROL0, kernel_csi ? 0x0000000a : 0x00000009);
 
     /* Reset the parser, configure it, then enable -- the command word
      * is written twice on purpose, and the single-shot bit rides along
      * both times. */
     vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);
+    if (kernel_csi) vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f007);   /* the kernel resets twice */
     vi_wr(T124_PP_B_PIXEL_STREAM_PP_INT_MASK, 0x0);
     /* --stock-vi: the words the stock camera (an R19-era stack) writes
      * through its VI channel, read out of its gathers -- PAD_FRAME 0
@@ -2194,7 +2206,7 @@ int main(int argc, char **argv)
      * The same words at 2592 and 1280 wide. */
     vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL0, (stock_vi & 2) ? 0x080301f1 : 0x280301f1);
     vi_wr(T124_PP_B_PIXEL_STREAM_PP_COMMAND, 0x0000f005);
-    vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, (stock_vi & 2) ? 0 : 0x00000011);
+    vi_wr(T124_PP_B_PIXEL_STREAM_CONTROL1, kernel_csi ? 0x00000011 : (stock_vi & 2) ? 0 : 0x00000011);
     vi_wr(T124_PP_B_PIXEL_STREAM_GAP, 0x00140000);
     vi_wr(T124_PP_B_PIXEL_STREAM_EXPECTED_FRAME, 0x0);
     vi_wr(T124_PP_B_INPUT_STREAM_CONTROL, (stock_vi & 2) ? 0x007f0014 : 0x003f0000);
@@ -2202,6 +2214,12 @@ int main(int argc, char **argv)
     /* Only the upper half of the brick command is ours; the lower half
      * belongs to the rear path and has to survive our write. The stock
      * enables brick E alone (0x10000000) and leaves C and D untouched. */
+    if (kernel_csi) {
+        /* Whole words, as the kernel writes them: everything off, then port
+         * B on one lane -- the low half is not to be trusted after a boot. */
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x22020202);
+        vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x12020202);
+    } else
     vi_wr(T124_CSI_PHY_CIL_COMMAND,
           (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) |
           ((stock_vi & 4) ? 0x10000000 : 0x12020000 /* brick E, one lane */));
@@ -2690,7 +2708,7 @@ int main(int argc, char **argv)
                        vi_rd(T124_CILE_PAD_CONFIG0));
                 vi_wr(T124_CILE_PAD_CONFIG0, 0x00000000);
                 vi_wr(T124_CILE_PAD_CONFIG0 + 4, 0x00000000);
-                vi_wr(T124_PHY_CILE_CONTROL0, 0x00000009);
+                vi_wr(T124_PHY_CILE_CONTROL0, kernel_csi ? 0x0000000a : 0x00000009);
                 cile_rewritten = 1;
             }
             vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
@@ -2806,11 +2824,22 @@ int main(int argc, char **argv)
          * the buffer from the top with a newer frame and leaving the tail of
          * an older one below. That is the tear: not a write that stopped
          * short, but one that had started again. */
+        if (kernel_csi) {
+            /* The kernel's stop: parser disabled, clock gating on, the
+             * channel reset fully, CIL E switched off. */
+            vi_wr(pp, 0x0000f002);
+            vi_wr(TEGRA_VI_CFG_CG_CTRL, 1);
+            vi_wr(base + VI_CSI_SW_RESET, 0x1F);
+            vi_wr(base + VI_CSI_SW_RESET, 0x0);
+            vi_wr(T124_CSI_PHY_CIL_COMMAND, 0x22020201);
+            vi_flush("capture stopped (kernel form)");
+        } else {
         vi_wr(pp, 0);
         vi_wr(base + VI_CSI_SINGLE_SHOT, 0);
         vi_wr(base + VI_CSI_SW_RESET, 0xF);
         vi_wr(base + VI_CSI_SW_RESET, 0x0);
         vi_flush("capture stopped");
+        }
         if (isp_fd >= 0 && out_iova) isp_stop(isp_fd, isp_sp);
 
         /* Release whichever job is parked -- VI's on the memory path, the

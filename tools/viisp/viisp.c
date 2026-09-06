@@ -475,7 +475,7 @@ static uint32_t isp_seq_base = 0;
  * never written), while either half alone changed nothing visible. The
  * stock writes these zeros before its sensor streams; we write them with
  * the wire already live, which is not the same experiment. */
-static int ping_only = 0, syncpts_only = 0;
+static int ping_only = 0, syncpts_only = 0, mipi_dump_only = 0;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -957,6 +957,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-isp") == 0)      no_isp = 1;
         else if (strcmp(a, "--ping") == 0)        ping_only = 1;
         else if (strcmp(a, "--syncpts") == 0)     syncpts_only = 1;
+        else if (strcmp(a, "--mipi-dump") == 0)   mipi_dump_only = 1;
         else { printf("unknown option %s\n", a); return 1; }
     }
 
@@ -975,6 +976,25 @@ int main(int argc, char **argv)
     uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
 
     if (syncpts_only) { syncpt_table(); return 0; }
+    if (mipi_dump_only) {
+        /* The MIPI calibration block's registers, read with its clocks
+         * held through /dev/mipi-cal (the block is unclocked otherwise
+         * and a read then hangs the bus). Touches nothing else: safe
+         * before, after or during a stock session -- the values persist,
+         * so what the stock's calibration left can be read after it. */
+        int cal_fd = open("/dev/mipi-cal", O_RDWR);
+        if (cal_fd < 0) { printf("/dev/mipi-cal: %s\n", strerror(errno)); return 1; }
+        printf("MIPI_CAL 0x700E3000:");
+        for (unsigned off = 0; off < 0x80; off += 4) {
+            uint32_t v = 0;
+            if (off % 32 == 0) printf("\n  +0x%02x:", off);
+            mem_rd(MIPI_CAL_BASE + off, &v);
+            printf(" %08x", v);
+        }
+        printf("\n");
+        close(cal_fd);
+        return 0;
+    }
     stock_open_W = W; stock_open_H = H;
     if (!frame_length) frame_length = 2 * native_vts(W, H);
     if (coarse_time >= frame_length) coarse_time = frame_length - 8;

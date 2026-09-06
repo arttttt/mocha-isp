@@ -1104,7 +1104,7 @@ int isp_colour(int isp_fd, uint32_t sp, uint32_t work_iova,
  * began. */
 static int isp_nowrite = 0, isp_stop_acked = -1;
 static uint32_t isp_seq_base = 0;
-static int ping_only = 0, syncpts_only = 0, no_stock_zero = 0;
+static int ping_only = 0, syncpts_only = 0, stock_zero = 3;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -1695,7 +1695,8 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--kernel-csi") == 0) kernel_csi = 1;
         else if (strcmp(a, "--no-x930") == 0) no_x930 = 1;
         else if (strcmp(a, "--release-csib") == 0) release_csib = 1;
-        else if (strcmp(a, "--no-stock-zero") == 0) no_stock_zero = 1;
+        else if (strcmp(a, "--no-stock-zero") == 0) stock_zero = 0;
+        else if (strncmp(a, "--stock-zero=", 13) == 0) stock_zero = (int)strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--ping") == 0) ping_only = 1;
         else if (strcmp(a, "--syncpts") == 0) syncpts_only = 1;
         else if (strncmp(a, "--blc-tail=", 11) == 0) blc_tail = (int)strtol(a + 11, 0, 16);
@@ -2268,15 +2269,17 @@ int main(int argc, char **argv)
      * generator block to zero, clearing whatever a rear session left. We
      * had never touched either; every dump of ours carried the leftovers.
      * Its own batch, so the bring-up below keeps its one call. */
-    /* --no-stock-zero leaves this batch out, for attributing a change in
-     * behaviour between it and the rest of the run. */
-    if (!kernel_csi && !no_stock_zero) {
+    /* With both in, the ISP wrote nothing at 720p (2026-09-06 15:10,
+     * parser 0x30) where the same run without them gave its usual
+     * picture -- so --stock-zero=MASK splits them: 1 = the A/B bricks'
+     * pad and control words, 2 = the PG_B block; --no-stock-zero = 0. */
+    if (!kernel_csi && (stock_zero & 1)) {
         vi_wr(T124_CILA_PAD_CONFIG0, 0);
         vi_wr(T124_PHY_CILA_CONTROL0, 0);
         vi_wr(T124_CILB_PAD_CONFIG0, 0);
         vi_wr(T124_PHY_CILB_CONTROL0, 0);
     }
-    if (!no_stock_zero) {
+    if (stock_zero & 2) {
         static const uint32_t pg_b[] = {
             0xA68, 0xA6C, 0xA70, 0xA74, 0xA78, 0xA7C, 0xA80, 0xA84, 0xA88,
             0xA9C, 0xAA0, 0xAA4, 0xAA8, 0xAAC, 0xAB0, 0xAB4, 0xAB8, 0xABC,

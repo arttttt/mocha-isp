@@ -86,7 +86,16 @@ void mipi_calibrate_csie(void)
     /* 2. Clear the status bits. */
     /* The stock (NvViCsiCalibrateT12x in libnvvicsi_v3, decompiled) writes
      * 0 here; the 24.1 kernel writes 0xF1F10000. We follow the stock. */
-    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0x00000000, 0);
+    /* The stock's NvViCsiCalibrateT12x (libnvvicsi_v3.so, decompiled
+     * 2026-09-06) writes 0xF1F10000 here: the DONE bits clear on a
+     * written one, so a zero left the previous calibration's DONE in
+     * place and the poll below saw "done" on its first read, every run,
+     * before the sequence had run at all. Fine at 720p's ~400 Mbit/s a
+     * lane; at 2592/1080's ~800 the uncalibrated pads gave short
+     * frames. */
+    uint32_t stale = 0;
+    mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &stale);
+    mem_wr(MIPI_CAL_BASE + MIPI_CAL_STATUS, 0xF1F10000, 0);
 
     /* 3. The display lanes are not ours; drop them. */
     mipi_upd(MIPI_CAL_DSIA_CFG, MIPI_CAL_DSI_SEL, 0);
@@ -122,14 +131,15 @@ void mipi_calibrate_csie(void)
 
     /* 8. The driver polls up to five hundred times at a couple of hundred
      * microseconds; a single short sleep was not giving it time. */
-    int tries = 500;
+    /* The stock polls every 20 us, up to twenty times per attempt. */
+    int tries = 200;
     while (tries--) {
+        usleep(20);
         if (mem_rd(MIPI_CAL_BASE + MIPI_CAL_STATUS, &st) < 0) break;
         if (st & MIPI_CAL_DONE) break;
-        usleep(300);
     }
-    printf("  MIPI calibration: status 0x%08x after %d polls (%s%s)\n",
-           st, 500 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done",
+    printf("  MIPI calibration: status 0x%08x (was 0x%08x before the clear) after %d polls of 20 us (%s%s)\n",
+           st, stale, 200 - tries, (st & MIPI_CAL_DONE) ? "done" : "NOT done",
            (st & MIPI_CAL_ACTIVE) ? ", still active" : "");
     {
         /* Read back what the block actually holds. A calibration that stays

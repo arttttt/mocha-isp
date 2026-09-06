@@ -2426,7 +2426,39 @@ shutdown:
     ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)buf_h);
     close(vi_fd);
     close(nvmap_fd);
-    acm_release();
+    /* The gating delays go back only once neither channel is owed
+     * anything. Restoring them with a job still pending is what hung the
+     * tool in D state (2026-09-07 01:42): the kernel gates the idle module
+     * at once, in this process, and its channel suspend waits for the
+     * command queue to drain -- while the pending job's timeout handler,
+     * three seconds later, needs the module awake again and waits for the
+     * suspend to finish. Neither side can move. A job the block never
+     * completes dies at its timeout (three seconds for the opening jobs),
+     * so the wait here is a little longer than that; if something is still
+     * owed after it, the delays stay where they are and the log says so. */
+    {
+        struct { const char *name; uint32_t id; } owed[] = {
+            { "38", isp_sp }, { "36", sp_mem }, { "37", sp_stats },
+            { "39", sp_loadv }, { "47", sp_cmd },
+        };
+        int w = 0, pending;
+        do {
+            pending = 0;
+            for (unsigned i = 0; i < sizeof owed / sizeof owed[0]; i++)
+                if (owed[i].id &&
+                    (int)(syncpt_read(owed[i].id) - syncpt_read_max(owed[i].id)) < 0)
+                    pending++;
+            if (pending) { usleep(50000); w += 50; }
+        } while (pending && w < 5000);
+        if (pending) {
+            printf("  %d counter(s) still owed after %d ms -- leaving the nvhost"
+                   " gating delays at their session values (a restore now would"
+                   " deadlock with the job timeout)\n", pending, w);
+        } else {
+            if (w) printf("  channels settled after %d ms\n", w);
+            acm_release();
+        }
+    }
     /* The line the wrapper reads. A job still owed on the sequencing
      * counter, or a stop the block never took, is a dead channel: the
      * kernel will print its timeout within isp_job_timeout_ms, and nothing

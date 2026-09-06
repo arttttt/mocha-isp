@@ -189,7 +189,7 @@ echo "=== run: $BIN ${ARGS[*]:-（defaults）} ==="
 # hidden the one line that mattered once. The exit status rides in the
 # output because this device's adb does not carry it.
 fingerprint before >> "$RUNLOG"
-adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}; echo TOOL_EXIT=\$?" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log" | tee -a "$RUNLOG"
+adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}; echo TOOL_EXIT=\$?" 2>&1 | perl -pe 'BEGIN{$|=1} s/\r//g' | tee "$ROOT/build/last-run.log" | tee -a "$RUNLOG"
 tool_exit=$(grep -oE "^TOOL_EXIT=[0-9]+" "$ROOT/build/last-run.log" | tail -1 | cut -d= -f2)
 tool_exit=${tool_exit:-1}
 fingerprint after >> "$RUNLOG"

@@ -450,7 +450,7 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
 /* Run-level verdict state: rounds in which the block never wrote, whether
  * the stop was taken, and where the sequencing counter stood when the run
  * began. */
-static int isp_nowrite = 0, isp_stop_acked = -1;
+static int isp_nowrite = 0, isp_fences_met = -1;
 static uint32_t isp_seq_base = 0;
 /* Off by default: with both halves in, the ISP wrote nothing at 720p
  * (2026-09-06, twice: 15:10 and 15:13, parser 0x30/0xb4, first warm-up
@@ -664,59 +664,6 @@ static int isp_cal_round(int isp_fd, uint32_t sp)
     return rc;
 }
 
-int isp_stop(int isp_fd, uint32_t sp)
-{
-    uint32_t cmd_h = nvmap_create(4096);
-    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-
-    /* No 0x00C=0: the stock camera never writes a zero trigger, and a write
-     * the hardware has no meaning for is one more thing to differ on. */
-    uint32_t g[8];
-    int n = 0;
-    g[n++] = OP_SETCLASS(ISP_CLASS_B);
-    g[n++] = OP_INCR(0x015, 1); g[n++] = 0x00000000;
-    g[n++] = OP_IMM(0, sp);
-    nvmap_rw(cmd_h, 0, g, (uint32_t)n * 4, 1);
-    gather_log("stop", g, (unsigned)n);
-
-    struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-    struct nvhost_syncpt_incr si = { sp, 1 };
-    uint32_t cls = ISP_CLASS_B;
-    struct nvhost_fence fence = { 0, 0 };
-    struct nvhost32_submit_args sa;
-    memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 1;
-    sa.num_cmdbufs = 1;
-    sa.timeout = 3000;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
-    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
-    sa.class_ids = (uint32_t)(uintptr_t)&cls;
-    sa.fences = (uint32_t)(uintptr_t)&fence;
-    errno = 0;
-    uint32_t was = syncpt_read(sp);
-    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
-
-    /* Wait for the block to actually take it. Submitting and walking away
-     * left a write still in flight, and by the time it landed the buffer
-     * had been unmapped: the memory controller reported a decode error
-     * from the ISP's own write client on an address in what had been our
-     * output. Nothing here may release memory the hardware can still
-     * reach. */
-    int waited = 0;
-    while (syncpt_read(sp) == was && waited < 500) {
-        usleep(2000);
-        waited += 2;
-    }
-    /* And a moment beyond that, because the disable is what the job
-     * carries, not proof that the last transfer has drained. */
-    usleep(20000);
-
-    printf("ISP stopped: rc=%d (%s), settled in %d ms%s\n", rc,
-           rc == 0 ? "ok" : strerror(errno), waited,
-           syncpt_read(sp) == was ? " -- NEVER ACKNOWLEDGED" : "");
-    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
-    return syncpt_read(sp) != was;
-}
 
 /* The per-frame gather, word for word as the stock camera sends it: output
  * geometry, three plane triplets for planar YUV, the processing block, the
@@ -1883,6 +1830,7 @@ int main(int argc, char **argv)
             }
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
+                isp_base_stats = syncpt_read(sp_stats);
                 isp_cal_round(isp_fd, isp_sp);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                           sp_mem, sp_stats, sp_loadv, isp_sp);
@@ -2039,27 +1987,38 @@ int main(int argc, char **argv)
             ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)warm_h);
         }
 
-        /* Stop the capture before reading a single byte. The trigger bit
-         * stays set once written and the acknowledge kept firing at once,
-         * frame after frame -- so while we sat waiting, VI was overwriting
-         * the buffer from the top with a newer frame and leaving the tail of
-         * an older one below. That is the tear: not a write that stopped
-         * short, but one that had started again. */
-        vi_wr(pp, 0);
-        vi_wr(base + VI_CSI_SINGLE_SHOT, 0);
-        vi_wr(base + VI_CSI_SW_RESET, 0xF);
-        vi_wr(base + VI_CSI_SW_RESET, 0x0);
-        /* And the stock's own teardown, which ours had left out: the
-         * routing cleared and brick E switched off, so the next session
-         * -- ours or the stock's -- starts from what the stock leaves,
-         * not from our streaming state (impl-1's diff, rows 0x20c and
-         * 0x908). The low half of the brick command belongs to the rear
-         * path and survives. */
+        /* The session's end, the stock's way (impl-1, stock-front-timeline
+         * §5): not one write reaches the ISP -- no 0x015 = 0, no stop job
+         * -- the client waits for the frame's fences, releases its
+         * buffers, and on the VI side clears the routing and switches
+         * brick E off; the ISP keeps its last configuration and loses
+         * power when it idles. Ours used to disable the ISP first, and
+         * the device hung in idle after two of the three runs that
+         * followed the stock's opening. So: fences first, bounded. */
+        if (isp_fd >= 0 && out_iova) {
+            int w = 0;
+            while ((syncpt_read_max(isp_sp) != syncpt_read(isp_sp)
+                    || syncpt_read(sp_mem) == isp_base_mem
+                    || syncpt_read(sp_stats) == isp_base_stats) && w < 1000) {
+                usleep(2000);
+                w += 2;
+            }
+            isp_fences_met = syncpt_read_max(isp_sp) == syncpt_read(isp_sp)
+                             && syncpt_read(sp_mem) != isp_base_mem
+                             && syncpt_read(sp_stats) != isp_base_stats;
+            printf("session end: fences %s after %d ms (38 %u/%u, 36 %+d, 37 %+d)\n",
+                   isp_fences_met ? "met" : "NOT MET", w,
+                   syncpt_read(isp_sp), syncpt_read_max(isp_sp),
+                   (int)(syncpt_read(sp_mem) - isp_base_mem),
+                   (int)(syncpt_read(sp_stats) - isp_base_stats));
+        }
+        /* The stock's VI-side teardown: the routing cleared and brick E
+         * switched off. The low half of the brick command belongs to the
+         * rear path and survives. */
         vi_wr(base + VI_CSI_IMAGE_DEF, 0);
         vi_wr(T124_CSI_PHY_CIL_COMMAND,
               (vi_rd(T124_CSI_PHY_CIL_COMMAND) & 0x0000FFFF) | 0x20000000);
-        vi_flush("capture stopped");
-        if (isp_fd >= 0 && out_iova) isp_stop_acked = isp_stop(isp_fd, isp_sp);
+        vi_flush("session end (VI unrouted, brick E off)");
 
         /* Release whichever job is parked -- VI's on the memory path, the
          * ISP's on this one. Both wait on the same counter and neither can
@@ -2265,17 +2224,17 @@ shutdown:
     if (isp_fd >= 0 && isp_sp) {
         uint32_t mn = syncpt_read(isp_sp), mx = syncpt_read_max(isp_sp);
         unsigned owed = mx - mn, done = mn - isp_seq_base;
-        if (owed == 0 && isp_stop_acked != 0) {
+        if (owed == 0 && isp_fences_met != 0) {
             printf("ISP VERDICT: ALIVE -- counter %u: %u job(s) this run, all retired%s%s\n",
                    isp_sp, done,
-                   isp_stop_acked > 0 ? ", stop acknowledged" : "",
+                   isp_fences_met > 0 ? ", fences met" : "",
                    isp_nowrite ? " -- BUT the block produced no write in some round(s), see above" : "");
         } else {
             printf("ISP VERDICT: DEAD -- counter %u value %u promised %u: %u job(s) still owed%s;"
                    " the kernel times the channel out within %d s;"
                    " THIS RUN IS NOT EVIDENCE -- reboot before the next\n",
                    isp_sp, mn, mx, owed,
-                   isp_stop_acked == 0 ? ", stop never acknowledged" : "",
+                   isp_fences_met == 0 ? ", fences never met" : "",
                    isp_job_timeout_ms / 1000 + 1);
             rc_final = 3;
         }

@@ -641,42 +641,27 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
  * trigger (impl-2, stock-steady-cycle-720p.md §1, §8). This is the cal
  * round, verbatim; the frame gather is isp_frame with everything else
  * left out. */
-/* The stock's per-frame VI gather, in its form (impl-2, stock-720p-frame-path
- * §3, 68 words at 60848745): the DVFS word, the state update, the port-B
- * image block with its routing cleared, the pattern generator cleared, the
- * ISP interface, the parser words, brick E on, its pads, then a host1x wait
- * on the ISP channel's counter for the job just sent, the image block again
- * with the routing set, the pads again, the single-shot, and the two arms
- * (frame end onto 46, frame start onto 49) -- one gather on vi.1, sequenced
- * on its command counter 47, all three declared as the stock declares them.
- * We had been poking the same registers one by one from the CPU. */
-static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
-                          uint32_t size_word, uint32_t wc_word, uint32_t dt,
+/* The stock's steady-state VI gather, its 12-word form (impl-2,
+ * stock-stream-schedule-720p.md): a host1x wait on the ISP channel's counter
+ * for the job just sent, the single-shot, the two arms (frame end onto 46,
+ * frame start onto 49), and the increment on the channel's own counter 47.
+ * The 68-word form -- the port-B block rewritten, the pattern generator
+ * cleared, the CIL E pads written -- is the stock's reconfiguration gather,
+ * sent at its first frames only; sent with every shot here (2026-09-06
+ * 23:34) it left the lanes without a frame start and the run dead. The
+ * registers it carries are what our bring-up already wrote. Only 47 is
+ * declared: a frame that never comes must not take the VI channel down. */
+static int vi_shot_gather(int vi_fd, uint32_t base,
                           uint32_t wait_sp, uint32_t wait_thr, uint32_t sp_cmd,
                           uint32_t sp_fe, uint32_t sp_fs)
 {
     uint32_t cmd_h = nvmap_create(4096);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
-    uint32_t g[96];
+    uint32_t g[16];
     unsigned n = 0;
-    g[n++] = OP_SETCLASS(VI_CLASS_ID);
-    g[n++] = OP_INCR(VI_METHOD(0x0F0), 1); g[n++] = 0x10100010;
-    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT_STATE_UPDATE), 1); g[n++] = 1;
-    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 6);
-    g[n++] = 0; g[n++] = 0x001c984c; g[n++] = 0; g[n++] = size_word; g[n++] = wc_word; g[n++] = dt;
-    g[n++] = OP_INCR(VI_METHOD(0xA9C), 9);
-    for (int i = 0; i < 9; i++) g[n++] = 0;
-    g[n++] = OP_INCR(VI_METHOD(0x264), 1); g[n++] = 3;
-    g[n++] = OP_INCR(VI_METHOD(0x86C), 6);
-    g[n++] = 0x007f0014; g[n++] = 0x080301f1; g[n++] = 0; g[n++] = 0x00140000; g[n++] = 0x0000f005; g[n++] = 0;
-    g[n++] = OP_INCR(VI_METHOD(0x908), 1); g[n++] = 0x10000000;
-    g[n++] = OP_INCR(VI_METHOD(0xA08), 3); g[n++] = 0; g[n++] = 0; g[n++] = 9;
     g[n++] = OP_SETCLASS(HOST1X_CLASS_ID);
     g[n++] = OP_INCR(HOST1X_WAIT_SYNCPT, 1); g[n++] = (wait_sp << 24) | (wait_thr & 0xFFFFFF);
     g[n++] = OP_SETCLASS(VI_CLASS_ID);
-    g[n++] = OP_INCR(VI_METHOD(base + VI_CSI_IMAGE_DEF), 6);
-    g[n++] = image_def; g[n++] = 0x001c984c; g[n++] = 0; g[n++] = size_word; g[n++] = wc_word; g[n++] = dt;
-    g[n++] = OP_INCR(VI_METHOD(0xA08), 3); g[n++] = 0; g[n++] = 0; g[n++] = 9;
     g[n++] = OP_NONINCR(VI_METHOD(base + VI_CSI_SINGLE_SHOT), 1); g[n++] = 1;
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0fu << 8) | sp_fe;
     g[n++] = OP_NONINCR(0x000, 1); g[n++] = (0x0au << 8) | sp_fs;
@@ -685,15 +670,15 @@ static int vi_shot_gather(int vi_fd, uint32_t base, uint32_t image_def,
     gather_log("vi-shot", g, n);
 
     struct nvhost_cmdbuf cb = { cmd_h, 0, n };
-    struct nvhost_syncpt_incr si[3] = { { sp_fe, 1 }, { sp_fs, 1 }, { sp_cmd, 1 } };
+    struct nvhost_syncpt_incr si = { sp_cmd, 1 };
     uint32_t cls = VI_CLASS_ID;
     struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 3;
+    sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
     sa.timeout = 3000;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)si;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
     sa.class_ids = (uint32_t)(uintptr_t)&cls;
     sa.fences = (uint32_t)(uintptr_t)&fence;
@@ -2036,8 +2021,13 @@ int main(int argc, char **argv)
                 /* The ISP path shoots the stock's way: one VI gather that
                  * waits for the ISP job just sent and fires the single-shot
                  * with the frame-end and frame-start arms declared. */
-                vi_shot_gather(vi_fd, base, image_def, (OH << 16) | W, wc, IMAGE_DT_RAW10,
-                               isp_sp, syncpt_read_max(isp_sp), sp_cmd,
+                /* The parser command word first, as the CPU path wrote it
+                 * (enable + single-shot enable), then the stock's 12-word
+                 * gather: wait for the ISP job, shoot, arm. */
+                vi_wr(pp, (0xFu << CSI_PP_START_MARKER_FRAME_MAX_OFFSET) |
+                          CSI_PP_SINGLE_SHOT_ENABLE | CSI_PP_ENABLE);
+                vi_flush(0);
+                vi_shot_gather(vi_fd, base, isp_sp, syncpt_read_max(isp_sp), sp_cmd,
                                VI1_ISPB_SYNCPT, VI1_FLASH_SYNCPT);
             }
 

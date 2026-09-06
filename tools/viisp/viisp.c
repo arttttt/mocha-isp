@@ -457,9 +457,15 @@ int isp_warmup(int isp_fd, uint32_t sp, uint32_t warm_h,
     g[n++] = OP_INCR(0x100, 4);
     stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
 
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000424;
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000525;
-    g[n++] = OP_NONINCR(0x000, 1); g[n++] = 0x00000627;
+    /* No condition arms here. This job is the flush behind the last frame
+     * and completes no frame of its own: the three arms it used to carry
+     * (36, 37, 39) were never declared and never fired within the run,
+     * and an arm that is not matched by a declared increment is what let
+     * the hardware counters run ahead of the kernel's promise by one per
+     * session -- at two ahead the kernel's expiry test reads the next
+     * session's first declared fence as "wait forever" (nvhost_syncpt.c,
+     * the t == f != c case), that job dies at its timeout, and the module
+     * reset that follows met our exit and hung the tool (02:12). */
     g[n++] = OP_NONINCR(0x00C, 1); g[n++] = 0x00000005;
     g[n++] = OP_IMM(0, sp);
 
@@ -892,14 +898,26 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     struct nvhost_reloc_shift sh[3] = { { 0 }, { 0 }, { 0 } };
     (void)stats_h;
     struct nvhost_cmdbuf cb = { cmd_h, 0, (uint32_t)n };
-    /* Declared: only the immediate increment on the sequencing counter --
-     * see the warm-up for why the armed conditions are not declared too. */
-    struct nvhost_syncpt_incr si = { sp, 1 };
+    /* Declared: the sequencing counter and every condition armed above,
+     * one increment each -- the stock's frame job declares 36/37/39/38
+     * alike (impl-2, stock-720p-frame-path.md). An armed condition that is
+     * not declared fires anyway and leaves the hardware counter one ahead
+     * of the kernel's promise; two sessions of that and the next session's
+     * first declared fence reads as "wait forever" to nvhost's expiry test
+     * (t == f != c), the job dies at its timeout and the channel is torn
+     * down under the tool. The 2026-09-02 "garbage when declared" was that
+     * same teardown -- a module reset in the middle of the session -- back
+     * when the shots landed inside frames and the conditions rarely fired. */
+    struct nvhost_syncpt_incr si[4] = { { sp, 1 } };
+    unsigned nsi = 1;
+    if (sp_mem)   si[nsi++] = (struct nvhost_syncpt_incr){ sp_mem, 1 };
+    if (sp_stats) si[nsi++] = (struct nvhost_syncpt_incr){ sp_stats, 1 };
+    if (sp_loadv) si[nsi++] = (struct nvhost_syncpt_incr){ sp_loadv, 1 };
     uint32_t cls = ISP_CLASS_B;
     struct nvhost_fence fence = { 0, 0 };
     struct nvhost32_submit_args sa;
     memset(&sa, 0, sizeof sa);
-    sa.num_syncpt_incrs = 1;
+    sa.num_syncpt_incrs = nsi;
     sa.num_cmdbufs = 1;
     sa.num_relocs = 3;
     /* The single capture job is parked on a counter that moves only when
@@ -908,7 +926,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * a wedged stream should die in seconds rather than hold the channel
      * for a minute after the tool has exited. */
     sa.timeout = (uint32_t)isp_job_timeout_ms;
-    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)si;
     sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
     sa.relocs = (uint32_t)(uintptr_t)rel;
     sa.reloc_shifts = (uint32_t)(uintptr_t)sh;

@@ -93,6 +93,40 @@ channel_errors() {
 
 wait_ready || exit 1
 
+# Every run is archived with its own fingerprint of the device: a clean run
+# and a garbage run on the same code have to be diffable after the fact,
+# which they were not.
+mkdir -p "$ROOT/build/runs"
+STAMP=$(date +%Y%m%d-%H%M%S)
+RUNLOG="$ROOT/build/runs/$STAMP.log"
+echo "=== $STAMP: $BIN ${ARGS[*]:-} ===" > "$RUNLOG"
+
+fingerprint() {
+    echo "--- fingerprint ($1) ---"
+    adb shell 'echo "uptime $(cut -d" " -f1 /proc/uptime) emc_rate $(cat /sys/kernel/tegra_emc/emc_rate) gov $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)";
+      /data/local/tmp/viisp --syncpts 2>&1;
+      sh /data/local/tmp/carsample.sh 2>&1;
+      echo "PMC IO_DPD_REQ/STATUS DPD2_REQ/STATUS PWRGATE_STATUS:";
+      for a in 0x7000E5B8 0x7000E5BC 0x7000E5C0 0x7000E5C4 0x7000E438; do /data/local/tmp/memprobe --addr=$a --count=1 2>&1 | grep "+0x" | tr -d "\n"; echo -n " "; done; echo;
+      echo "MIPI_CAL 0x700E3000+0x00..0x3c:"; /data/local/tmp/memprobe --addr=0x700E3000 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
+      echo "MIPI_CAL 0x700E3040..0x7c:"; /data/local/tmp/memprobe --addr=0x700E3040 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
+      echo "VI registers (non-zero):"; /data/local/tmp/ispregs --node=/dev/nvhost-vi --end=0x1000 2>&1 | grep "^+" | tr "\n" " "; echo' 2>&1 | tr -d '\r'
+}
+
+# Is the ISP-B channel taking work? The tool reads the sequencing counter
+# against what the kernel has promised on it (a job still owed is a stuck
+# channel) and then submits one job that only raises the counter. This is
+# the check that was missing: a run on 2026-09-06 went onto a channel that
+# never retired a job, and its output was still scored as a result.
+ping_isp() {
+    local out
+    out=$(adb shell "cd $DEV_DIR && ./viisp --ping; echo PING_EXIT=\$?" 2>/dev/null | tr -d '\r')
+    echo "$out" | grep -E "^syncpoints|^ISP ping|^ISP VERDICT|^ISP alive|^PING_EXIT"
+    echo "--- isp ping ($1) ---" >> "$RUNLOG"
+    echo "$out" >> "$RUNLOG"
+    echo "$out" | grep -q "PING_EXIT=0"
+}
+
 before=$(channel_errors)
 before=${before:-0}
 
@@ -119,7 +153,7 @@ if [ "$before" -gt 0 ]; then
         exit 1
     fi
 else
-    echo "camera path is clean -- no reboot needed"
+    echo "camera path is clean in the log -- no reboot needed"
 fi
 
 if [ "$DEPLOY" = 1 ]; then
@@ -133,6 +167,22 @@ if [ "$DEPLOY" = 1 ]; then
     done
 fi
 
+echo "=== ISP before the run ==="
+if ! ping_isp before; then
+    if [ "$uptime_s" -lt 120 ]; then
+        echo "ISP is DEAD but the device booted ${uptime_s}s ago -- not rebooting from under anyone; stopping"
+        exit 1
+    fi
+    echo "ISP is DEAD before the run -- REBOOTING NOW"
+    adb reboot
+    wait_ready || exit 1
+    before=$(channel_errors); before=${before:-0}
+    if ! ping_isp before-after-reboot; then
+        echo "still dead after a reboot -- stopping"
+        exit 1
+    fi
+fi
+
 adb shell "rm -f /data/local/tmp/viisp_out.raw /data/local/tmp/vicap.raw"
 
 faults_before=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
@@ -140,27 +190,12 @@ faults_before=${faults_before:-0}
 
 echo "=== run: $BIN ${ARGS[*]:-（defaults）} ==="
 # The whole output is kept: a filtered view on the terminal has already
-# hidden the one line that mattered once. And every run is archived with
-# its own fingerprint of the device -- a clean run and a garbage run on
-# the same code have to be diffable after the fact, which they were not.
-mkdir -p "$ROOT/build/runs"
-STAMP=$(date +%Y%m%d-%H%M%S)
-RUNLOG="$ROOT/build/runs/$STAMP.log"
-fingerprint() {
-    echo "--- fingerprint ($1) ---"
-    adb shell 'echo "uptime $(cut -d" " -f1 /proc/uptime) emc_rate $(cat /sys/kernel/tegra_emc/emc_rate) gov $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)";
-      sh /data/local/tmp/carsample.sh 2>&1;
-      echo "PMC IO_DPD_REQ/STATUS DPD2_REQ/STATUS PWRGATE_STATUS:";
-      for a in 0x7000E5B8 0x7000E5BC 0x7000E5C0 0x7000E5C4 0x7000E438; do /data/local/tmp/memprobe --addr=$a --count=1 2>&1 | grep "+0x" | tr -d "\n"; echo -n " "; done; echo;
-      echo "MIPI_CAL 0x700E3000+0x00..0x3c:"; /data/local/tmp/memprobe --addr=0x700E3000 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
-      echo "MIPI_CAL 0x700E3040..0x7c:"; /data/local/tmp/memprobe --addr=0x700E3040 --count=16 2>&1 | grep "+0x" | tr "\n" " "; echo;
-      echo "VI registers (non-zero):"; /data/local/tmp/ispregs --node=/dev/nvhost-vi --end=0x1000 2>&1 | grep "^+" | tr "\n" " "; echo' 2>&1 | tr -d '\r'
-}
-{
-    echo "=== $STAMP: $BIN ${ARGS[*]:-} ==="
-    fingerprint before
-} > "$RUNLOG"
-adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log" | tee -a "$RUNLOG"
+# hidden the one line that mattered once. The exit status rides in the
+# output because this device's adb does not carry it.
+fingerprint before >> "$RUNLOG"
+adb shell "cd $DEV_DIR && $PRE ./$BIN ${ARGS[*]:-}; echo TOOL_EXIT=\$?" 2>&1 | tr -d '\r' | tee "$ROOT/build/last-run.log" | tee -a "$RUNLOG"
+tool_exit=$(grep -oE "^TOOL_EXIT=[0-9]+" "$ROOT/build/last-run.log" | tail -1 | cut -d= -f2)
+tool_exit=${tool_exit:-1}
 fingerprint after >> "$RUNLOG"
 adb shell 'dmesg | tail -40' 2>/dev/null | tr -d '\r' | sed 's/^/dmesg: /' >> "$RUNLOG"
 echo "run log: $RUNLOG"
@@ -168,15 +203,44 @@ echo "run log: $RUNLOG"
 # The part that matters and that keeps getting skipped.
 echo
 echo "=== camera path after the run ==="
-sleep 6
-after=$(channel_errors); after=${after:-0}
+grep -E "^ISP VERDICT|^ISP NOTE|^ISP alive" "$ROOT/build/last-run.log"
+echo "tool exit: $tool_exit"
+
+# A job still owed surfaces as a channel timeout only when the job's own
+# timeout runs out -- ten seconds for a single capture, three in a stream.
+# Looking six seconds after the run and saying "survived" is how three
+# dead runs were scored as results (2026-09-06). Wait for the timeout's
+# window, longer when the tool itself said the channel was dead.
+deadline=8
+[ "$tool_exit" != 0 ] && deadline=25
+waited=0
+after=$before
+while [ "$waited" -lt "$deadline" ]; do
+    sleep 2
+    waited=$((waited + 2))
+    after=$(channel_errors); after=${after:-0}
+    [ "$after" -gt "$before" ] && break
+done
+{
+    echo "--- after the run: channel errors $before -> $after in ${waited}s, tool exit $tool_exit ---"
+} >> "$RUNLOG"
 if [ "$after" -gt "$before" ]; then
-    echo "verdict: CHANNEL DIED -- the result is not evidence"
-    adb shell "dmesg | grep -E '$ERRPAT' | tail -5" 2>/dev/null | tr -d '\r'
+    echo "verdict: CHANNEL DIED (the timeout landed ${waited}s after the run) -- the result is not evidence"
+    adb shell "dmesg | grep -E '$ERRPAT' | tail -5" 2>/dev/null | tr -d '\r' | tee -a "$RUNLOG"
+    status=1
+elif [ "$tool_exit" != 0 ]; then
+    echo "verdict: the tool reported the ISP dead (exit $tool_exit); no timeout in the log yet after ${waited}s -- NOT evidence; reboot before the next run"
     status=1
 else
-    echo "verdict: channel survived"
-    status=0
+    echo "verdict: no channel timeout in ${waited}s"
+    echo "--- ISP after the run ---"
+    if ping_isp after; then
+        echo "verdict: ISP ALIVE after the run"
+        status=0
+    else
+        echo "verdict: ISP DEAD after the run -- the result is not evidence"
+        status=1
+    fi
 fi
 
 faults_after=$(adb shell "dmesg | grep -cE '$FAULTPAT'" 2>/dev/null | tr -d '\r')
@@ -185,7 +249,7 @@ if [ "$faults_after" -gt "${faults_before:-0}" ]; then
     echo "verdict: MEMORY CONTROLLER FAULTED -- the hardware wrote where it"
     echo "could not reach, so the surface is wrong even if the frame looks"
     echo "plausible:"
-    adb shell "dmesg | grep -E '$FAULTPAT' | tail -6" 2>/dev/null | tr -d '\r'
+    adb shell "dmesg | grep -E '$FAULTPAT' | tail -6" 2>/dev/null | tr -d '\r' | tee -a "$RUNLOG"
     status=1
 fi
 

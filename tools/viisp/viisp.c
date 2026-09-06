@@ -2139,8 +2139,12 @@ int main(int argc, char **argv)
      * It also corrects a wrong reading: the frame-start syncpoint counts
      * our own shots, not arriving frames -- it advances by the same amount
      * with no sensor at all. */
+    /* The kernel's vi2 path releases the CSIB pad (IO_DPD_REQ bit 1) for
+     * this port before every stream; the DPD2 bit 12 this tool had been
+     * releasing never cleared its status. Both are requested, the status
+     * is read back for each. */
+    pmc_dpd_release_reg(PMC_IO_DPD_REQ, PMC_DPD_BIT_CSIB);
     pmc_dpd_release(PMC_DPD_BIT_CSIE);
-    if (kernel_csi) pmc_dpd_release_reg(PMC_IO_DPD_REQ, PMC_DPD_BIT_CSIB);   /* the kernel's pad for this port */
     if (emc_pin) emc_pin_high();
     car_enable_csi_clocks();
 

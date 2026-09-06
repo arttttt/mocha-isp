@@ -268,12 +268,18 @@ int pmc_dpd_release_reg(unsigned long req_off, uint32_t bit)
         return -1;
     }
     volatile uint32_t *r = (volatile uint32_t *)((char *)m + (addr - base));
-    uint32_t before = *r;
+    volatile uint32_t *st = r + 1;               /* the STATUS register follows REQ */
+    uint32_t before = *st;
     *r = PMC_DPD_CODE_OFF | bit;
     __sync_synchronize();
-    uint32_t after = *r;
-    printf("  CSI pads out of deep power down: 0x%08x -> 0x%08x\n",
-           before, after);
+    usleep(10);
+    uint32_t after = *st;
+    /* The kernel's tegra_io_dpd_disable reads the STATUS back and calls a
+     * set bit a failure; the request register only echoes what was
+     * written, which is what this used to print. */
+    printf("  CSI pad deep power down (req 0x%03lx bit %u): status 0x%08x -> 0x%08x%s\n",
+           req_off, __builtin_ctz(bit), before, after,
+           (after & bit) ? " -- STILL IN DPD" : " (released)");
     munmap(m, (size_t)page * 2);
     close(fd);
     return 0;

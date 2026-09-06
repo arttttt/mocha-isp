@@ -1168,7 +1168,7 @@ static uint32_t isp_seq_base = 0;
  * stock writes these zeros before its sensor streams; we write them with
  * the wire already live, which is not the same experiment. */
 static int ping_only = 0, syncpts_only = 0, stock_zero = 0;
-static int stock_opening = 0, declare_conds = 1;
+static int stock_opening = 0, declare_conds = 1, stock_frame = 0;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -1319,6 +1319,54 @@ static int stock_open_submit(int isp_fd, uint32_t sp, uint32_t sp_mem, unsigned 
     return rc;
 }
 
+/* --stock-frame: the stock's steady-state cycle at 720p is a 25-word
+ * [cal] round -- the 0x930 window block and 0x053 = {1, 0} -- followed a
+ * couple of milliseconds later by a 45-word frame gather that carries
+ * only geometry, planes, the processing block, the three arms and the
+ * trigger (impl-2, stock-steady-cycle-720p.md §1, §8). This is the cal
+ * round, verbatim; the frame gather is isp_frame with everything else
+ * left out. */
+static int isp_cal_round(int isp_fd, uint32_t sp)
+{
+    static const uint32_t cal[25] = {
+        0x00000d00, 0x19300012, 0x0000001d,
+        0x88888888, 0x78787800, 0x00000078, 0x88888888, 0x78787800, 0x00000078,
+        0x88888888, 0x78787800, 0x00000078, 0x88888888, 0x78787800, 0x00000078,
+        0x3fc00000, 0x00000000, 0x00070000, 0x00000000, 0x00070000,
+        0x00000d00, 0x00000d00, 0x10530002, 0x00000001, 0x00000000,
+    };
+    uint32_t cmd_h = nvmap_create(4096);
+    if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
+    uint32_t g[28];
+    memcpy(g, cal, sizeof cal);
+    unsigned n = 25;
+    g[n++] = OP_IMM(0, sp);
+    nvmap_rw(cmd_h, 0, g, n * 4, 1);
+    gather_log("cal-round", g, n);
+    struct nvhost_cmdbuf cb = { cmd_h, 0, n };
+    struct nvhost_syncpt_incr si = { sp, 1 };
+    uint32_t cls = ISP_CLASS_B;
+    struct nvhost_fence fence = { 0, 0 };
+    struct nvhost32_submit_args sa;
+    memset(&sa, 0, sizeof sa);
+    sa.num_syncpt_incrs = 1;
+    sa.num_cmdbufs = 1;
+    sa.timeout = 3000;
+    sa.syncpt_incrs = (uint32_t)(uintptr_t)&si;
+    sa.cmdbufs = (uint32_t)(uintptr_t)&cb;
+    sa.class_ids = (uint32_t)(uintptr_t)&cls;
+    sa.fences = (uint32_t)(uintptr_t)&fence;
+    uint32_t was = syncpt_read(sp);
+    errno = 0;
+    int rc = ioctl(isp_fd, NVHOST32_IOCTL_CHANNEL_SUBMIT, &sa);
+    int w = 0;
+    if (rc == 0) while (syncpt_read(sp) == was && w < 500) { usleep(1000); w++; }
+    printf("stock cal round: %u words, rc=%d (%s)%s\n", n, rc, rc == 0 ? "ok" : strerror(errno),
+           syncpt_read(sp) != was ? " retired" : " NOT RETIRED");
+    ioctl(nvmap_fd, NVMAP_IOC_FREE, (unsigned long)cmd_h);
+    return rc;
+}
+
 int isp_stop(int isp_fd, uint32_t sp)
 {
     uint32_t cmd_h = nvmap_create(4096);
@@ -1410,7 +1458,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * itself, in every one of its cycles. We had been sending it once at
      * init, so the block ran the whole session on whatever the clearing
      * pass had left. */
-    if (per_frame_cal) {
+    /* --stock-frame: none of the calibration, no 0x053 and no statistics
+     * pointer ride with the frame -- the stock's 45-word preview gather
+     * has geometry, planes, processing, arms and trigger, nothing else;
+     * the cal round before the frame carries 0x053, and the statistics
+     * base set in the opening persists. */
+    if (per_frame_cal && !stock_frame) {
         memcpy(&g[n], isp_b_cal_data, cal_words * 4);
         cal_fit_width(&g[n], cal_words);
         n += cal_words;
@@ -1426,8 +1479,10 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
      * at 31%, and with zero the frame completes and the channel lives.
      * 720p is indifferent. Zero it is, until the register's meaning is
      * known; --work-word=HEX puts something else there for experiments. */
-    g[n++] = OP_INCR(0x053, 2);
-    g[n++] = 0x00000001; g[n++] = work_word_iova ? work_iova : work_word(0);
+    if (!stock_frame) {
+        g[n++] = OP_INCR(0x053, 2);
+        g[n++] = 0x00000001; g[n++] = work_word_iova ? work_iova : work_word(0);
+    }
 
     g[n++] = OP_INCR(0xE00, 1); g[n++] = ((W - 1) & 0x3FFF) << 16;
     g[n++] = OP_INCR(0xE01, 1); g[n++] = ((H - 1) & 0x3FFF) << 16;
@@ -1450,9 +1505,12 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     g[n++] = (H << 16) | W;
 
 
-    g[n++] = OP_SETCLASS(ISP_CLASS_B);
-    g[n++] = OP_INCR(0x100, 4);
-    stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    stats_word = -1;
+    if (!stock_frame) {
+        g[n++] = OP_SETCLASS(ISP_CLASS_B);
+        g[n++] = OP_INCR(0x100, 4);
+        stats_word = n; g[n++] = 0; g[n++] = 0; g[n++] = 0; g[n++] = 0;
+    }
 
     /* Only the conditions that have a counter behind them. Arming one
      * against an id this channel does not own leaves the job waiting on
@@ -1533,7 +1591,7 @@ int isp_frame(int isp_fd, uint32_t out_h, uint32_t stats_h,
     memset(&sa, 0, sizeof sa);
     sa.num_syncpt_incrs = 1;
     sa.num_cmdbufs = 1;
-    sa.num_relocs = 4;
+    sa.num_relocs = stats_word >= 0 ? 4 : 3;   /* --stock-frame carries no statistics pointer */
     /* The single capture job is parked on a counter that moves only when
      * the whole capture is done, so it outlives the default three seconds;
      * a stream job parks on the next frame, at most two periods away, and
@@ -1857,6 +1915,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--stock-stats-addr") == 0) stock_stats_addr = 1;
         else if (strcmp(a, "--cal-2592") == 0) cal_2592 = 1;
         else if (strcmp(a, "--stock-opening") == 0) stock_opening = 1;
+        else if (strcmp(a, "--stock-frame") == 0) stock_frame = 1;
         else if (strcmp(a, "--no-declare-conds") == 0) declare_conds = 0;
         else if (strncmp(a, "--stock-zero=", 13) == 0) stock_zero = (int)strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--ping") == 0) ping_only = 1;
@@ -2987,6 +3046,7 @@ int main(int argc, char **argv)
             }
             else if (isp_fd >= 0 && out_iova && stats_h) {
                 isp_base_mem = syncpt_read(sp_mem);
+                if (stock_frame) isp_cal_round(isp_fd, isp_sp);
                 isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
                           sp_mem, sp_stats, sp_loadv, isp_sp, 0, 0, 0, 0,
                           work_iova, per_frame_cal);

@@ -784,7 +784,7 @@ int isp_demosaic(int isp_fd, uint32_t sp, uint32_t out_h,
  * These carry the stock camera's geometry, so they belong with its
  * resolution and not with a smaller one.
  */
-int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
+int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova, uint32_t stats_iova)
 {
     uint32_t cmd_h = nvmap_create(4096 * 2);
     if (!cmd_h || nvmap_alloc(cmd_h)) return -1;
@@ -806,6 +806,18 @@ int isp_real_pass(int isp_fd, uint32_t sp, uint32_t work_iova)
                                : OP_INCR(blk[b].m, blk[b].n);
         unsigned first = n;
         for (unsigned i = 0; i < blk[b].n; i++) g[n++] = blk[b].d[i];
+
+        /* The first word of 0x800 and 0x820 is a buffer address: the
+         * stock's is 0x85001000, an address in ITS mapping. Ours sit at
+         * 0x81xxxxxx (inside what /proc/iomem calls kernel data, so these
+         * are SMMU addresses, not physical ones) and 0x85001000 maps to
+         * nothing in our context. Sent literally since 2026-09-02; no
+         * memory-controller fault ever followed, so nothing has used it
+         * -- but a foreign address in our gather is not the stock's
+         * configuration either. Words 2 and 3 stay the stock's.
+         * --stock-stats-addr sends the literal, for the comparison. */
+        if ((blk[b].m == 0x800 || blk[b].m == 0x820) && stats_iova && !stock_stats_addr)
+            g[first] = stats_iova;
 
         /* White balance. In 0x700 the stock camera moves exactly two words
          * from frame to frame, 5 and 11, with 7 and 10 fixed: per-channel
@@ -1109,7 +1121,7 @@ static uint32_t isp_seq_base = 0;
  * never written), while either half alone changed nothing visible. The
  * stock writes these zeros before its sensor streams; we write them with
  * the wire already live, which is not the same experiment. */
-static int ping_only = 0, syncpts_only = 0, stock_zero = 0;
+static int ping_only = 0, syncpts_only = 0, stock_zero = 0, stock_stats_addr = 0;
 
 /* One job that does nothing but raise the sequencing counter. If the
  * channel retires it, the ISP-B path -- host1x, the channel, the class --
@@ -1701,6 +1713,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--no-x930") == 0) no_x930 = 1;
         else if (strcmp(a, "--release-csib") == 0) release_csib = 1;
         else if (strcmp(a, "--no-stock-zero") == 0) stock_zero = 0;
+        else if (strcmp(a, "--stock-stats-addr") == 0) stock_stats_addr = 1;
         else if (strncmp(a, "--stock-zero=", 13) == 0) stock_zero = (int)strtoul(a + 13, 0, 0);
         else if (strcmp(a, "--ping") == 0) ping_only = 1;
         else if (strcmp(a, "--syncpts") == 0) syncpts_only = 1;
@@ -1774,7 +1787,8 @@ int main(int argc, char **argv)
     uint32_t wc = W * 10 / 8;                /* core.c: width * bpp / 8 */
 
     if (syncpts_only) { syncpt_table(); return 0; }
-    printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
+    if (ping_only) printf("=== viisp --ping: is the ISP-B channel taking work? (no sensor, no VI) ===\n");
+    else printf("=== viisp: ov5693 %ux%u, CSI port B ===\n", W, H);
     printf("stride %u, frame %u bytes, word count %u\n", stride, frame, wc);
 
     nvmap_fd = open("/dev/nvmap", O_RDWR | O_SYNC);
@@ -2930,7 +2944,7 @@ int main(int argc, char **argv)
                      * coefficients, once, and never in the opening round. */
                     if (ccm) isp_colour(isp_fd, isp_sp, work_iova, W, OH);
                     if (use_real_pass && !real_sent) {
-                        isp_real_pass(isp_fd, isp_sp, work_iova);
+                        isp_real_pass(isp_fd, isp_sp, work_iova, stats_iova);
                         real_sent = 1;
                     }
                 }

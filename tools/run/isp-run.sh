@@ -135,30 +135,17 @@ fingerprint() {
 before=$(channel_errors)
 before=${before:-0}
 
-# Never reboot a device that has only just come up. Whatever is in the log
-# then is either from before it was flashed or from a run that died while
-# it was being flashed, and rebooting on the strength of that means
-# rebooting out from under whoever just did it by hand.
-uptime_s=$(adb shell "cut -d. -f1 /proc/uptime" 2>/dev/null | tr -d '\r')
-uptime_s=${uptime_s:-9999}
-if [ "$before" -gt 0 ] && [ "$uptime_s" -lt 120 ]; then
-    echo "log has $before error lines but the device booted ${uptime_s}s ago"
-    echo "-- treating them as stale and NOT rebooting"
-    before=0
-fi
-
+# Old channel timeouts in the log are no reason to reboot any more. Since the
+# mc-flush fix in the kernel (Smoke-kernel-mocha a6907bef) a job that dies at
+# its timeout takes its channel through the kernel's own recovery and the
+# channel comes back -- verified 2026-09-07 03:4x: a run whose stream the
+# receiver could not parse killed the ISP channel, the next ping retired --
+# and the tool checks the channel itself before its first submit ("ISP alive
+# BEFORE THE RUN", exit 3 when dead). The count is kept only to tell this
+# run's timeouts from earlier ones afterwards. Rebooting here threw away a
+# working device and a session of state.
 if [ "$before" -gt 0 ]; then
-    echo "camera path is wedged ($before error lines) -- REBOOTING NOW"
-    adb shell 'dmesg | grep -E "'"$ERRPAT"'" | tail -3' 2>/dev/null | tr -d '\r'
-    adb reboot
-    wait_ready || exit 1
-    before=$(channel_errors); before=${before:-0}
-    if [ "$before" -gt 0 ]; then
-        echo "still wedged after a reboot -- stopping"
-        exit 1
-    fi
-else
-    echo "camera path is clean in the log -- no reboot needed"
+    echo "log has $before channel-timeout line(s) from earlier runs -- the tool will check the channel itself"
 fi
 
 if [ "$DEPLOY" = 1 ]; then

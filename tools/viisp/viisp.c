@@ -175,6 +175,14 @@ struct isp_emc_info {
  * two registers that only exist as relative offsets resolve from there. */
 #define T124_CSI_CLKEN_OVERRIDE              (0x838 + 0x218)
 #define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
+/* The three event counters behind it (registers.h: "other CSI registers
+ * start from 0xa44, offset 0x20c"; vi2.c's T124 block puts the control at
+ * 0xa54 and the counters right after it). They count CSI packet events at
+ * the receiver, whether or not anything is captured, so two readings a
+ * known time apart give the sensor's own frame rate. */
+#define T124_CSI_DEBUG_COUNTER_0             (0x838 + 0x220)
+#define T124_CSI_DEBUG_COUNTER_1             (0x838 + 0x224)
+#define T124_CSI_DEBUG_COUNTER_2             (0x838 + 0x228)
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008
@@ -1879,6 +1887,30 @@ int main(int argc, char **argv)
      * powered and configured when the shot is fired, which is the whole
      * reason for doing this in one call. */
     vi_flush("setup");
+
+    /* The sensor's own frame rate, from the receiver's event counters and
+     * nothing else: no shot, no capture, no counter of ours in the loop.
+     * The frame-end spacing of a chain is the sensor period times the
+     * number of sensor frames each capture spans, and the spacing alone
+     * cannot tell one from two -- 720p read 25 ms where the mode table says
+     * 60 fps, 1080 read 50 ms against "30". Whichever of the three counters
+     * moves at tens a second is the frame event; the one at thousands, the
+     * line event. */
+    {
+        uint32_t c0 = vi_rd(T124_CSI_DEBUG_COUNTER_0);
+        uint32_t c1 = vi_rd(T124_CSI_DEBUG_COUNTER_1);
+        uint32_t c2 = vi_rd(T124_CSI_DEBUG_COUNTER_2);
+        struct timespec ta, tb;
+        clock_gettime(CLOCK_MONOTONIC, &ta);
+        usleep(500000);
+        uint32_t d0 = vi_rd(T124_CSI_DEBUG_COUNTER_0) - c0;
+        uint32_t d1 = vi_rd(T124_CSI_DEBUG_COUNTER_1) - c1;
+        uint32_t d2 = vi_rd(T124_CSI_DEBUG_COUNTER_2) - c2;
+        clock_gettime(CLOCK_MONOTONIC, &tb);
+        double s = (tb.tv_sec - ta.tv_sec) + (tb.tv_nsec - ta.tv_nsec) / 1e9;
+        printf("  CSI debug counters over %.0f ms: %u, %u, %u -> %.1f, %.1f, %.1f per second\n",
+               s * 1000, d0, d1, d2, d0 / s, d1 / s, d2 / s);
+    }
 
 
     /* When the frame goes to the ISP there is no surface for VI to write and

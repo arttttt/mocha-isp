@@ -1314,6 +1314,13 @@ int main(int argc, char **argv)
      * lines. */
     int isp_fd = no_isp ? -1 : open("/dev/nvhost-isp.1", O_RDWR);
     uint32_t out_h = 0, out_iova = 0, isp_sp = 0, work_h = 0, stats_h = 0;
+    /* The chain rotates output buffers, the stock's way (it rotates at
+     * least three), so that every frame of a run survives to be looked at
+     * -- which is also the only way to measure the capture period against
+     * a clock in the picture rather than against the sensor's own counters,
+     * whose ratio cannot tell every frame from every second one. */
+    uint32_t out_hs[8] = { 0 };
+    unsigned nbuf = 1;
     uint32_t work_iova = 0, stats_iova = 0;
     uint32_t sp_mem = 0, sp_stats = 0, sp_loadv = 0;
     uint32_t isp_base_mem = 0, isp_base_stats = 0, isp_base_loadv = 0;
@@ -1534,6 +1541,15 @@ int main(int argc, char **argv)
         if (out_h) {
             if (nvmap_alloc(out_h) == 0) out_iova = nvmap_pin(out_h);
         }
+        out_hs[0] = out_h;
+        /* One buffer per frame of the chain, up to eight; a buffer that
+         * cannot be had stops the set where it is and the rest rotate. */
+        while (out_iova && nbuf < 8 && (int)nbuf < shots) {
+            uint32_t h = nvmap_create(out_bytes);
+            if (!h || nvmap_alloc(h) != 0 || !nvmap_pin(h)) break;
+            out_hs[nbuf++] = h;
+        }
+        if (nbuf > 1) printf("output buffers: %u of %u bytes, rotating per frame\n", nbuf, out_bytes);
         printf("ISP-B channel fd=%d, syncpoints %u/%u/%u/%u, output %u bytes"
                " at 0x%08x (U at +0x%x, V at +0x%x)\n", isp_fd, isp_sp,
                sp_mem, sp_stats, sp_loadv, out_bytes, out_iova, u_off, v_off);
@@ -1552,10 +1568,11 @@ int main(int argc, char **argv)
             uint32_t chunk = 65536;
             void *p = malloc(chunk);
             memset(p, 0x5A, chunk);
-            for (uint32_t o = 0; o < out_bytes; o += chunk) {
-                uint32_t len = out_bytes - o < chunk ? out_bytes - o : chunk;
-                nvmap_rw(out_h, o, p, len, 1);
-            }
+            for (unsigned b = 0; b < nbuf; b++)
+                for (uint32_t o = 0; o < out_bytes; o += chunk) {
+                    uint32_t len = out_bytes - o < chunk ? out_bytes - o : chunk;
+                    nvmap_rw(out_hs[b], o, p, len, 1);
+                }
             free(p);
         }
     }
@@ -2120,7 +2137,7 @@ int main(int argc, char **argv)
                     (int)((ts.tv_sec - (t0).tv_sec) * 1000 + (ts.tv_nsec - (t0).tv_nsec) / 1000000); })
                 for (int k = 0; k < shots; k++) {
                     isp_cal_round(isp_fd, isp_sp);
-                    isp_frame(isp_fd, out_h, stats_h, W, OH, isp_fmt, u_off, v_off,
+                    isp_frame(isp_fd, out_hs[k % nbuf], stats_h, W, OH, isp_fmt, u_off, v_off,
                               sp_mem, sp_stats, sp_loadv, isp_sp);
                     /* The frame job's increment is the last thing promised on
                      * the stream counter so far; its statistics fence is the
@@ -2133,6 +2150,9 @@ int main(int argc, char **argv)
                 }
                 printf("chain: %d frame(s) queued in %d ms -- cal + frame + tick on the ISP,"
                        " shot waiting on 38 on the VI, per frame\n", shots, MS_SINCE(ts0));
+                /* The last frame's buffer is the one the run's summary and
+                 * viisp_out.raw report on. */
+                out_h = out_hs[(shots - 1) % nbuf];
 
                 /* Watch the frame ends arrive, timed from the first submit.
                  * Each one is the previous shot's frame passing the parser;
@@ -2516,6 +2536,24 @@ int main(int argc, char **argv)
                 printf("saved /data/local/tmp/viisp_out.raw (%u bytes)\n",
                        out_bytes);
             }
+            /* Every rotated buffer, in frame order: frame k of the chain
+             * went to buffer k mod nbuf, so with the chain no longer than
+             * the set these are frames 0..nbuf-1. */
+            for (unsigned b = 0; nbuf > 1 && b < nbuf; b++) {
+                char name[64];
+                snprintf(name, sizeof name, "/data/local/tmp/viisp_out_%u.raw", b);
+                FILE *fb = fopen(name, "wb");
+                if (!fb) continue;
+                uint8_t *q = malloc(chunk);
+                for (uint32_t o = 0; o < out_bytes; o += chunk) {
+                    uint32_t part = out_bytes - o < chunk ? out_bytes - o : chunk;
+                    nvmap_rw(out_hs[b], o, q, part, 0);
+                    fwrite(q, 1, part, fb);
+                }
+                free(q);
+                fclose(fb);
+            }
+            if (nbuf > 1) printf("saved /data/local/tmp/viisp_out_0..%u.raw\n", nbuf - 1);
         }
     }
 

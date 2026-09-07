@@ -173,16 +173,16 @@ struct isp_emc_info {
 /* The CSI block sits at 0x838 in the VI aperture: 0x838+0xF4 is CILA and
  * 0x838+0xD0 is the PHY command, both matching the absolute table, so the
  * two registers that only exist as relative offsets resolve from there. */
-#define T124_CSI_CLKEN_OVERRIDE              (0x838 + 0x218)
-#define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
-/* The three event counters behind it (registers.h: "other CSI registers
- * start from 0xa44, offset 0x20c"; vi2.c's T124 block puts the control at
- * 0xa54 and the counters right after it). They count CSI packet events at
+#define T124_CSI_CLKEN_OVERRIDE              0xAF4
+#define T124_CSI_DEBUG_CONTROL               0xAF8
+/* The three event counters behind it, at the addresses the 24.1 soc_camera
+ * driver uses for T12x (vi2.c: control 0xaf8, counters 0xafc..0xb04; the
+ * "0x838 + offset" map and t124_registers.h's 0xae4 both read as zero). They count CSI packet events at
  * the receiver, whether or not anything is captured, so two readings a
  * known time apart give the sensor's own frame rate. */
-#define T124_CSI_DEBUG_COUNTER_0             (0x838 + 0x220)
-#define T124_CSI_DEBUG_COUNTER_1             (0x838 + 0x224)
-#define T124_CSI_DEBUG_COUNTER_2             (0x838 + 0x228)
+#define T124_CSI_DEBUG_COUNTER_0             0xAFC
+#define T124_CSI_DEBUG_COUNTER_1             0xB00
+#define T124_CSI_DEBUG_COUNTER_2             0xB04
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008

@@ -297,8 +297,8 @@ struct nvhost32_submit_args {
 #define PG_ENABLE                            0x1
 #define T124_PHY_CILB_CONTROL0               0x968
 /* The CSI block sits at 0x838 in the VI aperture. */
-#define T124_CSI_CLKEN_OVERRIDE              (0x838 + 0x218)
-#define T124_CSI_DEBUG_CONTROL               (0x838 + 0x21C)
+#define T124_CSI_CLKEN_OVERRIDE              0xAF4
+#define T124_CSI_DEBUG_CONTROL               0xAF8
 
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT     0x000
 #define TEGRA_VI_CFG_VI_INCR_SYNCPT_ERROR 0x008

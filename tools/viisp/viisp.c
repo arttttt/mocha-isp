@@ -1080,13 +1080,18 @@ int main(int argc, char **argv)
      * brings the camera back -- so the cost of asking for more is paid by
      * hand, every time. Two is the ceiling; anything larger is clamped. */
     int shots = 1;
-    /* The ISP clock as the stock asks for it: SET_CLK_RATE moduleid 0xb
-     * on isp.1 at 81.6 MHz (stock_front_camera_open_full.txt:9220; 0xb
-     * matches no clock entry, so the kernel takes clock 0, "isp"). We had
-     * asked for 384 MHz and were granted 600: seven times the stock's
-     * write burst rate against a latency allowance computed for 81.6 MHz,
-     * and at 1080/2592 the output write fell behind the frame. */
-    const uint32_t isp_clk = 81600000;
+    /* The ISP clock. The stock asks for 81.6 MHz with moduleid 0xb, which
+     * matches no clock entry and so lands on clock 0, "isp" -- it pins its
+     * ISP to 81.6 MHz, and at that rate a 5-megapixel frame takes over 60
+     * ms: the stock's own 2592 cadence is 64-67 ms, never two frames 33 ms
+     * apart (impl-2, stock-2592-cadence-and-status-bits.md), and ours with
+     * the same request took every second frame at the sensor's 30 fps. We
+     * ask for the maximum instead (the clock's ceiling is 700 MHz; the
+     * kernel rounds the request down to it) and size the latency allowance
+     * below from what was granted. The earlier trouble with a fast ISP --
+     * "the output write fell behind" at 1080/2592 -- was the mid-frame
+     * shots of that time, not the clock. */
+    const uint32_t isp_clk = 0xFFFFFFFFu;
     /* The ISP output: one packed RGB plane by default, no colour config,
      * the enable the reprocess tool settled on, and the sensor trigger. All
      * four are worth varying, since none of them has been exercised on a
@@ -1418,26 +1423,29 @@ int main(int argc, char **argv)
         /* The rate actually granted. GET_CLK_RATE exists in this kernel in
          * its read-only form (0x80084809, which is what the stock issues);
          * the read-write form we used to send was "unrecognized". */
-        {
-            struct nvhost_clk_rate_args gr = { 0, 0 };
-            errno = 0;
-            int grc = ioctl(isp_fd, _IOR('H', 9, struct nvhost_clk_rate_args), &gr);
-            printf("ISP clock granted: %u Hz (rc=%d%s%s)\n", gr.rate, grc,
-                   grc ? " " : "", grc ? strerror(errno) : "");
-        }
+        struct nvhost_clk_rate_args gr = { 0, 0 };
+        errno = 0;
+        int grc = ioctl(isp_fd, _IOR('H', 9, struct nvhost_clk_rate_args), &gr);
+        printf("ISP clock granted: %u Hz (rc=%d%s%s)\n", gr.rate, grc,
+               grc ? " " : "", grc ? strerror(errno) : "");
         /* The ISP write client's latency allowance, as the stock sets it
          * at every opening. Without it, on a fresh boot, the ISP never
          * finished even an 8x8 warm-up; after one run of the stock camera
-         * -- whose setting outlives everything but a reboot -- it did. */
+         * -- whose setting outlives everything but a reboot -- it did. The
+         * kernel turns clk x bpp into the bandwidth it reserves, so the
+         * clock here is the one actually granted, not the stock's 81.6 MHz
+         * figure: an allowance sized for a slow ISP under a fast one is what
+         * lets the write fall behind. */
         /* Not on the channel: the channel's ioctl handler refuses every
          * magic but its own with EFAULT. The ISP driver's ioctls live on
          * its control node, /dev/nvhost-ctrl-isp.1 for ISP-B. */
-        struct isp_emc_info ei = { 0, isp_emc_clk, 0, 16 };
+        uint32_t la_khz = (grc == 0 && gr.rate) ? gr.rate / 1000 : isp_emc_clk;
+        struct isp_emc_info ei = { 0, la_khz, 0, 16 };
         int lfd = open("/dev/nvhost-ctrl-isp.1", O_RDWR);
         errno = 0;
         int lrc = lfd < 0 ? -1 : ioctl(lfd, NVHOST_ISP_IOCTL_SET_EMC, &ei);
         printf("ISP latency allowance (clk %u kHz, 16 bpp out, %u MB/s HARD) -> rc=%d%s%s\n",
-               isp_emc_clk, isp_emc_clk / 1000 * 16 / 8, lrc,
+               la_khz, la_khz / 1000 * 16 / 8, lrc,
                lrc ? " " : "", lrc ? strerror(errno) : "");
         if (lfd >= 0) close(lfd);
 

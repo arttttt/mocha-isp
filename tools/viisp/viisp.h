@@ -95,6 +95,7 @@ struct ov5693_mode {
     uint8_t hdr_en;
 };
 #define OV5693_IOCTL_SET_MODE   _IOW('o', 1, struct ov5693_mode)
+#define OV5693_IOCTL_SET_FRAME_LENGTH _IOW('o', 2, uint32_t)
 
 /* ---- nvmap ---- */
 #define NVMAP_IOC_MAGIC 'N'

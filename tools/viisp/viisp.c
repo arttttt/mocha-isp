@@ -1017,10 +1017,17 @@ static void sensor_start_front(int sfd, unsigned W, unsigned H,
                                uint32_t frame_length, uint32_t coarse_time,
                                uint32_t gain)
 {
-    /* The driver writes the mode table and then writes exposure from these
-     * fields unconditionally -- passing zeros programs the sensor with no
-     * frame length and no integration time, which is a part that streams
-     * nothing. */
+    /* The driver writes the mode table and then the exposure from these
+     * fields -- passing zeros programs the sensor with no integration time,
+     * which is a part that streams nothing. The frame length in the mode
+     * struct, however, it never writes: ov5693_exposure_wr carries coarse
+     * time and gain only, so the sensor kept each table's own VTS (760 at
+     * 720p, 1984 elsewhere) whatever this asked for. Where the period did
+     * change it was the exposure doing it -- a coarse time longer than the
+     * table's VTS makes the sensor stretch the frame to fit it, which is
+     * why 720p ran at 50 ms with coarse 1500 and at 25 ms with coarse 752,
+     * and why 2592 sat at 33 ms for every "frame length" (runs 025908,
+     * 030049, 030806). The frame length goes through its own ioctl. */
     struct ov5693_mode m;
     memset(&m, 0, sizeof m);
     m.res_x = (int)W;
@@ -1033,6 +1040,10 @@ static void sensor_start_front(int sfd, unsigned W, unsigned H,
         printf("sensor mode: %s\n", strerror(errno));
     else
         printf("sensor streaming at %ux%u\n", W, H);
+    if (ioctl(sfd, OV5693_IOCTL_SET_FRAME_LENGTH, (unsigned long)frame_length) < 0)
+        printf("sensor frame length %u: %s\n", frame_length, strerror(errno));
+    else
+        printf("sensor frame length %u lines written\n", frame_length);
 }
 
 int main(int argc, char **argv)
@@ -1439,7 +1450,12 @@ int main(int argc, char **argv)
         /* Not on the channel: the channel's ioctl handler refuses every
          * magic but its own with EFAULT. The ISP driver's ioctls live on
          * its control node, /dev/nvhost-ctrl-isp.1 for ISP-B. */
+        /* Capped: the kernel reserves clk x 16 bpp of memory bandwidth with
+         * the isochronous manager, and 600 MHz -- 1200 MB/s -- is more than
+         * it has to give (ENOMEM, run 030646). 204 MHz reserves 408 MB/s,
+         * above the 227 MB/s a 2592 frame at 30 fps writes. */
         uint32_t la_khz = (grc == 0 && gr.rate) ? gr.rate / 1000 : isp_emc_clk;
+        if (la_khz > 204000) la_khz = 204000;
         struct isp_emc_info ei = { 0, la_khz, 0, 16 };
         int lfd = open("/dev/nvhost-ctrl-isp.1", O_RDWR);
         errno = 0;

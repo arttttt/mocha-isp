@@ -1897,6 +1897,14 @@ int main(int argc, char **argv)
      * moves at tens a second is the frame event; the one at thousands, the
      * line event. */
     {
+        /* The event selection the 24.1 soc_camera driver programs for a
+         * sensor on port B (vi2.c, vi2_capture_setup_cil_t124, the CIL
+         * C/D/E branch): 0x5 | 0x1 << 5 | 0x50 << 8. With the 24.1
+         * t124_registers.h value the tool used to write here, all three
+         * counters stayed at zero (run 033124). The counters clear on a
+         * write of their own value, as the driver does after reading. */
+        vi_wr(T124_CSI_DEBUG_CONTROL, 0x5 | (0x1 << 5) | (0x50 << 8));
+        vi_flush(0);
         uint32_t c0 = vi_rd(T124_CSI_DEBUG_COUNTER_0);
         uint32_t c1 = vi_rd(T124_CSI_DEBUG_COUNTER_1);
         uint32_t c2 = vi_rd(T124_CSI_DEBUG_COUNTER_2);

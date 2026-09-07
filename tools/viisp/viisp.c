@@ -1021,6 +1021,75 @@ static double sensor_out_scale(unsigned W, unsigned H)
     return 1.0;
 }
 
+/* The sensor's registers over its own bus, beside the driver. The driver
+ * exposes no register read, and its mode tables are only what it intends
+ * to write; what the part actually runs with -- PLL, dividers, line and
+ * frame length -- is read here after the mode is set, and --sensor-reg
+ * writes let a timing register be changed for one run to see what the
+ * frame period does. Bus 2, address 0x36: the front camera (the kernel's
+ * "ov5693 2-0036"). The driver only writes at mode changes, so sharing the
+ * address is safe. */
+#define I2C_SLAVE_FORCE 0x0706
+#define I2C_RDWR        0x0707
+struct i2c_msg { uint16_t addr, flags, len; uint8_t *buf; };
+struct i2c_rdwr_ioctl_data { struct i2c_msg *msgs; uint32_t nmsgs; };
+static int sensor_i2c_fd = -1;
+static int sensor_i2c_open(void)
+{
+    if (sensor_i2c_fd >= 0) return 0;
+    sensor_i2c_fd = open("/dev/i2c-2", O_RDWR);
+    if (sensor_i2c_fd < 0) return -1;
+    if (ioctl(sensor_i2c_fd, I2C_SLAVE_FORCE, 0x36) < 0) { close(sensor_i2c_fd); sensor_i2c_fd = -1; return -1; }
+    return 0;
+}
+static int sensor_rd(uint16_t reg, uint8_t *val)
+{
+    if (sensor_i2c_open()) return -1;
+    uint8_t ra[2] = { (uint8_t)(reg >> 8), (uint8_t)reg };
+    struct i2c_msg m[2] = { { 0x36, 0, 2, ra }, { 0x36, 1 /* I2C_M_RD */, 1, val } };
+    struct i2c_rdwr_ioctl_data d = { m, 2 };
+    return ioctl(sensor_i2c_fd, I2C_RDWR, &d) < 0 ? -1 : 0;
+}
+static int sensor_wr(uint16_t reg, uint8_t val)
+{
+    if (sensor_i2c_open()) return -1;
+    uint8_t buf[3] = { (uint8_t)(reg >> 8), (uint8_t)reg, val };
+    struct i2c_msg m = { 0x36, 0, 3, buf };
+    struct i2c_rdwr_ioctl_data d = { &m, 1 };
+    return ioctl(sensor_i2c_fd, I2C_RDWR, &d) < 0 ? -1 : 0;
+}
+/* --sensor-reg=0xADDR:0xVV, up to sixteen, written after the mode with the
+ * stream stopped around them so that clock and timing changes take hold
+ * cleanly. */
+static struct { uint16_t reg; uint8_t val; } sensor_regs[16];
+static unsigned sensor_nregs;
+static void sensor_dump(void)
+{
+    static const struct { uint16_t from, to; const char *what; } blocks[] = {
+        { 0x0100, 0x0100, "stream" },
+        { 0x3011, 0x3015, "PLL1" }, { 0x3018, 0x3018, "MIPI lanes" },
+        { 0x3020, 0x3022, "clk sel" }, { 0x3028, 0x3028, "" },
+        { 0x3034, 0x3037, "PLL ctrl" }, { 0x3090, 0x3093, "PLL2" },
+        { 0x3104, 0x3108, "SCLK div" },
+        { 0x3800, 0x380f, "window, output, HTS, VTS" },
+        { 0x3814, 0x3815, "subsample" }, { 0x3820, 0x3821, "flip/bin" },
+        { 0x3500, 0x3502, "exposure" }, { 0x350a, 0x350b, "gain" },
+        { 0x4837, 0x4837, "MIPI pclk period" }, { 0x5002, 0x5002, "ISP ctrl" },
+    };
+    printf("  sensor registers (I2C bus 2, 0x36):");
+    for (unsigned b = 0; b < sizeof blocks / sizeof blocks[0]; b++) {
+        printf("\n    %04x %-26s", blocks[b].from, blocks[b].what);
+        for (uint16_t r = blocks[b].from; r <= blocks[b].to; r++) {
+            uint8_t v = 0;
+            if (sensor_rd(r, &v)) { printf(" --"); continue; }
+            printf(" %02x", v);
+        }
+    }
+    uint8_t h[4] = { 0 };
+    sensor_rd(0x380c, &h[0]); sensor_rd(0x380d, &h[1]); sensor_rd(0x380e, &h[2]); sensor_rd(0x380f, &h[3]);
+    printf("\n    HTS %u, VTS %u\n", (h[0] << 8) | h[1], (h[2] << 8) | h[3]);
+}
+
 static void sensor_start_front(int sfd, unsigned W, unsigned H,
                                uint32_t frame_length, uint32_t coarse_time,
                                uint32_t gain)
@@ -1052,6 +1121,15 @@ static void sensor_start_front(int sfd, unsigned W, unsigned H,
         printf("sensor frame length %u: %s\n", frame_length, strerror(errno));
     else
         printf("sensor frame length %u lines written\n", frame_length);
+    if (sensor_nregs) {
+        int rc = sensor_wr(0x0100, 0x00);
+        for (unsigned i = 0; i < sensor_nregs; i++)
+            rc |= sensor_wr(sensor_regs[i].reg, sensor_regs[i].val);
+        rc |= sensor_wr(0x0100, 0x01);
+        printf("  %u sensor register(s) written with the stream stopped around them: %s\n",
+               sensor_nregs, rc ? "SOME FAILED" : "ok");
+    }
+    sensor_dump();
 }
 
 int main(int argc, char **argv)
@@ -1144,6 +1222,14 @@ int main(int argc, char **argv)
             wb_r = (uint32_t)strtoul(a + 5, 0, 16);
             const char *comma = strchr(a + 5, ',');
             if (comma) wb_b = (uint32_t)strtoul(comma + 1, 0, 16);
+        }
+        else if (strncmp(a, "--sensor-reg=", 13) == 0) {
+            unsigned r = 0, v = 0;
+            if (sscanf(a + 13, "%i:%i", &r, &v) == 2 && sensor_nregs < 16) {
+                sensor_regs[sensor_nregs].reg = (uint16_t)r;
+                sensor_regs[sensor_nregs].val = (uint8_t)v;
+                sensor_nregs++;
+            } else { printf("bad --sensor-reg (want 0xADDR:0xVV): %s\n", a); return 1; }
         }
         else if (strncmp(a, "--shots=", 8) == 0) {
             shots = atoi(a + 8);
@@ -1888,37 +1974,6 @@ int main(int argc, char **argv)
      * reason for doing this in one call. */
     vi_flush("setup");
 
-    /* The sensor's own frame rate, from the receiver's event counters and
-     * nothing else: no shot, no capture, no counter of ours in the loop.
-     * The frame-end spacing of a chain is the sensor period times the
-     * number of sensor frames each capture spans, and the spacing alone
-     * cannot tell one from two -- 720p read 25 ms where the mode table says
-     * 60 fps, 1080 read 50 ms against "30". Whichever of the three counters
-     * moves at tens a second is the frame event; the one at thousands, the
-     * line event. */
-    {
-        /* The event selection the 24.1 soc_camera driver programs for a
-         * sensor on port B (vi2.c, vi2_capture_setup_cil_t124, the CIL
-         * C/D/E branch): 0x5 | 0x1 << 5 | 0x50 << 8. With the 24.1
-         * t124_registers.h value the tool used to write here, all three
-         * counters stayed at zero (run 033124). The counters clear on a
-         * write of their own value, as the driver does after reading. */
-        vi_wr(T124_CSI_DEBUG_CONTROL, 0x5 | (0x1 << 5) | (0x50 << 8));
-        vi_flush(0);
-        uint32_t c0 = vi_rd(T124_CSI_DEBUG_COUNTER_0);
-        uint32_t c1 = vi_rd(T124_CSI_DEBUG_COUNTER_1);
-        uint32_t c2 = vi_rd(T124_CSI_DEBUG_COUNTER_2);
-        struct timespec ta, tb;
-        clock_gettime(CLOCK_MONOTONIC, &ta);
-        usleep(500000);
-        uint32_t d0 = vi_rd(T124_CSI_DEBUG_COUNTER_0) - c0;
-        uint32_t d1 = vi_rd(T124_CSI_DEBUG_COUNTER_1) - c1;
-        uint32_t d2 = vi_rd(T124_CSI_DEBUG_COUNTER_2) - c2;
-        clock_gettime(CLOCK_MONOTONIC, &tb);
-        double s = (tb.tv_sec - ta.tv_sec) + (tb.tv_nsec - ta.tv_nsec) / 1e9;
-        printf("  CSI debug counters over %.0f ms: %u, %u, %u -> %.1f, %.1f, %.1f per second\n",
-               s * 1000, d0, d1, d2, d0 / s, d1 / s, d2 / s);
-    }
 
 
     /* When the frame goes to the ISP there is no surface for VI to write and
